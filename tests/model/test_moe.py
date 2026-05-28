@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from src.model.moe import Router, Expert, MoELayer
+from model.moe import Router, Expert, MoELayer
 
 
 @pytest.mark.timeout(5)

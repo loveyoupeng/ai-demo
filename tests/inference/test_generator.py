@@ -1,4 +1,4 @@
-from src.inference import AutoregressiveGenerator
+from inference import AutoregressiveGenerator
 
 
 def test_generator_generation_length():
@@ -10,7 +10,7 @@ def test_generator_generation_length():
     embed_dim = 8
     max_seq_len = 20
 
-    from src.model.transformer import Transformer
+    from model.transformer import Transformer
 
     model = Transformer(
         vocab_size=vocab_size,
@@ -21,7 +21,7 @@ def test_generator_generation_length():
         max_seq_len=max_seq_len,
     )
 
-    from src.tokenizer.char_tokenizer import CharTokenizer
+    from tokenizer.char_tokenizer import CharTokenizer
 
     tokenizer = CharTokenizer("abcdefghijklmnopqrstuvwxyz ")
 
@@ -44,7 +44,7 @@ def test_generator_empty_prompt():
     embed_dim = 8
     max_seq_len = 20
 
-    from src.model.transformer import Transformer
+    from model.transformer import Transformer
 
     model = Transformer(
         vocab_size=vocab_size,
@@ -55,7 +55,7 @@ def test_generator_empty_prompt():
         max_seq_len=max_seq_len,
     )
 
-    from src.tokenizer.char_tokenizer import CharTokenizer
+    from tokenizer.char_tokenizer import CharTokenizer
 
     tokenizer = CharTokenizer("abc")
 

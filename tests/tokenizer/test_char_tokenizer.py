@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from src.tokenizer.char_tokenizer import CharTokenizer
+from tokenizer.char_tokenizer import CharTokenizer
 
 
 @pytest.mark.timeout(2)

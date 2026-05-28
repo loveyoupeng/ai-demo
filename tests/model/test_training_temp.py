@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from src.model.layers import FeedForward
+from model.layers import FeedForward
 
 
 def numerical_gradient(f, x, eps=1e-6):

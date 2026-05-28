@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from src.model.transformer import TransformerBlock, Transformer
+from model.transformer import TransformerBlock, Transformer
 
 
 @pytest.mark.timeout(10)
@@ -14,8 +14,8 @@ def test_transformer_block_shape():
     num_heads = 4
     num_experts = 8
 
-    from src.model.attention import MultiHeadAttention
-    from src.model.moe import MoELayer
+    from model.attention import MultiHeadAttention
+    from model.moe import MoELayer
 
     mha = MultiHeadAttention(embed_dim, num_heads)
     moe = MoELayer(embed_dim, num_experts)

@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from src.model.attention import MultiHeadAttention
+from model.attention import MultiHeadAttention
 
 
 @pytest.mark.timeout(10)
@@ -21,7 +21,7 @@ def test_mha_output_shape():
     # Create a causal mask: [Seq_Len, Seq_Len]
     mask = np.tril(np.ones((seq_len, seq_len)))
 
-    output = mha.forward(x, mask=mask)
+    output, _ = mha.forward(x, mask=mask)
 
     # Expected: [Batch, Seq_Len, Embed_Dim]
     assert output.shape == (batch_size, seq_len, embed_dim)
@@ -47,8 +47,8 @@ def test_mha_causal_mask():
 
     mask = np.tril(np.ones((seq_len, seq_len)))
 
-    out1 = mha.forward(x1, mask=mask)
-    out2 = mha.forward(x2, mask=mask)
+    out1, _ = mha.forward(x1, mask=mask)
+    out2, _ = mha.forward(x2, mask=mask)
 
     # The output for the first token (and all except the last) should be identical
     # because they shouldn't be able to "see" the changed last token.

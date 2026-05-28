@@ -1,6 +1,6 @@
 import numpy as np
-from src.model.transformer import Transformer
-from src.tokenizer.char_tokenizer import CharTokenizer
+from model.transformer import Transformer
+from tokenizer.char_tokenizer import CharTokenizer
 
 
 class AutoregressiveGenerator:

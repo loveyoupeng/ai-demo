@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from src.model.layers import TokenEmbedding, PositionalEmbedding, FeedForward, LayerNorm
+from model.layers import TokenEmbedding, PositionalEmbedding, FeedForward, LayerNorm
 
 
 @pytest.mark.timeout(5)

@@ -1,8 +1,8 @@
 import numpy as np
 from typing import Optional
-from src.model.attention import MultiHeadAttention
-from src.model.moe import MoELayer
-from src.model.layers import LayerNorm
+from model.attention import MultiHeadAttention
+from model.moe import MoELayer
+from model.layers import LayerNorm
 
 
 class TransformerBlock(object):
@@ -62,7 +62,7 @@ class Transformer:
         max_seq_len: int = 512,
     ):
 
-        from src.model.layers import TokenEmbedding, PositionalEmbedding
+        from model.layers import TokenEmbedding, PositionalEmbedding
 
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
