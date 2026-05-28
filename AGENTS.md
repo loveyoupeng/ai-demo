@@ -24,3 +24,4 @@ This is a demo repository to learn AI concepts and tooling.
    user before making changes.
 4. Do not make technical or business assumptions.
 5. Follow Python best practices and existing patterns in the repository.
+6. All unit tests must have a reasonable timeout using `pytest-timeout` to prevent hung tests and ensure performance.
