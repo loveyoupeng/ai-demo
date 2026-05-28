@@ -1,5 +1,6 @@
 import numpy as np
-from typing import List, Dict, Tuple
+from typing import Dict
+
 
 class CharTokenizer:
     """
@@ -10,14 +11,14 @@ class CharTokenizer:
     def __init__(self, text: str = ""):
         """
         Initialize the tokenizer with a vocabulary derived from the provided text.
-        
+
         Args:
             text: A string used to build the initial vocabulary.
         """
         # Extract unique characters and sort them for consistency
         self.chars = sorted(list(set(text)))
         self.vocab_size = len(self.chars)
-        
+
         # Mapping: char -> index
         self.char_to_int: Dict[str, int] = {ch: i for i, ch in enumerate(self.chars)}
         # Mapping: index -> char
@@ -26,10 +27,10 @@ class CharTokenizer:
     def encode(self, text: str) -> np.ndarray:
         """
         Convert a string of text into an array of integers.
-        
+
         Args:
             text: The input string.
-            
+
         Returns:
             A numpy array of integers representing the token IDs.
         """
@@ -39,10 +40,10 @@ class CharTokenizer:
     def decode(self, ids: np.ndarray) -> str:
         """
         Convert an array of integers back into a string of text.
-        
+
         Args:
             ids: A numpy array of token IDs.
-            
+
         Returns:
             The decoded string.
         """

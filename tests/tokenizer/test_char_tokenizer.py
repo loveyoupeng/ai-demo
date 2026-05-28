@@ -2,6 +2,7 @@ import pytest
 import numpy as np
 from src.tokenizer.char_tokenizer import CharTokenizer
 
+
 @pytest.mark.timeout(2)
 def test_tokenizer_encoding_decoding():
     """
@@ -9,13 +10,14 @@ def test_tokenizer_encoding_decoding():
     """
     text = "hello world"
     tokenizer = CharTokenizer(text)
-    
+
     encoded = tokenizer.encode(text)
     decoded = tokenizer.decode(encoded)
-    
+
     assert decoded == text
     assert isinstance(encoded, np.ndarray)
     assert encoded.dtype == np.int32
+
 
 @pytest.mark.timeout(2)
 def test_tokenizer_vocab_size():
@@ -24,10 +26,11 @@ def test_tokenizer_vocab_size():
     """
     text = "aaaaabbbbbccccc"
     tokenizer = CharTokenizer(text)
-    
+
     # Unique chars are 'a', 'b', 'c'
     assert tokenizer.vocab_size == 3
     assert len(tokenizer.chars) == 3
+
 
 @pytest.mark.timeout(2)
 def test_tokenizer_unknown_char():
@@ -37,6 +40,7 @@ def test_tokenizer_unknown_char():
     tokenizer = CharTokenizer("abc")
     with pytest.raises(KeyError):
         tokenizer.encode("d")
+
 
 @pytest.mark.timeout(2)
 def test_tokenizer_empty_text():
