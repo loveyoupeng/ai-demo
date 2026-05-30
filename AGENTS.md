@@ -28,12 +28,12 @@ It is well documented and commented in the code to let user to learn the details
 - [x] Fixed integration bugs in `Expert.backward` and `MoELayer` (routing/weight gradients).
 - [x] Finalized `Trainer.train_step` integration and testing.
 - [x] Implemented Training App (data loading and loop driver).
+- [x] Implemented Evaluation Framework (Perplexity, Accuracy).
 
 #### Remaining
 
 - [ ] Finalize `Trainer.train_step` integration and testing.
 - [ ] Implement Training App (data loading and loop driver).
-- [ ] Implement Evaluation Framework (Perplexity, Accuracy).
 - [ ] Profiling and migration to PyTorch/CUDA.
 
 ## Tooling
@@ -61,3 +61,4 @@ It is well documented and commented in the code to let user to learn the details
 6. All unit tests must have a reasonable timeout using `pytest-timeout` to prevent hung tests and ensure performance.
 7. All code need be well documented and comment, especially for code related to math need intuitive explanations, and for matrix calculation should put with comments to indicate the dimension shape of the matrix
 8. All code need to be using strict type hint to indicate the interfaces
+

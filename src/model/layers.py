@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Tuple, Dict
 
+
 class TokenEmbedding:
     """
     Learned token embeddings.
@@ -27,7 +28,9 @@ class TokenEmbedding:
         # Using numpy indexing to retrieve embeddings for each index
         return self.weights[indices]
 
-    def backward(self, grad_output: np.ndarray) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    def backward(
+        self, grad_output: np.ndarray
+    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         """
         Args:
             grad_output: [Batch, Seq_Len, Embed_Dim] gradient from next layer
@@ -68,27 +71,26 @@ class PositionalEmbedding:
     def __init__(self, max_seq_len: int, embed_dim: int):
         self.max_seq_len = max_seq_len
         self.embed_dim = embed_dim
-        
+
         # Precompute positional encoding matrix using sine and cosine functions.
         # This allows the model to learn relative positions because for any fixed offset 'k',
         # PE(pos+k) can be represented as a linear function of PE(pos).
         # [Max_Seq_Len, Embed_Dim]
         pe = np.zeros((max_seq_len, embed_dim))
         position = np.arange(0, max_seq_len)[:, np.newaxis]
-        
+
         # The frequency term: 1 / (10000 ** (2i / d_model))
         # We use the log-space implementation for numerical stability.
         # emb_dim // 2 because we apply it to both sin and cos components.
         div_term = np.exp(np.arange(0, embed_dim, 2) * -(np.log(10000.0) / embed_dim))
-        
+
         # Apply sine to even indices (0, 2, 4...) and cosine to odd indices (1, 3, 5...)
         # position: [Max_Seq_Len, 1], div_term: [Embed_Dim/2]
         # product: [Max_Seq_Len, Embed_Dim/2]
         pe[:, 0::2] = np.sin(position * div_term)
         pe[:, 1::2] = np.cos(position * div_term)
-        
-        self.pe = pe
 
+        self.pe = pe
 
     def forward(self) -> np.ndarray:
         """
@@ -202,7 +204,12 @@ class FeedForward:
         return {"W1": self.W1, "b1": self.b1, "W2": self.W2, "b2": self.b2}
 
     def get_grads(self) -> Dict[str, np.ndarray]:
-        return {"W1": self.grad_W1, "b1": self.grad_b1, "W2": self.grad_W2, "b2": self.grad_b2}
+        return {
+            "W1": self.grad_W1,
+            "b1": self.grad_b1,
+            "W2": self.grad_W2,
+            "b2": self.grad_b2,
+        }
 
 
 class LayerNorm:
@@ -245,7 +252,9 @@ class LayerNorm:
         # [Batch, Seq_Len, Embed_Dim]
         return self.gamma * self.x_norm + self.beta
 
-    def backward(self, grad_output: np.ndarray) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    def backward(
+        self, grad_output: np.ndarray
+    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         """
         Args:
             grad_output: [Batch, Seq_Len, Embed_Dim] gradient from next layer

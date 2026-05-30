@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Optional, Tuple, Dict, Any
 
+
 class MultiHeadAttention:
     """
     Multi-Head Attention mechanism.
@@ -29,11 +30,11 @@ class MultiHeadAttention:
         self.kv_cache: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
     def forward(
-        self, 
-        x: np.ndarray, 
-        mask: Optional[np.ndarray] = None, 
+        self,
+        x: np.ndarray,
+        mask: Optional[np.ndarray] = None,
         use_cache: bool = False,
-        cache_idx: Optional[int] = None
+        cache_idx: Optional[int] = None,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Args:
@@ -46,20 +47,26 @@ class MultiHeadAttention:
             cache: Dictionary containing intermediate values for backward pass
         """
         batch_size, seq_len, _ = x.shape
- 
+
         # 1. Linear projections
         # [Batch, Seq_Len, Embed_Dim]
         Q = np.dot(x, self.W_q)
         K = np.dot(x, self.W_k)
         V = np.dot(x, self.W_v)
- 
+
         # 2. Split into multiple heads
         # Reshape to [Batch, Seq_Len, Num_Heads, Head_Dim]
         # Then transpose to [Batch, Num_Heads, Seq_Len, Head_Dim]
-        Q = Q.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
-        K = K.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
-        V = V.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
- 
+        Q = Q.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(
+            0, 2, 1, 3
+        )
+        K = K.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(
+            0, 2, 1, 3
+        )
+        V = V.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(
+            0, 2, 1, 3
+        )
+
         # --- KV CACHE LOGIC ---
         if use_cache and cache_idx is not None:
             if cache_idx in self.kv_cache:
@@ -68,33 +75,35 @@ class MultiHeadAttention:
                 # [Batch, Num_Heads, Prev_Seq_Len + Current_Seq_Len, Head_Dim]
                 K = np.concatenate([prev_K, K], axis=2)
                 V = np.concatenate([prev_V, V], axis=2)
-            
+
             self.kv_cache[cache_idx] = (K, V)
         # ----------------------
- 
+
         # 3. Scaled Dot-Product Attention
         # Scores = (Q @ K^T) / sqrt(d_k)
         # [Batch, Num_Heads, Q_Seq_Len, Head_Dim] @ [Batch, Num_Heads, Head_Dim, K_Seq_Len] -> [Batch, Num_Heads, Q_Seq_Len, K_Seq_Len]
         d_k = self.head_dim
         scores = np.matmul(Q, K.transpose(0, 1, 3, 2)) / np.sqrt(d_k)
- 
+
         # 4. Apply causal mask if provided
         if mask is not None:
             # mask is [Seq_Len, Seq_Len], broadcast to [Batch, Num_Heads, Q_Seq_Len, K_Seq_Len]
             scores = np.where(mask == 0, -1e9, scores)
- 
+
         # 5. Softmax to get attention weights
         attn_weights = self._softmax(scores, axis=-1)
- 
+
         # 6. Weighted sum of values
         context = np.matmul(attn_weights, V)
- 
+
         # 7. Concatenate heads
-        context_out = context.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
- 
+        context_out = context.transpose(0, 2, 1, 3).reshape(
+            batch_size, seq_len, self.embed_dim
+        )
+
         # 8. Final output projection
         output = np.dot(context_out, self.W_o)
- 
+
         # Prepare cache for backward pass
         cache = {
             "Q": Q,
@@ -102,11 +111,10 @@ class MultiHeadAttention:
             "V": V,
             "attn_weights": attn_weights,
             "context": context_out,
-            "mask": mask
+            "mask": mask,
         }
- 
-        return output, cache
 
+        return output, cache
 
     def _softmax(self, x: np.ndarray, axis: int) -> np.ndarray:
         """Numerical stable softmax."""
@@ -114,32 +122,36 @@ class MultiHeadAttention:
         return e_x / np.sum(e_x, axis=axis, keepdims=True)
 
     def backward(
-        self, 
-        x: np.ndarray, 
-        d_out: np.ndarray, 
+        self,
+        x: np.ndarray,
+        d_out: np.ndarray,
         mask: Optional[np.ndarray] = None,
         Q: Optional[np.ndarray] = None,
         K: Optional[np.ndarray] = None,
         V: Optional[np.ndarray] = None,
         attn_weights: Optional[np.ndarray] = None,
-        context: Optional[np.ndarray] = None
+        context: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         """
         Backward pass for Multi-Head Attention.
         """
         batch_size, seq_len, _ = x.shape
-        
+
         # 1. Gradient w.r.t. W_o and context
         # [Embed_Dim, Embed_Dim]
         if context is None:
-             raise ValueError("context must be provided for backward pass")
+            raise ValueError("context must be provided for backward pass")
 
-        d_W_o = np.dot(context.reshape(-1, self.embed_dim).T, d_out.reshape(-1, self.embed_dim))
+        d_W_o = np.dot(
+            context.reshape(-1, self.embed_dim).T, d_out.reshape(-1, self.embed_dim)
+        )
         d_context = np.dot(d_out, self.W_o.T)
 
         # 2. Gradient w.r.t. attn_weights and V
-        d_context_heads = d_context.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
-        
+        d_context_heads = d_context.reshape(
+            batch_size, seq_len, self.num_heads, self.head_dim
+        ).transpose(0, 2, 1, 3)
+
         if V is None:
             raise ValueError("V must be provided for backward pass")
         if attn_weights is None:
@@ -151,7 +163,10 @@ class MultiHeadAttention:
         # 3. Gradient w.r.t. scores (after softmax)
         if attn_weights is None:
             raise ValueError("attn_weights must be provided for backward pass")
-        d_scores = attn_weights * (d_attn_weights - np.sum(d_attn_weights * attn_weights, axis=-1, keepdims=True))
+        d_scores = attn_weights * (
+            d_attn_weights
+            - np.sum(d_attn_weights * attn_weights, axis=-1, keepdims=True)
+        )
 
         # 4. Apply mask gradient
         if mask is not None:
@@ -184,29 +199,17 @@ class MultiHeadAttention:
         self.grad_W_v = d_W_v
         self.grad_W_o = d_W_o
 
-        grads = {
-            "W_q": d_W_q,
-            "W_k": d_W_k,
-            "W_v": d_W_v,
-            "W_o": d_W_o
-        }
+        grads = {"W_q": d_W_q, "W_k": d_W_k, "W_v": d_W_v, "W_o": d_W_o}
 
         return dx, grads
 
     def get_params(self) -> Dict[str, np.ndarray]:
-        return {
-            "W_q": self.W_q,
-            "W_k": self.W_k,
-            "W_v": self.W_v,
-            "W_o": self.W_o
-        }
+        return {"W_q": self.W_q, "W_k": self.W_k, "W_v": self.W_v, "W_o": self.W_o}
 
     def get_grads(self) -> Dict[str, np.ndarray]:
         return {
             "W_q": self.grad_W_q,
             "W_k": self.grad_W_k,
             "W_v": self.grad_W_v,
-            "W_o": self.grad_W_o
+            "W_o": self.grad_W_o,
         }
-
-

@@ -4,6 +4,7 @@ from optimizer import Adam
 from loss import CrossEntropyLoss
 from trainer import Trainer
 
+
 def test_trainer_train_step():
     """
     Integration test for Trainer.train_step.
@@ -44,10 +45,11 @@ def test_trainer_train_step():
 
     # Check if loss is a float
     assert isinstance(loss, float)
-    
+
     # In a single step with random data, we can't guarantee loss decreases,
     # but we can check it runs.
     assert loss > 0
+
 
 def test_trainer_parameter_update():
     """
@@ -88,7 +90,10 @@ def test_trainer_parameter_update():
     # Check if parameters have changed
     updated_params = model.get_params()
     for k in initial_params:
-        assert not np.array_equal(initial_params[k], updated_params[k]), f"Parameter {k} did not change"
+        assert not np.array_equal(initial_params[k], updated_params[k]), (
+            f"Parameter {k} did not change"
+        )
+
 
 def test_trainer_loss_reduction():
     """
@@ -110,7 +115,7 @@ def test_trainer_loss_reduction():
         max_seq_len=max_seq_len,
     )
 
-    optimizer = Adam(learning_rate=0.1) # Higher LR for faster convergence in test
+    optimizer = Adam(learning_rate=0.1)  # Higher LR for faster convergence in test
     loss_fn = CrossEntropyLoss()
     trainer = Trainer(model, optimizer, loss_fn)
 
@@ -123,8 +128,10 @@ def test_trainer_loss_reduction():
     for _ in range(30):
         loss = trainer.train_step(input_ids, target_ids)
 
-    
-    assert loss < initial_loss, f"Loss did not decrease. Initial: {initial_loss}, Final: {loss}"
+    assert loss < initial_loss, (
+        f"Loss did not decrease. Initial: {initial_loss}, Final: {loss}"
+    )
+
 
 def test_trainer_fit_small_batch():
     """
@@ -162,17 +169,23 @@ def test_trainer_fit_small_batch():
 
         def __iter__(self):
             for _ in range(self.num_batches):
-                input_ids = np.random.randint(0, self.vocab_size, size=(self.batch_size, self.seq_len))
-                target_ids = np.random.randint(0, self.vocab_size, size=(self.batch_size, self.seq_len))
+                input_ids = np.random.randint(
+                    0, self.vocab_size, size=(self.batch_size, self.seq_len)
+                )
+                target_ids = np.random.randint(
+                    0, self.vocab_size, size=(self.batch_size, self.seq_len)
+                )
                 yield input_ids, target_ids
 
         def __len__(self):
             return self.num_batches
 
-    data_loader = DummyDataLoader(num_batches=5, batch_size=batch_size, seq_len=seq_len, vocab_size=vocab_size)
-    
+    data_loader = DummyDataLoader(
+        num_batches=5, batch_size=batch_size, seq_len=seq_len, vocab_size=vocab_size
+    )
+
     # Should run without error
     trainer.fit(data_loader, epochs=1)
-    
+
     # Check history
     assert len(trainer.history["loss"]) == 1
