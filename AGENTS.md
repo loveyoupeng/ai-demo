@@ -23,6 +23,7 @@ This is a demo repository to learn AI concepts and tooling.
 - [x] Refactoring of codebase for consistent return signatures.
 - [x] Fixed integration bugs in `Expert.backward` and `MoELayer` (routing/weight gradients).
 - [x] Finalized `Trainer.train_step` integration and testing.
+- [x] Implemented Training App (data loading and loop driver).
 
 #### Remaining
 - [ ] Finalize `Trainer.train_step` integration and testing.
