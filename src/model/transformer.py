@@ -222,7 +222,11 @@ class Transformer:
         # [Batch, Seq_Len, Embed_Dim]
         x = self.token_embedding.forward(input_ids)
         pos_pe = self.pos_embedding.forward()  # [Max_Seq_Len, Embed_Dim]
-        x = x + pos_pe[:seq_len, :]
+        # Add positional embedding with broadcasting
+        # x: [Batch, Seq_Len, Embed_Dim]
+        # pos_pe[:seq_len, :]: [Seq_Len, Embed_Dim]
+        # We add [None, :seq_len, :] to broadcasting
+        x = x + pos_pe[:seq_len, :][None, :, :]
 
         # 2. Causal Mask
         if mask is None:
