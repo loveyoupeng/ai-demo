@@ -50,6 +50,84 @@ def test_trainer_train_step():
     # but we can check it runs.
     assert loss > 0
 
+def test_trainer_parameter_update():
+    """
+    Verifies that parameters are actually updated after a training step.
+    """
+    vocab_size = 10
+    embed_dim = 8
+    num_layers = 1
+    num_heads = 2
+    num_experts = 2
+    max_seq_len = 20
+    batch_size = 2
+    seq_len = 5
+
+    model = Transformer(
+        vocab_size=vocab_size,
+        embed_dim=embed_dim,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        num_experts=num_experts,
+        max_seq_len=max_seq_len,
+    )
+
+    optimizer = Adam(learning_rate=0.01)
+    loss_fn = CrossEntropyLoss()
+    trainer = Trainer(model, optimizer, loss_fn)
+
+    # Dummy data
+    input_ids = np.random.randint(0, vocab_size, size=(batch_size, seq_len))
+    target_ids = np.random.randint(0, vocab_size, size=(batch_size, seq_len))
+
+    # Capture initial parameters
+    initial_params = {k: v.copy() for k, v in model.get_params().items()}
+
+    # Perform one training step
+    trainer.train_step(input_ids, target_ids)
+
+    # Check if parameters have changed
+    updated_params = model.get_params()
+    for k in initial_params:
+        assert not np.array_equal(initial_params[k], updated_params[k]), f"Parameter {k} did not change"
+
+def test_trainer_loss_reduction():
+    """
+    Verifies that loss decreases on a very simple task (overfitting a single batch).
+    """
+    vocab_size = 5
+    embed_dim = 4
+    num_layers = 1
+    num_heads = 1
+    num_experts = 1
+    max_seq_len = 10
+    batch_size = 1
+    seq_len = 3
+
+    model = Transformer(
+        vocab_size=vocab_size,
+        embed_dim=embed_dim,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        num_experts=num_experts,
+        max_seq_len=max_seq_len,
+    )
+
+    optimizer = Adam(learning_rate=0.1) # Higher LR for faster convergence in test
+    loss_fn = CrossEntropyLoss()
+    trainer = Trainer(model, optimizer, loss_fn)
+
+    input_ids = np.array([[0, 1, 2]], dtype=int)
+    target_ids = np.array([[1, 2, 0]], dtype=int)
+
+    # Perform multiple steps
+    initial_loss = trainer.train_step(input_ids, target_ids)
+    
+    for _ in range(30):
+        loss = trainer.train_step(input_ids, target_ids)
+    
+    assert loss < initial_loss, f"Loss did not decrease. Initial: {initial_loss}, Final: {loss}"
+
 def test_trainer_fit_small_batch():
     """
     Test that Trainer.fit runs on a small dummy data loader.

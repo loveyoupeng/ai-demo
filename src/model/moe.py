@@ -100,7 +100,7 @@ class MoELayer:
     ):
         self.embed_dim = embed_dim
         self.num_experts = num_experts
-        self.k = num_experts_per_token
+        self.k = min(num_experts_per_token, num_experts)
 
         self.router = Router(embed_dim, num_experts)
         self.experts = [Expert(embed_dim, dim_ff) for _ in range(num_experts)]

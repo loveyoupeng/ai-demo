@@ -21,9 +21,10 @@ This is a demo repository to learn AI concepts and tooling.
 - [x] Implementation of `CrossEntropyLoss`.
 - [x] Implementation of `Trainer` orchestration.
 - [x] Refactoring of codebase for consistent return signatures.
+- [x] Fixed integration bugs in `Expert.backward` and `MoELayer` (routing/weight gradients).
+- [x] Finalized `Trainer.train_step` integration and testing.
 
 #### Remaining
-- [ ] Fix integration bugs in `Expert.backward` and `FeedForward.backward`.
 - [ ] Finalize `Trainer.train_step` integration and testing.
 - [ ] Implement Training App (data loading and loop driver).
 - [ ] Implement Evaluation Framework (Perplexity, Accuracy).
