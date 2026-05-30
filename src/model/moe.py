@@ -35,19 +35,19 @@ class Router:
     def get_params(self) -> Dict[str, np.ndarray]:
         return {"weights": self.weights}
 
+    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+        """
+        Sets the weights of the router.
+        """
+        for k, v in params.items():
+            if k == "weights":
+                self.weights = v
+
     def backward(
         self, x: np.ndarray, d_probs: np.ndarray
     ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         """
         Backward pass for Router.
-
-        Args:
-            x: Input [Batch, Seq_Len, Embed_Dim]
-            d_probs: Gradient of loss w.r.t. routing probabilities [Batch, Seq_Len, Num_Experts]
-
-        Returns:
-            dx: Gradient of loss w.r.t. input x [Batch, Seq_Len, Embed_Dim]
-            grads: Dictionary of gradients for parameters (weights)
         """
         batch_size, seq_len, embed_dim = x.shape
         num_experts = self.num_experts
@@ -81,15 +81,21 @@ class Expert:
     def forward(self, x: np.ndarray) -> np.ndarray:
         return self.ffn.forward(x)
 
+    def get_params(self) -> Dict[str, np.ndarray]:
+        return self.ffn.get_params()
+
+    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+        """
+        Sets the parameters of the expert.
+        """
+        self.ffn.set_params(params)
+
     def backward(
         self, x: np.ndarray, d_out: np.ndarray
     ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         dx = self.ffn.backward(d_out)
         grads = self.ffn.get_grads()
         return dx, grads
-
-    def get_params(self) -> Dict[str, np.ndarray]:
-        return self.ffn.get_params()
 
 
 class MoELayer:
@@ -130,16 +136,16 @@ class MoELayer:
         top_k_indices = np.argsort(routing_weights, axis=-1)[..., -self.k :]
         top_k_weights = np.take_along_axis(routing_weights, top_k_indices, axis=-1)
 
-        # Normalize top-k weights
+        # 3. Normalize top-k weights
         top_k_weights = top_k_weights / (
             np.sum(top_k_weights, axis=-1, keepdims=True) + 1e-8
         )
 
-        # 3. Compute expert outputs
+        # 4. Compute expert outputs
         # [Num_Experts, Batch, Seq_Len, Embed_Dim]
         all_expert_outputs = np.array([exp.forward(x) for exp in self.experts])
 
-        # 4. Weighted combination
+        # 5. Weighted combination
         combined_output = np.zeros_like(x)
 
         for b in range(batch_size):
@@ -192,6 +198,7 @@ class MoELayer:
                     d_all_expert_outputs[expert_idx, b, s, :] += d_out[b, s, :] * weight
 
         # 2. Gradient w.r.t. experts
+        # d_x_from_experts: [Batch, Seq_Len, Embed_Dim]
         d_x_from_experts = np.zeros_like(x)
         grads_experts = {}
         for i in range(self.num_experts):
@@ -200,7 +207,7 @@ class MoELayer:
                 dx_i, grads_i = self.experts[i].backward(x, d_all_expert_outputs[i])
                 d_x_from_experts += dx_i
                 for k, v in grads_i.items():
-                    grads_experts[f"expert_{i}.{k}"] = v
+                    grads_experts[f"expert.{i}.{k}"] = v
 
         # 3. Gradient w.r.t. routing weights (router)
         # Account for normalization in forward pass: w_k = R_k / S
@@ -237,5 +244,20 @@ class MoELayer:
             params[f"router.{k}"] = v
         for i, expert in enumerate(self.experts):
             for k, v in expert.get_params().items():
-                params[f"expert_{i}.{k}"] = v
+                params[f"expert.{i}.{k}"] = v
         return params
+
+    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+        """
+        Sets the parameters of the MoE layer.
+        """
+        for k, v in params.items():
+            if k.startswith("router."):
+                param_name = k.replace("router.", "")
+                self.router.set_params({param_name: v})
+            elif k.startswith("expert."):
+                # expert.{i}.{param_name}
+                parts = k.split(".")
+                i = int(parts[1])
+                param_name = ".".join(parts[2:])
+                self.experts[i].set_params({param_name: v})

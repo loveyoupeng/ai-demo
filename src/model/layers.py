@@ -58,6 +58,13 @@ class TokenEmbedding:
     def get_params(self) -> Dict[str, np.ndarray]:
         return {"weights": self.weights}
 
+    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+        """
+        Sets the weights of the token embedding.
+        """
+        if "weights" in params:
+            self.weights = params["weights"]
+
     def get_grads(self) -> Dict[str, np.ndarray]:
         return {"weights": self.grad_weights}
 
@@ -203,6 +210,20 @@ class FeedForward:
     def get_params(self) -> Dict[str, np.ndarray]:
         return {"W1": self.W1, "b1": self.b1, "W2": self.W2, "b2": self.b2}
 
+    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+        """
+        Sets the parameters of the FeedForward network.
+        """
+        for k, v in params.items():
+            if k == "W1":
+                self.W1 = v
+            elif k == "b1":
+                self.b1 = v
+            elif k == "W2":
+                self.W2 = v
+            elif k == "b2":
+                self.b2 = v
+
     def get_grads(self) -> Dict[str, np.ndarray]:
         return {
             "W1": self.grad_W1,
@@ -291,6 +312,16 @@ class LayerNorm:
 
     def get_params(self) -> Dict[str, np.ndarray]:
         return {"gamma": self.gamma, "beta": self.beta}
+
+    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+        """
+        Sets the parameters of the LayerNorm layer.
+        """
+        for k, v in params.items():
+            if k == "gamma":
+                self.gamma = v
+            elif k == "beta":
+                self.beta = v
 
     def get_grads(self) -> Dict[str, np.ndarray]:
         return {"gamma": self.grad_gamma, "beta": self.grad_beta}

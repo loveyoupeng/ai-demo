@@ -1,72 +1,95 @@
-import numpy as np
+import argparse
 from model.transformer import Transformer
 from loss import CrossEntropyLoss
 from optimizer import Adam
 from training.data_loader import TextDataLoader
 from tokenizer.char_tokenizer import CharTokenizer
 from trainer import Trainer
+from utils.checkpoint import ModelCheckpoint
+from inference import AutoregressiveGenerator
 
-
-def train_and_test():
+def run_training(args):
     # 1. Setup Data
-    text = "the quick brown fox jumps over the lazy dog. " * 10
+    # In a real scenario, we'd load from a file. For demo, we use a small text.
+    text = "the quick brown fox jumps over the lazy dog. " * 50
     tokenizer = CharTokenizer(text)
     vocab_size = tokenizer.vocab_size
 
-    # 2. Hyperparameters
-    embed_dim = 32
-    num_layers = 2
-    num_heads = 4
-    num_experts = 4
-    max_seq_len = 64
-    batch_size = 4
-    seq_len = 16
-    epochs = 2
-    learning_rate = 0.001
-
-    # 3. Initialize Model, Optimizer, Loss, Trainer
+    # 2. Initialize Model, Optimizer, Loss, Trainer
     model = Transformer(
         vocab_size=vocab_size,
-        embed_dim=embed_dim,
-        num_layers=num_layers,
-        num_heads=num_heads,
-        num_experts=num_experts,
-        max_seq_len=max_seq_len,
+        embed_dim=args.embed_dim,
+        num_layers=args.layers,
+        num_heads=args.heads,
+        num_experts=args.experts,
+        max_seq_len=args.max_context,
     )
 
-    optimizer = Adam(learning_rate=learning_rate)
+    optimizer = Adam(learning_rate=args.lr)
     loss_fn = CrossEntropyLoss()
     trainer = Trainer(model, optimizer, loss_fn)
 
-    data_loader = TextDataLoader(text, tokenizer, batch_size, seq_len)
+    data_loader = TextDataLoader(text, tokenizer, args.batch_size, args.seq_len)
 
-    # 4. Training
+    # 3. Training
     print("Starting training...")
-    trainer.fit(data_loader, epochs=epochs)
+    trainer.fit(data_loader, epochs=args.epochs)
     print("Training completed.")
 
-    # 5. Inference Test
-    print("\nRunning inference test...")
+    # 4. Save Checkpoint
+    checkpoint = ModelCheckpoint()
+    checkpoint.save_checkpoint(model, tokenizer, args.checkpoint_name)
+    print(f"Model and tokenizer saved to {args.checkpoint_name}.pkl")
 
-    # Test string
-    test_text = "the quick brown"
-    input_ids = tokenizer.encode(test_text)
+def run_inference(args):
+    # 1. Load Checkpoint
+    checkpoint = ModelCheckpoint()
+    model, tokenizer = checkpoint.load_checkpoint(
+        args.checkpoint_name, Transformer, CharTokenizer
+    )
 
-    # Reshape for model: [1, seq_len]
-    # We need to pad or truncate to fit max_seq_len if we were using a real model,
-    # but here we just need to ensure it's within max_seq_len.
-    input_ids = input_ids.reshape(1, -1)
+    # 2. Setup Generator
+    generator = AutoregressiveGenerator(model, tokenizer, temperature=args.temp)
 
-    logits, _ = model.forward(input_ids)
+    # 3. Generate Text
+    print(f"Prompt: {args.prompt}")
+    generated_ids = generator.generate(args.prompt, num_new_tokens=args.gen_len)
+    generated_text = tokenizer.decode(generated_ids)
 
-    # Get next token
-    last_token_logits = logits[0, -1, :]
-    next_token_id = np.argmax(last_token_logits)
-    next_token_char = tokenizer.decode(np.array([next_token_id]))
+    print(f"Generated Text: {generated_text}")
 
-    print(f"Input text: '{test_text}'")
-    print(f"Predicted next character: '{next_token_char}'")
+def main():
+    parser = argparse.ArgumentParser(description="Transformer E2E Training and Inference")
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
 
+    # Training Subcommand
+    train_parser = subparsers.add_parser("train", help="Train the model")
+    train_parser.add_argument("--embed_dim", type=int, default=32)
+    train_parser.add_argument("--layers", type=int, default=2)
+    train_parser.add_argument("--heads", type=int, default=4)
+    train_parser.add_argument("--experts", type=int, default=4)
+    train_parser.add_argument("--max_context", type=int, default=64)
+    train_parser.add_argument("--batch_size", type=int, default=4)
+    train_parser.add_argument("--seq_len", type=int, default=16)
+    train_parser.add_argument("--epochs", type=int, default=5)
+    train_parser.add_argument("--lr", type=float, default=0.001)
+    train_parser.add_argument("--checkpoint_name", type=str, default="demo_model")
+
+    # Inference Subcommand
+    infer_parser = subparsers.add_parser("infer", help="Run inference")
+    infer_parser.add_argument("--checkpoint_name", type=str, required=True, help="Name of checkpoint file (without .pkl)")
+    infer_parser.add_argument("--prompt", type=str, default="the", help="Prompt text")
+    infer_parser.add_argument("--gen_len", type=int, default=20, help="Number of tokens to generate")
+    infer_parser.add_argument("--temp", type=float, default=1.0, help="Temperature for sampling")
+
+    args = parser.parse_args()
+
+    if args.command == "train":
+        run_training(args)
+    elif args.command == "infer":
+        run_inference(args)
+    else:
+        parser.print_help()
 
 if __name__ == "__main__":
-    train_and_test()
+    main()

@@ -130,6 +130,36 @@ class TransformerBlock(object):
 
         return dx, combined_grads
 
+    def get_params(self) -> Dict[str, np.ndarray]:
+        params = {}
+        for k, v in self.ln1.get_params().items():
+            params[f"ln1.{k}"] = v
+        for k, v in self.ln2.get_params().items():
+            params[f"ln2.{k}"] = v
+        for k, v in self.mha.get_params().items():
+            params[f"mha.{k}"] = v
+        for k, v in self.moe.get_params().items():
+            params[f"moe.{k}"] = v
+        return params
+
+    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+        """
+        Sets the model parameters from a dictionary.
+        """
+        for k, v in params.items():
+            if k.startswith("ln1."):
+                param_name = k.replace("ln1.", "")
+                self.ln1.set_params({param_name: v})
+            elif k.startswith("ln2."):
+                param_name = k.replace("ln2.", "")
+                self.ln2.set_params({param_name: v})
+            elif k.startswith("mha."):
+                param_name = k.replace("mha.", "")
+                self.mha.set_params({param_name: v})
+            elif k.startswith("moe."):
+                param_name = k.replace("moe.", "")
+                self.moe.set_params({param_name: v})
+
 
 class Transformer:
     """
@@ -250,7 +280,6 @@ class Transformer:
                 grads[f"blocks.{i}.{k}"] = v
 
         # 3. Token Embedding
-        cache["token_embedding_input"]
         self.token_embedding.backward(dx)
         for k, v in self.token_embedding.get_grads().items():
             grads[f"token_embedding.{k}"] = v
@@ -264,14 +293,35 @@ class Transformer:
             params[f"token_embedding.{k}"] = v
         # Transformer Blocks
         for i, block in enumerate(self.blocks):
-            for k, v in block.ln1.get_params().items():
-                params[f"blocks.{i}.ln1.{k}"] = v
-            for k, v in block.ln2.get_params().items():
-                params[f"blocks.{i}.ln2.{k}"] = v
-            for k, v in block.mha.get_params().items():
-                params[f"blocks.{i}.mha.{k}"] = v
-            for k, v in block.moe.get_params().items():
-                params[f"blocks.{i}.moe.{k}"] = v
+            for k, v in block.get_params().items():
+                params[f"blocks.{i}.{k}"] = v
         # LM Head
         params["lm_head"] = self.lm_head
         return params
+
+    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+        """
+        Sets the model parameters from a dictionary.
+        """
+        for k, v in params.items():
+            if k.startswith("token_embedding."):
+                param_name = k.replace("token_embedding.", "")
+                self.token_embedding.set_params({param_name: v})
+            elif k.startswith("blocks."):
+                # blocks.{i}.{sublayer}.{param_name}
+                parts = k.split(".")
+                i = int(parts[1])
+                sublayer = parts[2]
+                param_name = ".".join(parts[3:])
+                
+                block = self.blocks[i]
+                if sublayer == "ln1":
+                    block.ln1.set_params({param_name: v})
+                elif sublayer == "ln2":
+                    block.ln2.set_params({param_name: v})
+                elif sublayer == "mha":
+                    block.mha.set_params({param_name: v})
+                elif sublayer == "moe":
+                    block.moe.set_params({param_name: v})
+            elif k == "lm_head":
+                self.lm_head = v

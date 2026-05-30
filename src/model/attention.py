@@ -148,6 +148,7 @@ class MultiHeadAttention:
         d_context = np.dot(d_out, self.W_o.T)
 
         # 2. Gradient w.r.t. attn_weights and V
+        # d_context_heads: [Batch, Num_Heads, Seq_Len, Head_Dim]
         d_context_heads = d_context.reshape(
             batch_size, seq_len, self.num_heads, self.head_dim
         ).transpose(0, 2, 1, 3)
@@ -205,6 +206,20 @@ class MultiHeadAttention:
 
     def get_params(self) -> Dict[str, np.ndarray]:
         return {"W_q": self.W_q, "W_k": self.W_k, "W_v": self.W_v, "W_o": self.W_o}
+
+    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+        """
+        Sets the weights of the Multi-Head Attention layer.
+        """
+        for k, v in params.items():
+            if k == "W_q":
+                self.W_q = v
+            elif k == "W_k":
+                self.W_k = v
+            elif k == "W_v":
+                self.W_v = v
+            elif k == "W_o":
+                self.W_o = v
 
     def get_grads(self) -> Dict[str, np.ndarray]:
         return {
