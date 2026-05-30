@@ -1,5 +1,4 @@
 import numpy as np
-from typing import Any
 from model.transformer import Transformer
 from loss import CrossEntropyLoss
 from optimizer import Adam

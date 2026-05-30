@@ -54,6 +54,8 @@ def debug():
     print(f"grad_x_numerical shape: {grad_x_numerical.shape}")
 
     try:
+        if isinstance(grad_x_analytical, tuple):
+             grad_x_analytical = grad_x_analytical[0]
         np.testing.assert_allclose(grad_x_analytical, grad_x_numerical, rtol=1e-4, atol=1e-4)
         print("Assertion passed!")
     except Exception as e:

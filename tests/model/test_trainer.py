@@ -1,4 +1,3 @@
-import pytest
 import numpy as np
 from model.transformer import Transformer
 from optimizer import Adam
@@ -101,8 +100,6 @@ def test_trainer_loss_reduction():
     num_heads = 1
     num_experts = 1
     max_seq_len = 10
-    batch_size = 1
-    seq_len = 3
 
     model = Transformer(
         vocab_size=vocab_size,
@@ -122,9 +119,10 @@ def test_trainer_loss_reduction():
 
     # Perform multiple steps
     initial_loss = trainer.train_step(input_ids, target_ids)
-    
+    loss = initial_loss
     for _ in range(30):
         loss = trainer.train_step(input_ids, target_ids)
+
     
     assert loss < initial_loss, f"Loss did not decrease. Initial: {initial_loss}, Final: {loss}"
 

@@ -236,11 +236,13 @@ class Transformer:
                 grads[f"blocks.{i}.{k}"] = v
         
         # 3. Token Embedding
-        input_ids = cache["token_embedding_input"]
-        dx_token_emb = self.token_embedding.backward(dx)
-        grads.update(self.token_embedding.get_grads())
+        cache["token_embedding_input"]
+        self.token_embedding.backward(dx)
+        for k, v in self.token_embedding.get_grads().items():
+            grads[f"token_embedding.{k}"] = v
         
         return grads
+
 
     def get_params(self) -> Dict[str, np.ndarray]:
         params = {}

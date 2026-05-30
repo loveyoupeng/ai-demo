@@ -46,20 +46,20 @@ class MultiHeadAttention:
             cache: Dictionary containing intermediate values for backward pass
         """
         batch_size, seq_len, _ = x.shape
-
+ 
         # 1. Linear projections
         # [Batch, Seq_Len, Embed_Dim]
         Q = np.dot(x, self.W_q)
         K = np.dot(x, self.W_k)
         V = np.dot(x, self.W_v)
-
+ 
         # 2. Split into multiple heads
         # Reshape to [Batch, Seq_Len, Num_Heads, Head_Dim]
         # Then transpose to [Batch, Num_Heads, Seq_Len, Head_Dim]
         Q = Q.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
         K = K.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
         V = V.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
-
+ 
         # --- KV CACHE LOGIC ---
         if use_cache and cache_idx is not None:
             if cache_idx in self.kv_cache:
@@ -70,34 +70,31 @@ class MultiHeadAttention:
                 V = np.concatenate([prev_V, V], axis=2)
             
             self.kv_cache[cache_idx] = (K, V)
-            current_kv_cache = self.kv_cache.copy()
-        else:
-            current_kv_cache = None
         # ----------------------
-
+ 
         # 3. Scaled Dot-Product Attention
         # Scores = (Q @ K^T) / sqrt(d_k)
         # [Batch, Num_Heads, Q_Seq_Len, Head_Dim] @ [Batch, Num_Heads, Head_Dim, K_Seq_Len] -> [Batch, Num_Heads, Q_Seq_Len, K_Seq_Len]
         d_k = self.head_dim
         scores = np.matmul(Q, K.transpose(0, 1, 3, 2)) / np.sqrt(d_k)
-
+ 
         # 4. Apply causal mask if provided
         if mask is not None:
             # mask is [Seq_Len, Seq_Len], broadcast to [Batch, Num_Heads, Q_Seq_Len, K_Seq_Len]
             scores = np.where(mask == 0, -1e9, scores)
-
+ 
         # 5. Softmax to get attention weights
         attn_weights = self._softmax(scores, axis=-1)
-
+ 
         # 6. Weighted sum of values
         context = np.matmul(attn_weights, V)
-
+ 
         # 7. Concatenate heads
         context_out = context.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
-
+ 
         # 8. Final output projection
         output = np.dot(context_out, self.W_o)
-
+ 
         # Prepare cache for backward pass
         cache = {
             "Q": Q,
@@ -107,8 +104,9 @@ class MultiHeadAttention:
             "context": context_out,
             "mask": mask
         }
-
+ 
         return output, cache
+
 
     def _softmax(self, x: np.ndarray, axis: int) -> np.ndarray:
         """Numerical stable softmax."""
@@ -142,12 +140,17 @@ class MultiHeadAttention:
         # 2. Gradient w.r.t. attn_weights and V
         d_context_heads = d_context.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
         
-        if V is None: raise ValueError("V must be provided for backward pass")
+        if V is None:
+            raise ValueError("V must be provided for backward pass")
+        if attn_weights is None:
+            raise ValueError("attn_weights must be provided for backward pass")
+
         d_V = np.matmul(attn_weights.transpose(0, 1, 3, 2), d_context_heads)
         d_attn_weights = np.matmul(d_context_heads, V.transpose(0, 1, 3, 2))
 
         # 3. Gradient w.r.t. scores (after softmax)
-        if attn_weights is None: raise ValueError("attn_weights must be provided for backward pass")
+        if attn_weights is None:
+            raise ValueError("attn_weights must be provided for backward pass")
         d_scores = attn_weights * (d_attn_weights - np.sum(d_attn_weights * attn_weights, axis=-1, keepdims=True))
 
         # 4. Apply mask gradient
@@ -156,9 +159,10 @@ class MultiHeadAttention:
 
         # 5. Gradient w.r.t. Q and K
         d_scores = d_scores * np.sqrt(self.head_dim)
-        if Q is None or K is None: raise ValueError("Q and K must be provided for backward pass")
-
+        if Q is None or K is None:
+            raise ValueError("Q and K must be provided for backward pass")
         d_Q = np.matmul(d_scores, K)
+
         d_K = np.matmul(d_scores.transpose(0, 1, 3, 2), Q)
 
         # 6. Reshape gradients back to [Batch, Seq_Len, Embed_Dim]

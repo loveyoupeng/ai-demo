@@ -1,7 +1,5 @@
 import numpy as np
 from typing import Tuple, Iterator
-from model.transformer import Transformer
-from loss import CrossEntropyLoss
 from tokenizer.char_tokenizer import CharTokenizer
 
 class TextDataLoader:

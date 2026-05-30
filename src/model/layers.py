@@ -68,18 +68,27 @@ class PositionalEmbedding:
     def __init__(self, max_seq_len: int, embed_dim: int):
         self.max_seq_len = max_seq_len
         self.embed_dim = embed_dim
-
-        # Precompute positional encoding matrix
+        
+        # Precompute positional encoding matrix using sine and cosine functions.
+        # This allows the model to learn relative positions because for any fixed offset 'k',
+        # PE(pos+k) can be represented as a linear function of PE(pos).
         # [Max_Seq_Len, Embed_Dim]
         pe = np.zeros((max_seq_len, embed_dim))
         position = np.arange(0, max_seq_len)[:, np.newaxis]
-        # div_term = 1 / (10000 ** (2i / d_model))
+        
+        # The frequency term: 1 / (10000 ** (2i / d_model))
+        # We use the log-space implementation for numerical stability.
+        # emb_dim // 2 because we apply it to both sin and cos components.
         div_term = np.exp(np.arange(0, embed_dim, 2) * -(np.log(10000.0) / embed_dim))
-
+        
+        # Apply sine to even indices (0, 2, 4...) and cosine to odd indices (1, 3, 5...)
+        # position: [Max_Seq_Len, 1], div_term: [Embed_Dim/2]
+        # product: [Max_Seq_Len, Embed_Dim/2]
         pe[:, 0::2] = np.sin(position * div_term)
         pe[:, 1::2] = np.cos(position * div_term)
-
+        
         self.pe = pe
+
 
     def forward(self) -> np.ndarray:
         """

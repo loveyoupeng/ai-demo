@@ -4,7 +4,7 @@ from model.layers import FeedForward
 
 def numerical_gradient(ffn, x, eps=1e-6):
     grad_x = np.zeros_like(x)
-    output_orig, _ = ffn.forward(x), None # forward doesn't return anything extra in current implementation but we need to be careful
+    _output_orig, _ = ffn.forward(x), None # forward doesn't return anything extra in current implementation but we need to be careful
     # Actually FeedForward.forward returns output
     
     # We need to define a scalar loss to compute numerical gradient
@@ -41,7 +41,7 @@ def test_feedforward_backward_numerical():
     x = np.random.randn(batch_size, seq_len, embed_dim)
     
     # Forward pass
-    output = ffn.forward(x)
+    ffn.forward(x)
     
     # Dummy gradient for loss w.r.t output
     grad_output = np.random.randn(batch_size, seq_len, embed_dim)
@@ -85,7 +85,7 @@ def test_feedforward_params_numerical():
     ffn = FeedForward(embed_dim, dim_ff)
     x = np.random.randn(batch_size, seq_len, embed_dim)
     
-    output = ffn.forward(x)
+    ffn.forward(x)
     grad_output = np.random.randn(batch_size, seq_len, embed_dim)
     ffn.backward(grad_output)
     
@@ -101,18 +101,26 @@ def test_feedforward_params_numerical():
             old_val = param.copy()
             # We need to be careful how we replace it because it's an attribute
             # Since they are numpy arrays, we can do:
-            if key == "W1": ffn.W1 = p_val
-            elif key == "b1": ffn.b1 = p_val
-            elif key == "W2": ffn.W2 = p_val
-            elif key == "b2": ffn.b2 = p_val
+            if key == "W1":
+                ffn.W1 = p_val
+            elif key == "b1":
+                ffn.b1 = p_val
+            elif key == "W2":
+                ffn.W2 = p_val
+            elif key == "b2":
+                ffn.b2 = p_val
             
             res = np.sum(ffn.forward(x) * grad_output)
             
             # Restore
-            if key == "W1": ffn.W1 = old_val
-            elif key == "b1": ffn.b1 = old_val
-            elif key == "W2": ffn.W2 = old_val
-            elif key == "b2": ffn.b2 = old_val
+            if key == "W1":
+                ffn.W1 = old_val
+            elif key == "b1":
+                ffn.b1 = old_val
+            elif key == "W2":
+                ffn.W2 = old_val
+            elif key == "b2":
+                ffn.b2 = old_val
             return res
 
         grad_param_numerical = np.zeros_like(param)
