@@ -26,7 +26,7 @@ def test_transformer_block_shape():
     # Causal mask
     mask = np.tril(np.ones((seq_len, seq_len)))
 
-    output = block.forward(x, mask=mask)
+    output, _ = block.forward(x, mask=mask)
 
     assert output.shape == (batch_size, seq_len, embed_dim)
 
@@ -59,7 +59,7 @@ def test_transformer_model_shape():
 
     input_ids = np.random.randint(0, vocab_size, size=(batch_size, seq_len))
 
-    logits = model.forward(input_ids)
+    logits, _ = model.forward(input_ids)
 
     # Logits shape: [Batch, Seq_Len, Vocab_Size]
     assert logits.shape == (batch_size, seq_len, vocab_size)
@@ -91,13 +91,13 @@ def test_transformer_causality():
     input_ids = np.random.randint(0, vocab_size, size=(batch_size, seq_len))
 
     # Get logits for the first sequence
-    logits1 = model.forward(input_ids)
+    logits1, _ = model.forward(input_ids)
 
     # Create a second sequence that is identical up to the last token, but differs at the last token
     input_ids_modified = input_ids.copy()
     input_ids_modified[0, -1] = (input_ids_modified[0, -1] + 1) % vocab_size
 
-    logits2 = model.forward(input_ids_modified)
+    logits2, _ = model.forward(input_ids_modified)
 
     # The logits for all tokens except the last one should be identical
     np.testing.assert_allclose(logits1[:, :-1, :], logits2[:, :-1, :], atol=1e-7)

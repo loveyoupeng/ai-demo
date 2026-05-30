@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Any
 
 class MultiHeadAttention:
     """
@@ -34,7 +34,7 @@ class MultiHeadAttention:
         mask: Optional[np.ndarray] = None, 
         use_cache: bool = False,
         cache_idx: Optional[int] = None
-    ) -> Tuple[np.ndarray, Optional[Dict[int, Tuple[np.ndarray, np.ndarray]]]]:
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Args:
             x: Input tensor [Batch, Seq_Len, Embed_Dim]
@@ -43,7 +43,7 @@ class MultiHeadAttention:
             cache_idx: Index of the current token for KV cache update (used in inference)
         Returns:
             output: [Batch, Seq_Len, Embed_Dim]
-            cache: Updated KV cache
+            cache: Dictionary containing intermediate values for backward pass
         """
         batch_size, seq_len, _ = x.shape
 
@@ -93,12 +93,22 @@ class MultiHeadAttention:
         context = np.matmul(attn_weights, V)
 
         # 7. Concatenate heads
-        context = context.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
+        context_out = context.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
 
         # 8. Final output projection
-        output = np.dot(context, self.W_o)
+        output = np.dot(context_out, self.W_o)
 
-        return output, current_kv_cache
+        # Prepare cache for backward pass
+        cache = {
+            "Q": Q,
+            "K": K,
+            "V": V,
+            "attn_weights": attn_weights,
+            "context": context_out,
+            "mask": mask
+        }
+
+        return output, cache
 
     def _softmax(self, x: np.ndarray, axis: int) -> np.ndarray:
         """Numerical stable softmax."""
@@ -118,99 +128,37 @@ class MultiHeadAttention:
     ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         """
         Backward pass for Multi-Head Attention.
-        
-        Args:
-            x: Input [Batch, Seq_Len, Embed_Dim]
-            d_out: Gradient of loss w.r.t. output [Batch, Seq_Len, Embed_Dim]
-            mask: Causal mask [Seq_Len, Seq_Len]
-            Q, K, V: Forward pass intermediate tensors (optional, for optimization)
-            attn_weights: Forward pass attention weights (optional)
-            context: Forward pass context tensor (optional)
-            
-        Returns:
-            dx: Gradient of loss w.r.t. input x [Batch, Seq_Len, Embed_Dim]
-            grads: Dictionary of gradients for parameters (W_q, W_k, W_v, W_o)
         """
         batch_size, seq_len, _ = x.shape
         
         # 1. Gradient w.r.t. W_o and context
-        # output = context @ W_o
-        # d_W_o = context.T @ d_out
-        # d_context = d_out @ W_o.T
-        
-        # context shape is [Batch, Seq_Len, Embed_Dim]
-        # Flatten batch and seq_len for matrix multiplication
-        context_flat = x.reshape(-1, self.embed_dim) # This is NOT correct, context is context.
-        # Wait, we need context from forward pass. 
-        # If context not provided, we'd need to recompute it, but usually we pass it.
-        # For simplicity, let's assume context is passed or we'll use the logic from forward.
-        # Since we are in backward, we MUST have the values from forward.
-        
-        # Re-calculating context if not provided is inefficient, but we'll assume 
-        # user provides what is necessary or we derive it.
-        # Let's look at the forward: context = np.matmul(attn_weights, V)
-        # We need context to compute d_W_o.
-        # But we can also compute d_W_o using the fact that output = context @ W_o
-        
-        # Let's assume we pass context.
+        # [Embed_Dim, Embed_Dim]
         if context is None:
-             # This is a bit of a hack, in a real engine context is cached.
-             # For now, let's try to derive it or expect it.
              raise ValueError("context must be provided for backward pass")
 
-        d_W_o = np.dot(context.transpose(0, 2, 1).reshape(-1, self.embed_dim).T, 
-                       d_out.reshape(-1, self.embed_dim))
-        # Error in above: context is [B, S, E], d_out is [B, S, E]. 
-        # context_flat: [B*S, E], d_out_flat: [B*S, E].
-        # d_W_o: [E, E]
         d_W_o = np.dot(context.reshape(-1, self.embed_dim).T, d_out.reshape(-1, self.embed_dim))
-        
-        d_context = np.dot(d_out, self.W_o.T) # [B, S, E]
+        d_context = np.dot(d_out, self.W_o.T)
 
         # 2. Gradient w.r.t. attn_weights and V
-        # context = attn_weights @ V
-        # [B, H, S, S] @ [B, H, S, D] -> [B, H, S, D]
-        # d_V = attn_weights.T @ d_context_heads
-        # d_attn_weights = d_context_heads @ V.T
-        
-        # We need d_context in heads shape: [Batch, Num_Heads, Seq_Len, Head_Dim]
         d_context_heads = d_context.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
         
-        # If V was not provided, we can't do this.
         if V is None: raise ValueError("V must be provided for backward pass")
-        
-        # attn_weights: [B, H, S, S], V: [B, H, S, D]
-        # d_V: [B, H, S, D]
         d_V = np.matmul(attn_weights.transpose(0, 1, 3, 2), d_context_heads)
-        
-        # d_attn_weights: [B, H, S, S]
         d_attn_weights = np.matmul(d_context_heads, V.transpose(0, 1, 3, 2))
 
         # 3. Gradient w.r.t. scores (after softmax)
-        # attn_weights = softmax(scores)
-        # d_scores = attn_weights * (d_attn_weights - sum(d_attn_weights * attn_weights, axis=-1, keepdims=True))
         if attn_weights is None: raise ValueError("attn_weights must be provided for backward pass")
-        
         d_scores = attn_weights * (d_attn_weights - np.sum(d_attn_weights * attn_weights, axis=-1, keepdims=True))
 
         # 4. Apply mask gradient
         if mask is not None:
-            # Masked positions should have 0 gradient
             d_scores = d_scores * mask
 
         # 5. Gradient w.r.t. Q and K
-        # scores = (Q @ K.T) / sqrt(d_k)
-        # d_scores = d_scores * sqrt(d_k)
-        # d_Q = d_scores @ K
-        # d_K = d_scores.T @ Q
-        
         d_scores = d_scores * np.sqrt(self.head_dim)
-        
         if Q is None or K is None: raise ValueError("Q and K must be provided for backward pass")
 
-        # d_Q: [B, H, S, D]
         d_Q = np.matmul(d_scores, K)
-        # d_K: [B, H, S, D]
         d_K = np.matmul(d_scores.transpose(0, 1, 3, 2), Q)
 
         # 6. Reshape gradients back to [Batch, Seq_Len, Embed_Dim]
@@ -219,15 +167,18 @@ class MultiHeadAttention:
         d_V = d_V.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
 
         # 7. Gradients for W_q, W_k, W_v
-        # Q = x @ W_q => d_W_q = x.T @ d_Q
-        # d_W_q: [E, E]
         d_W_q = np.dot(x.reshape(-1, self.embed_dim).T, d_Q.reshape(-1, self.embed_dim))
         d_W_k = np.dot(x.reshape(-1, self.embed_dim).T, d_K.reshape(-1, self.embed_dim))
         d_W_v = np.dot(x.reshape(-1, self.embed_dim).T, d_V.reshape(-1, self.embed_dim))
 
         # 8. Gradient w.r.t. input x
-        # d_x = d_Q @ W_q.T + d_K @ W_k.T + d_V @ W_v.T
         dx = np.dot(d_Q, self.W_q.T) + np.dot(d_K, self.W_k.T) + np.dot(d_V, self.W_v.T)
+
+        # Store gradients in self
+        self.grad_W_q = d_W_q
+        self.grad_W_k = d_W_k
+        self.grad_W_v = d_W_v
+        self.grad_W_o = d_W_o
 
         grads = {
             "W_q": d_W_q,
@@ -237,3 +188,21 @@ class MultiHeadAttention:
         }
 
         return dx, grads
+
+    def get_params(self) -> Dict[str, np.ndarray]:
+        return {
+            "W_q": self.W_q,
+            "W_k": self.W_k,
+            "W_v": self.W_v,
+            "W_o": self.W_o
+        }
+
+    def get_grads(self) -> Dict[str, np.ndarray]:
+        return {
+            "W_q": self.grad_W_q,
+            "W_k": self.grad_W_k,
+            "W_v": self.grad_W_v,
+            "W_o": self.grad_W_o
+        }
+
+

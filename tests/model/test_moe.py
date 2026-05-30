@@ -57,9 +57,8 @@ def test_moe_layer_shape():
     moe = MoELayer(embed_dim, num_experts, num_experts_per_token=2)
     x = np.random.randn(batch_size, seq_len, embed_dim)
 
-    output = moe.forward(x)
+    output, _ = moe.forward(x)
 
-    # Output shape should match input shape
     assert output.shape == (batch_size, seq_len, embed_dim)
 
 
@@ -100,5 +99,5 @@ def test_moe_top_k_routing_logic():
         weight = val[0, 0, i]
         expected_output[0, 0, :] += weight * expert_outputs[expert_idx, 0, 0, :]
 
-    output = moe.forward(x)
+    output, _ = moe.forward(x)
     np.testing.assert_allclose(output, expected_output, atol=1e-5)

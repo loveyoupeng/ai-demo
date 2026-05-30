@@ -1,5 +1,5 @@
 import numpy as np
-
+from typing import Tuple, Dict
 
 class TokenEmbedding:
     """
@@ -27,12 +27,12 @@ class TokenEmbedding:
         # Using numpy indexing to retrieve embeddings for each index
         return self.weights[indices]
 
-    def backward(self, grad_output: np.ndarray) -> np.ndarray:
+    def backward(self, grad_output: np.ndarray) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         """
         Args:
             grad_output: [Batch, Seq_Len, Embed_Dim] gradient from next layer
         Returns:
-            [Batch, Seq_Len, Embed_Dim] gradient w.r.t. input indices
+            [Batch, Seq_Len, Embed_Dim] gradient w.r.t. input indices, and gradients for weights
         """
         # grad_output is [Batch, Seq_Len, Embed_Dim]
         # We need to accumulate gradients for weights
@@ -42,17 +42,21 @@ class TokenEmbedding:
         # Create flattened indices for weight update
         # self.indices is [Batch, Seq_Len]
         # We need to broadcast it or use it to index into weights
-
-        # Efficient way to accumulate gradients for embeddings:
-        # grad_weights[indices] += grad_output
-        # Since indices can repeat, we use np.add.at
         rows = self.indices.ravel()
         grad_output_flat = grad_output.reshape(-1, embed_dim)
 
         np.add.at(self.grad_weights, rows, grad_output_flat)
 
         # Gradient w.r.t indices is just grad_output
-        return grad_output
+        dx = grad_output
+        grads = self.get_grads()
+        return dx, grads
+
+    def get_params(self) -> Dict[str, np.ndarray]:
+        return {"weights": self.weights}
+
+    def get_grads(self) -> Dict[str, np.ndarray]:
+        return {"weights": self.grad_weights}
 
 
 class PositionalEmbedding:
@@ -90,6 +94,12 @@ class PositionalEmbedding:
         Since this is fixed, gradient is zero.
         """
         return np.zeros_like(grad_output)
+
+    def get_params(self) -> Dict[str, np.ndarray]:
+        return {}
+
+    def get_grads(self) -> Dict[str, np.ndarray]:
+        return {}
 
 
 class FeedForward:
@@ -179,6 +189,12 @@ class FeedForward:
 
         return grad_x
 
+    def get_params(self) -> Dict[str, np.ndarray]:
+        return {"W1": self.W1, "b1": self.b1, "W2": self.W2, "b2": self.b2}
+
+    def get_grads(self) -> Dict[str, np.ndarray]:
+        return {"W1": self.grad_W1, "b1": self.grad_b1, "W2": self.grad_W2, "b2": self.grad_b2}
+
 
 class LayerNorm:
     """
@@ -220,12 +236,12 @@ class LayerNorm:
         # [Batch, Seq_Len, Embed_Dim]
         return self.gamma * self.x_norm + self.beta
 
-    def backward(self, grad_output: np.ndarray) -> np.ndarray:
+    def backward(self, grad_output: np.ndarray) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         """
         Args:
             grad_output: [Batch, Seq_Len, Embed_Dim] gradient from next layer
         Returns:
-            [Batch, Seq_Len, Embed_Dim] gradient w.r.t. input x
+            [Batch, Seq_Len, Embed_Dim] gradient w.r.t. input x, and gradients for parameters
         """
         # grad_output: [Batch, Seq_Len, Embed_Dim]
         batch_size, seq_len, embed_dim = grad_output.shape
@@ -253,4 +269,10 @@ class LayerNorm:
             - (1.0 / N) * self.mean * sum_grad_x_norm
         )
 
-        return grad_x
+        return grad_x, self.get_grads()
+
+    def get_params(self) -> Dict[str, np.ndarray]:
+        return {"gamma": self.gamma, "beta": self.beta}
+
+    def get_grads(self) -> Dict[str, np.ndarray]:
+        return {"gamma": self.grad_gamma, "beta": self.grad_beta}

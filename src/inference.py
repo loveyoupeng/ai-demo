@@ -44,7 +44,7 @@ class AutoregressiveGenerator:
         for _ in range(num_new_tokens):
             # 2. Get logits from the model
             # [1, current_len, vocab_size]
-            logits = self.model.forward(current_ids)
+            logits, _ = self.model.forward(current_ids)
 
             # 3. Focus on the LAST predicted token
             # [1, vocab_size]

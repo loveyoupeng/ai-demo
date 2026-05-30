@@ -2,6 +2,33 @@
 
 This is a demo repository to learn AI concepts and tooling.
 
+## Plan
+
+### Core Objectives
+1.  **Core Math (NumPy)**: Implement all transformer components (Attention, MoE, etc.) using NumPy with manual backward passes for pedagogical clarity.
+2.  **Training Orchestration**: Implement `Trainer`, `Optimizer`, and `Loss` functions.
+3.  **Verification**: Use TDD to ensure mathematical correctness of all layers and gradients.
+4.  **Evaluation**: Implement perplexity and accuracy metrics.
+5.  **Scaling & Transition**: Profile the NumPy implementation, then migrate to PyTorch and CUDA for performance.
+
+### Progress
+
+#### Finished
+- [x] Project structure and repository initialization.
+- [x] Implementation of `TokenEmbedding`, `PositionalEmbedding`, `FeedForward`, `LayerNorm`, `MultiHeadAttention`, `Router`, `Expert`, `MoELayer`, `TransformerBlock`, `Transformer`, and `AutoregressiveGenerator` (NumPy).
+- [x] Implementation of manual backward passes for all core layers.
+- [x] Implementation of `SGD` and `Adam` optimizers.
+- [x] Implementation of `CrossEntropyLoss`.
+- [x] Implementation of `Trainer` orchestration.
+- [x] Refactoring of codebase for consistent return signatures.
+
+#### Remaining
+- [ ] Fix integration bugs in `Expert.backward` and `FeedForward.backward`.
+- [ ] Finalize `Trainer.train_step` integration and testing.
+- [ ] Implement Training App (data loading and loop driver).
+- [ ] Implement Evaluation Framework (Perplexity, Accuracy).
+- [ ] Profiling and migration to PyTorch/CUDA.
+
 ## Tooling
 
 - Use `uv` for dependency management and running scripts.
