@@ -18,8 +18,16 @@ details and theories of LLM.
 3. **Verification**: Use TDD to ensure mathematical correctness of all layers
    and gradients.
 4. **Evaluation**: Implement perplexity and accuracy metrics.
-5. **Scaling & Transition**: Profile the NumPy implementation, then migrate
-   to PyTorch and CUDA for performance.
+5. **Multi-Level Implementation (Backend Agnostic)**: Implement a pluggable
+   architecture to demonstrate the trade-offs between abstraction and
+   performance across three levels:
+   - **Level 1: PyTorch** (High-level API, standard practitioner tool).
+   - **Level 2: Triton** (Kernel-level optimization for compute bottlenecks).
+   - **Level 3: CUDA** (Low-level hardware control).
+6. **Benchmarking & Profiling**: Implement a specialized profiler to compare
+   latency, throughput, and memory usage across all backends.
+7. **Educational Synthesis**: Create a "Concept-to-Tool" mapping guide to
+   explain how mathematical concepts translate to specific tool primitives.
 
 ### Progress
 
@@ -45,10 +53,14 @@ details and theories of LLM.
 
 - [ ] Pedagogical Audit: Enhancing documentation with deep theoretical,
       mathematical, and intuitive explanations for all components.
+- [ ] Infrastructure: Implement Parity Test Suite and Profiling Engine.
 
 #### Remaining
 
-- [ ] Profiling and migration to PyTorch/CUDA.
+- [ ] Level 1: PyTorch Implementation (High-level API)
+- [ ] Level 2: Triton Implementation (Kernel-level optimization)
+- [ ] Level 3: CUDA Implementation (Low-level hardware control)
+- [ ] Final Educational Synthesis: Concept-to-Tool mapping guide and Comparison Report.
 
 ## Tooling
 
