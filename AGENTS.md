@@ -38,15 +38,13 @@ details and theories of LLM.
 - [x] Fixed integration bugs in `Expert.backward` and `MoELayer`.
 - [x] Implemented Training App (data loading and loop driver).
 - [x] Implemented Evaluation Framework (Perplexity, Accuracy).
+- [x] E2E Verification: Full training-to-inference pipeline.
+- [x] Code Quality Audit: Linting and type checking.
 
 #### In Progress
 
 - [ ] Pedagogical Audit: Enhancing documentation with deep theoretical,
       mathematical, and intuitive explanations for all components.
-- [ ] Code Quality Audit: Ensuring strict type hinting and consistent,
-      industry-standard naming conventions.
-- [ ] E2E Verification: Implementing a full training-to-inference pipeline
-      (Training -> Saving -> Loading -> Inference).
 
 #### Remaining
 

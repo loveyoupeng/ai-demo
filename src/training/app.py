@@ -10,8 +10,15 @@ from inference import AutoregressiveGenerator
 
 def run_training(args):
     # 1. Setup Data
-    # In a real scenario, we'd load from a file. For demo, we use a small text.
-    text = "the quick brown fox jumps over the lazy dog. " * 50
+    if args.data_path:
+        with open(args.data_path, 'r', encoding='utf-8') as f:
+            text = f.read()
+        print(f"Loaded {len(text)} characters from {args.data_path}")
+    else:
+        # In a real scenario, we'd load from a file. For demo, we use a small text.
+        text = "the quick brown fox jumps over the lazy dog. " * 50
+        print("Using default toy dataset.")
+        
     tokenizer = CharTokenizer(text)
     vocab_size = tokenizer.vocab_size
 
@@ -74,6 +81,8 @@ def main():
     train_parser.add_argument("--epochs", type=int, default=5)
     train_parser.add_argument("--lr", type=float, default=0.001)
     train_parser.add_argument("--checkpoint_name", type=str, default="demo_model")
+    train_parser.add_argument("--data_path", type=str, default=None, help="Path to a text file for training")
+
 
     # Inference Subcommand
     infer_parser = subparsers.add_parser("infer", help="Run inference")

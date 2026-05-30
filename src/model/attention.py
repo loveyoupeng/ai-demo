@@ -1,11 +1,16 @@
 import numpy as np
 from typing import Optional, Tuple, Dict, Any
 
-
 class MultiHeadAttention:
     """
     Multi-Head Attention mechanism.
     Allows the model to attend to different parts of the sequence simultaneously.
+
+    Mathematical context:
+    $\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V$
+    
+    Where $Q, K, V$ are projections of the input $X$ into query, key, and value spaces.
+    The multi-head aspect splits the $d_{model}$ dimension into $h$ heads of $d_k$ dimension each.
     """
 
     def __init__(self, embed_dim: int, num_heads: int):
@@ -16,14 +21,13 @@ class MultiHeadAttention:
         self.head_dim = embed_dim // num_heads
 
         # Linear projections for Q, K, and V
-        # We combine them into one large weight matrix for efficiency
-        # [Embed_Dim, Embed_Dim]
+        # Weights combine all heads for efficiency
+        # Shape: [Embed_Dim, Embed_Dim]
         self.W_q = np.random.randn(embed_dim, embed_dim) * 0.01
         self.W_k = np.random.randn(embed_dim, embed_dim) * 0.01
         self.W_v = np.random.randn(embed_dim, embed_dim) * 0.01
 
-        # Output projection
-        # [Embed_Dim, Embed_Dim]
+        # Output projection [Embed_Dim, Embed_Dim]
         self.W_o = np.random.randn(embed_dim, embed_dim) * 0.01
 
         # Cache for KV values during inference
@@ -41,7 +45,7 @@ class MultiHeadAttention:
             x: Input tensor [Batch, Seq_Len, Embed_Dim]
             mask: Causal mask [Seq_Len, Seq_Len] (1 for keep, 0 for mask)
             use_cache: Whether to use/update KV cache
-            cache_idx: Index of the current token for KV cache update (used in inference)
+            cache_idx: Index of the current token for KV cache update
         Returns:
             output: [Batch, Seq_Len, Embed_Dim]
             cache: Dictionary containing intermediate values for backward pass
@@ -55,19 +59,12 @@ class MultiHeadAttention:
         V = np.dot(x, self.W_v)
 
         # 2. Split into multiple heads
-        # Reshape to [Batch, Seq_Len, Num_Heads, Head_Dim]
-        # Then transpose to [Batch, Num_Heads, Seq_Len, Head_Dim]
-        Q = Q.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(
-            0, 2, 1, 3
-        )
-        K = K.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(
-            0, 2, 1, 3
-        )
-        V = V.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(
-            0, 2, 1, 3
-        )
+        # Reshape to [Batch, Seq_Len, Num_Heads, Head_Dim] and transpose to [Batch, Num_Heads, Seq_Len, Head_Dim]
+        Q = Q.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+        K = K.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+        V = V.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
 
-        # --- KV CACHE LOGIC ---
+        # --- KV CACHE LOGIC (for autoregressive generation) ---
         if use_cache and cache_idx is not None:
             if cache_idx in self.kv_cache:
                 prev_K, prev_V = self.kv_cache[cache_idx]
@@ -75,31 +72,28 @@ class MultiHeadAttention:
                 # [Batch, Num_Heads, Prev_Seq_Len + Current_Seq_Len, Head_Dim]
                 K = np.concatenate([prev_K, K], axis=2)
                 V = np.concatenate([prev_V, V], axis=2)
-
             self.kv_cache[cache_idx] = (K, V)
         # ----------------------
 
         # 3. Scaled Dot-Product Attention
         # Scores = (Q @ K^T) / sqrt(d_k)
-        # [Batch, Num_Heads, Q_Seq_Len, Head_Dim] @ [Batch, Num_Heads, Head_Dim, K_Seq_Len] -> [Batch, Num_Heads, Q_Seq_Len, K_Seq_Len]
+        # [Batch, Num_Heads, Q_Seq_Len, K_Seq_Len]
         d_k = self.head_dim
         scores = np.matmul(Q, K.transpose(0, 1, 3, 2)) / np.sqrt(d_k)
 
         # 4. Apply causal mask if provided
         if mask is not None:
-            # mask is [Seq_Len, Seq_Len], broadcast to [Batch, Num_Heads, Q_Seq_Len, K_Seq_Len]
+            # mask [Seq_Len, Seq_Len] broadcast to [Batch, Num_Heads, Q_Seq_Len, K_Seq_Len]
             scores = np.where(mask == 0, -1e9, scores)
 
-        # 5. Softmax to get attention weights
+        # 5. Softmax to get attention weights: [Batch, Num_Heads, Q_Seq_Len, K_Seq_Len]
         attn_weights = self._softmax(scores, axis=-1)
 
-        # 6. Weighted sum of values
+        # 6. Weighted sum of values: [Batch, Num_Heads, Q_Seq_Len, Head_Dim]
         context = np.matmul(attn_weights, V)
 
-        # 7. Concatenate heads
-        context_out = context.transpose(0, 2, 1, 3).reshape(
-            batch_size, seq_len, self.embed_dim
-        )
+        # 7. Concatenate heads: [Batch, Seq_Len, Embed_Dim]
+        context_out = context.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
 
         # 8. Final output projection
         output = np.dot(context_out, self.W_o)
@@ -137,11 +131,11 @@ class MultiHeadAttention:
         """
         batch_size, seq_len, _ = x.shape
 
-        # 1. Gradient w.r.t. W_o and context
-        # [Embed_Dim, Embed_Dim]
         if context is None:
             raise ValueError("context must be provided for backward pass")
 
+        # 1. Gradient w.r.t. W_o and context
+        # [Embed_Dim, Embed_Dim]
         d_W_o = np.dot(
             context.reshape(-1, self.embed_dim).T, d_out.reshape(-1, self.embed_dim)
         )
@@ -153,20 +147,15 @@ class MultiHeadAttention:
             batch_size, seq_len, self.num_heads, self.head_dim
         ).transpose(0, 2, 1, 3)
 
-        if V is None:
-            raise ValueError("V must be provided for backward pass")
-        if attn_weights is None:
-            raise ValueError("attn_weights must be provided for backward pass")
+        if V is None or attn_weights is None:
+            raise ValueError("V and attn_weights must be provided for backward pass")
 
         d_V = np.matmul(attn_weights.transpose(0, 1, 3, 2), d_context_heads)
         d_attn_weights = np.matmul(d_context_heads, V.transpose(0, 1, 3, 2))
 
         # 3. Gradient w.r.t. scores (after softmax)
-        if attn_weights is None:
-            raise ValueError("attn_weights must be provided for backward pass")
         d_scores = attn_weights * (
-            d_attn_weights
-            - np.sum(d_attn_weights * attn_weights, axis=-1, keepdims=True)
+            d_attn_weights - np.sum(d_attn_weights * attn_weights, axis=-1, keepdims=True)
         )
 
         # 4. Apply mask gradient
@@ -178,7 +167,6 @@ class MultiHeadAttention:
         if Q is None or K is None:
             raise ValueError("Q and K must be provided for backward pass")
         d_Q = np.matmul(d_scores, K)
-
         d_K = np.matmul(d_scores.transpose(0, 1, 3, 2), Q)
 
         # 6. Reshape gradients back to [Batch, Seq_Len, Embed_Dim]
@@ -194,32 +182,24 @@ class MultiHeadAttention:
         # 8. Gradient w.r.t. input x
         dx = np.dot(d_Q, self.W_q.T) + np.dot(d_K, self.W_k.T) + np.dot(d_V, self.W_v.T)
 
-        # Store gradients in self
+        # Store gradients
         self.grad_W_q = d_W_q
         self.grad_W_k = d_W_k
         self.grad_W_v = d_W_v
         self.grad_W_o = d_W_o
 
         grads = {"W_q": d_W_q, "W_k": d_W_k, "W_v": d_W_v, "W_o": d_W_o}
-
         return dx, grads
 
     def get_params(self) -> Dict[str, np.ndarray]:
         return {"W_q": self.W_q, "W_k": self.W_k, "W_v": self.W_v, "W_o": self.W_o}
 
     def set_params(self, params: Dict[str, np.ndarray]) -> None:
-        """
-        Sets the weights of the Multi-Head Attention layer.
-        """
         for k, v in params.items():
-            if k == "W_q":
-                self.W_q = v
-            elif k == "W_k":
-                self.W_k = v
-            elif k == "W_v":
-                self.W_v = v
-            elif k == "W_o":
-                self.W_o = v
+            if k == "W_q": self.W_q = v
+            elif k == "W_k": self.W_k = v
+            elif k == "W_v": self.W_v = v
+            elif k == "W_o": self.W_o = v
 
     def get_grads(self) -> Dict[str, np.ndarray]:
         return {

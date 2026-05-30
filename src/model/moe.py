@@ -1,11 +1,15 @@
 import numpy as np
 from typing import Tuple, Dict, Any
 
-
 class Router:
     """
     The Routing/Gating network.
     Takes a token embedding and decides which experts to use.
+
+    Mathematical context:
+    The router computes logits $z = X W_{router}$ where $W_{router} \in \mathbb{R}^{D \times N}$
+    and $N$ is the number of experts. These logits are then passed through a 
+    softmax to get routing probabilities $P_{b,s,i} = \text{softmax}(z_{b,s,i})$.
     """
 
     def __init__(self, embed_dim: int, num_experts: int):
@@ -102,6 +106,12 @@ class MoELayer:
     """
     Mixture of Experts (MoE) layer.
     Uses a router to select the top-k experts for each token.
+
+    Mathematical context:
+    For each token $x_i$, we select $k$ experts using the router.
+    The output is a weighted sum of the chosen experts:
+    $y_i = \sum_{j \in \text{top}_k(i)} P_{i,j} \cdot \text{Expert}_j(x_i)$
+    where $P_{i,j}$ is the routing weight for the $j$-th expert.
     """
 
     def __init__(
