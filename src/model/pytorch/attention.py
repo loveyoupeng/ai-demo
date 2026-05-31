@@ -54,8 +54,8 @@ class MultiHeadAttention(nn.Module):
 
         # --- KV CACHE LOGIC ---
         if use_cache and cache_idx is not None:
-            if cache_idx in self.kv_cache:
-                prev_K, prev_V = self.kv_cache[cache_idx]
+            if cache_idx > 0 and (cache_idx - 1) in self.kv_cache:
+                prev_K, prev_V = self.kv_cache[cache_idx - 1]
                 K = torch.cat([prev_K, K], dim=2)  # type: ignore
                 V = torch.cat([prev_V, V], dim=2)  # type: ignore
             self.kv_cache[cache_idx] = (K, V)
