@@ -2,10 +2,12 @@ import torch
 import torch.nn as nn
 from typing import Dict, cast, Optional
 
+
 class TokenEmbedding(nn.Module):
     """
     Learned token embeddings using PyTorch.
     """
+
     def __init__(self, vocab_size: int, embed_dim: int):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim)
@@ -33,6 +35,7 @@ class PositionalEmbedding(nn.Module):
     """
     Fixed sinusoidal positional embeddings using PyTorch.
     """
+
     def __init__(self, max_seq_len: int, embed_dim: int):
         super().__init__()
         pe = torch.empty((max_seq_len, embed_dim))  # type: ignore
@@ -62,6 +65,7 @@ class LayerNorm(nn.Module):
     """
     Layer Normalization using PyTorch.
     """
+
     def __init__(self, embed_dim: int, eps: float = 1e-6):
         super().__init__()
         self.ln = nn.LayerNorm(embed_dim, eps=eps)
@@ -70,7 +74,10 @@ class LayerNorm(nn.Module):
         return self.ln(x)
 
     def get_params(self) -> Dict[str, torch.Tensor]:
-        return {"gamma": cast(torch.Tensor, self.ln.weight), "beta": cast(torch.Tensor, self.ln.bias)}
+        return {
+            "gamma": cast(torch.Tensor, self.ln.weight),
+            "beta": cast(torch.Tensor, self.ln.bias),
+        }
 
     def set_params(self, params: Dict[str, torch.Tensor]) -> None:
         with torch.no_grad():
@@ -90,14 +97,12 @@ class LayerNorm(nn.Module):
         }
 
 
-
-
-
 class FeedForward(nn.Module):
     """
     Feed-Forward Network (FFN) using PyTorch.
     Matches the structure: Linear(dim, dim*4) -> GeLU -> Linear(dim*4, dim).
     """
+
     def __init__(self, embed_dim: int, intermediate_dim: Optional[int] = None):
         super().__init__()
         if intermediate_dim is None:
@@ -131,8 +136,16 @@ class FeedForward(nn.Module):
 
     def get_grads(self) -> Dict[str, torch.Tensor]:
         return {
-            "w1_weight": cast(torch.Tensor, self.w1.weight.grad) if self.w1.weight.grad is not None else torch.zeros_like(self.w1.weight),  # type: ignore
-            "w1_bias": cast(torch.Tensor, self.w1.bias.grad) if self.w1.bias.grad is not None else torch.zeros_like(self.w1.bias),  # type: ignore
-            "w2_weight": cast(torch.Tensor, self.w2.weight.grad) if self.w2.weight.grad is not None else torch.zeros_like(self.w2.weight),  # type: ignore
-            "w2_bias": cast(torch.Tensor, self.w2.bias.grad) if self.w2.bias.grad is not None else torch.zeros_like(self.w2.bias),  # type: ignore
+            "w1_weight": cast(torch.Tensor, self.w1.weight.grad)
+            if self.w1.weight.grad is not None
+            else torch.zeros_like(self.w1.weight),  # type: ignore
+            "w1_bias": cast(torch.Tensor, self.w1.bias.grad)
+            if self.w1.bias.grad is not None
+            else torch.zeros_like(self.w1.bias),  # type: ignore
+            "w2_weight": cast(torch.Tensor, self.w2.weight.grad)
+            if self.w2.weight.grad is not None
+            else torch.zeros_like(self.w2.weight),  # type: ignore
+            "w2_bias": cast(torch.Tensor, self.w2.bias.grad)
+            if self.w2.bias.grad is not None
+            else torch.zeros_like(self.w2.bias),  # type: ignore
         }

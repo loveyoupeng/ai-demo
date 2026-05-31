@@ -48,11 +48,11 @@ details and theories of LLM.
 - [x] Implemented Evaluation Framework (Perplexity, Accuracy).
 - [x] E2E Verification: Full training-to-inference pipeline.
 - [x] Code Quality Audit: Linting and type checking.
+- [x] Pedagogical Audit: Enhancing documentation (NumPy modules) with deep theoretical,
+      mathematical, and intuitive explanations, including dimension tracking.
 
 #### In Progress
 
-- [ ] Pedagogical Audit: Enhancing documentation (NumPy modules) with deep theoretical,
-      mathematical, and intuitive explanations, including dimension tracking.
 - [ ] Infrastructure: Implement Parity Test Suite and Profiling Engine.
 - [x] Level 1: PyTorch Implementation (High-level API)
       - [x] `MultiHeadAttention` in `src/model/pytorch/attention.py`

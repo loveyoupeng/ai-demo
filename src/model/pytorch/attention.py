@@ -2,10 +2,12 @@ import torch
 import torch.nn as nn
 from typing import Optional, Tuple, Dict, Any, cast
 
+
 class MultiHeadAttention(nn.Module):
     """
     Multi-Head Attention (MHA) mechanism using PyTorch.
     """
+
     def __init__(self, embed_dim: int, num_heads: int):
         super().__init__()
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
@@ -63,12 +65,12 @@ class MultiHeadAttention(nn.Module):
 
         # 3. Scaled Dot-Product Attention
         d_k = self.head_dim
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / (d_k ** 0.5)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / (d_k**0.5)
 
         # 4. Apply causal mask if provided
         if mask is not None:
-             # mask [Seq_Len, Seq_Len] -> [1, 1, Seq_Len, Seq_Len] for broadcasting
-             scores = scores.masked_fill(mask == 0, float("-inf"))
+            # mask [Seq_Len, Seq_Len] -> [1, 1, Seq_Len, Seq_Len] for broadcasting
+            scores = scores.masked_fill(mask == 0, float("-inf"))
 
         # 5. Softmax
         attn_weights = torch.softmax(scores, dim=-1)  # type: ignore
@@ -77,7 +79,11 @@ class MultiHeadAttention(nn.Module):
         context = torch.matmul(attn_weights, V)
 
         # 7. Concatenate heads and final projection
-        context_out = context.transpose(1, 2).contiguous().view(batch_size, seq_len, self.embed_dim)
+        context_out = (
+            context.transpose(1, 2)
+            .contiguous()
+            .view(batch_size, seq_len, self.embed_dim)
+        )
         output = self.W_o(context_out)
 
         cache = {
