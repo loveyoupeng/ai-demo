@@ -199,7 +199,22 @@ class MoELayer:
     def backward(
         self, x: np.ndarray, d_out: np.ndarray, cache: Dict[str, Any]
     ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+        """
+        Backward pass for MoE layer.
+
+        Args:
+            x: Input tensor $[B, L, D]$
+            d_out: Gradient w.r.t. output $[B, L, D]$
+            cache: Dictionary containing intermediate values for backward pass
+                   (including top-k weights/indices and expert outputs)
+
+        Returns:
+            dx: Gradient w.r.t. input $x$ $[B, L, D]$
+            grads: Dictionary of gradients for parameters:
+                   {'router.W_q': ..., 'expert.i.W1': ..., etc.}
+        """
         batch_size, seq_len, embed_dim = x.shape
+
         top_k_indices = cache["top_k_indices"]
         top_k_weights = cache["top_k_weights"]
         all_expert_outputs = cache["all_expert_outputs"]

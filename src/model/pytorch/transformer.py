@@ -49,7 +49,7 @@ class Transformer(nn.Module):
         
         # If no mask is provided, create a causal mask for decoder-only transformer
         if mask is None:
-            mask = torch.tril(torch.ones(seq_len, seq_len, device=indices.device))
+            mask = torch.tril(torch.ones(seq_len, seq_len, device=indices.device))  # type: ignore
             
         for layer in self.layers:
             x = layer(x, mask=mask)

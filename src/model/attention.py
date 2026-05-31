@@ -153,6 +153,21 @@ class MultiHeadAttention:
     ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         """
         Backward pass for Multi-Head Attention.
+
+        Args:
+            x: Input tensor $[B, L, D]$
+            d_out: Gradient w.r.t. output $[B, L, D]$
+            mask: Causal mask $[L, L]$
+            Q: Cached query tensor $[B, h, L, d_k]$
+            K: Cached key tensor $[B, h, L, d_k]$
+            V: Cached value tensor $[B, h, L, d_k]$
+            attn_weights: Cached attention weights $[B, h, L, L]$
+            context: Cached context output $[B, L, D]$
+
+        Returns:
+            dx: Gradient w.r.t. input $x$ $[B, L, D]$
+            grads: Dictionary of gradients for parameters:
+                   {'W_q': $[D, D]$, 'W_k': $[D, D]$, 'W_v': $[D, D]$, 'W_o': $[D, D]$}
         """
         batch_size, seq_len, _ = x.shape
 
@@ -203,11 +218,13 @@ class MultiHeadAttention:
         d_V = d_V.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
 
         # 7. Gradients for W_q, W_k, W_v
+        # d_W_q, d_W_k, d_W_v shape: [Embed_Dim, Embed_Dim]
         d_W_q = np.dot(x.reshape(-1, self.embed_dim).T, d_Q.reshape(-1, self.embed_dim))
         d_W_k = np.dot(x.reshape(-1, self.embed_dim).T, d_K.reshape(-1, self.embed_dim))
         d_W_v = np.dot(x.reshape(-1, self.embed_dim).T, d_V.reshape(-1, self.embed_dim))
 
         # 8. Gradient w.r.t. input x
+        # [Batch, Seq_Len, Embed_Dim]
         dx = np.dot(d_Q, self.W_q.T) + np.dot(d_K, self.W_k.T) + np.dot(d_V, self.W_v.T)
 
         # Store gradients

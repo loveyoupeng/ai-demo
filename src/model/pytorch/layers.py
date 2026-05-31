@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch._C._VariableFunctions as torch_funcs  # type: ignore
 from typing import Dict, cast, Optional
 
 class TokenEmbedding(nn.Module):
@@ -84,11 +83,13 @@ class LayerNorm(nn.Module):
         return {
             "gamma": cast(torch.Tensor, self.ln.weight.grad)
             if self.ln.weight.grad is not None
-            else torch.zeros_like(self.ln.weight),
+            else torch.zeros_like(self.ln.weight),  # type: ignore
             "beta": cast(torch.Tensor, self.ln.bias.grad)
             if self.ln.bias.grad is not None
-            else torch.zeros_like(self.ln.bias),
+            else torch.zeros_like(self.ln.bias),  # type: ignore
         }
+
+
 
 
 

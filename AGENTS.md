@@ -54,10 +54,11 @@ details and theories of LLM.
 - [ ] Pedagogical Audit: Enhancing documentation (NumPy modules) with deep theoretical,
       mathematical, and intuitive explanations, including dimension tracking.
 - [ ] Infrastructure: Implement Parity Test Suite and Profiling Engine.
-- [ ] Level 1: PyTorch Implementation (High-level API)
+- [x] Level 1: PyTorch Implementation (High-level API)
       - [x] `MultiHeadAttention` in `src/model/pytorch/attention.py`
       - [x] `FeedForward` in `src/model/pytorch/layers.py`
       - [x] `TransformerBlock` and `Transformer` in `src/model/pytorch/transformer.py`
+      - [x] Follow cleanup workflow: Pyright fix, Ruff reorg/format, Test verification, Checkpoint commit.
 
 #### Remaining
 
