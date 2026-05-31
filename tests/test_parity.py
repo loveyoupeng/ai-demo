@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from src.backends.numpy.numpy_backend import NumPyBackend
+from backends.numpy.numpy_backend import NumPyBackend
 from tests.test_parity_utils import ParityTester
 
 class TestParityTesterLogic:

@@ -1,7 +1,7 @@
 import torch
 import pytest
-from src.model.pytorch.attention import MultiHeadAttention
-from src.model.pytorch.layers import FeedForward, LayerNorm, TokenEmbedding, PositionalEmbedding
+from model.pytorch.attention import MultiHeadAttention
+from model.pytorch.layers import FeedForward, LayerNorm, TokenEmbedding, PositionalEmbedding
 
 def test_token_embedding():
     vocab_size = 100

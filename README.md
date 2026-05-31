@@ -1,8 +1,10 @@
 # AI Transformer Demo (NumPy Implementation)
 
-This repository is a pedagogical implementation of a decoder-only Transformer model built from scratch using NumPy. It is designed to demonstrate the internal mechanics of Large Language Models (LLMs), including Multi-Head Attention, Mixture of Experts (MoE), and manual backward passes for training.
+This repository is a pedagogical implementation of a decoder-only Transformer model built from scratch using NumPy. It is designed to demonstrate the internal mechanics of Large Language Models (LLMs),
+including Multi-Head Attention, Mixture of Experts (MoE), and manual backward passes for training.
 
 ## Features
+
 - **Pure NumPy**: No heavy frameworks like PyTorch; all math and gradients are manual.
 - **Mixture of Experts (MoE)**: Implements a routing mechanism to use a subset of experts per token.
 - **Autoregressive Generation**: Supports text generation with temperature sampling.
@@ -11,6 +13,7 @@ This repository is a pedagogical implementation of a decoder-only Transformer mo
 ## Installation
 
 Ensure you have `uv` installed.
+
 ```bash
 uv sync
 ```
@@ -61,6 +64,7 @@ uv run src/training/app.py infer \
 ```
 
 ## Project Structure
+
 - `src/model/`: Core Transformer components (Attention, MoE, Layers).
 - `src/training/`: Training orchestration and data loading.
 - `src/tokenizer/`: Character-level tokenizer.

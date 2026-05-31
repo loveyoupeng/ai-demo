@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch._C._VariableFunctions as torch_funcs  # type: ignore
 from typing import Dict, cast, Optional
 
 class TokenEmbedding(nn.Module):

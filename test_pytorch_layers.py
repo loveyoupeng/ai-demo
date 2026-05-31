@@ -1,5 +1,5 @@
 import torch
-from src.model.pytorch.layers import TokenEmbedding, PositionalEmbedding, LayerNorm
+from model.pytorch.layers import TokenEmbedding, PositionalEmbedding, LayerNorm
 
 def test_token_embedding():
     vocab_size = 100

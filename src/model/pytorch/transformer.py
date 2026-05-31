@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, Any, cast
-from src.model.pytorch.attention import MultiHeadAttention
-from src.model.pytorch.layers import FeedForward, LayerNorm, TokenEmbedding, PositionalEmbedding
+from typing import Optional, Dict, cast
+from model.pytorch.attention import MultiHeadAttention
+from model.pytorch.layers import FeedForward, LayerNorm, TokenEmbedding, PositionalEmbedding
 
 class TransformerBlock(nn.Module):
     def __init__(self, embed_dim: int, num_heads: int, ffn_intermediate_dim: int):

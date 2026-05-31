@@ -1,6 +1,6 @@
 import torch
 import pytest
-from src.model.pytorch.transformer import TransformerBlock, Transformer
+from model.pytorch.transformer import TransformerBlock, Transformer
 
 def test_transformer_block_shape():
     embed_dim = 64

@@ -1,7 +1,7 @@
 import time
 import numpy as np
 from typing import Dict
-from src.utils.backend_interface import BaseTransformerBackend
+from utils.backend_interface import BaseTransformerBackend
 
 
 class Profiler:

@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 from typing import Any, Dict, Optional, Tuple
-from src.utils.backend_interface import BaseTransformerBackend
+from utils.backend_interface import BaseTransformerBackend
 
 
 class MockBackend(BaseTransformerBackend):

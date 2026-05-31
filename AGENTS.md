@@ -98,3 +98,4 @@ details and theories of LLM.
    to math need intuitive explanations, and for matrix calculation should put
    with comments to indicate the dimension shape of the matrix.
 8. All code need to be using strict type hint to indicate the interfaces.
+9. When using `edit`, ensure `oldString` is unique and matches the file content exactly, including whitespace and indentation. If `edit` fails, use `write` to overwrite the file.

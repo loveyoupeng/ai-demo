@@ -1,7 +1,7 @@
 import numpy as np
 from typing import Any, Dict, Optional, Tuple
-from src.utils.backend_interface import BaseTransformerBackend
-from src.model.transformer import Transformer
+from utils.backend_interface import BaseTransformerBackend
+from model.transformer import Transformer
 
 
 class NumPyBackend(BaseTransformerBackend):
