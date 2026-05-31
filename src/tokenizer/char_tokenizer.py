@@ -36,7 +36,10 @@ class CharTokenizer:
         """
         # [Seq_Len]
         # [Seq_Len]
-        return np.array([self.char_to_int.get(c, self.char_to_int[self.chars[0]]) for c in text], dtype=np.int32)
+        return np.array(
+            [self.char_to_int.get(c, self.char_to_int[self.chars[0]]) for c in text],
+            dtype=np.int32,
+        )
 
     def decode(self, ids: np.ndarray) -> str:
         """

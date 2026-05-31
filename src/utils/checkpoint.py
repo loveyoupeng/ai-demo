@@ -2,6 +2,7 @@ import pickle
 from typing import Any, Tuple
 import os
 
+
 class ModelCheckpoint:
     """
     Handles saving and loading of Transformer models and tokenizers.
@@ -31,7 +32,9 @@ class ModelCheckpoint:
             pickle.dump(checkpoint, f)
         print(f"Checkpoint saved to {filepath}")
 
-    def load_checkpoint(self, filename: str, model_class: type, tokenizer_class: type) -> Tuple[Any, Any]:
+    def load_checkpoint(
+        self, filename: str, model_class: type, tokenizer_class: type
+    ) -> Tuple[Any, Any]:
         """
         Loads a model and tokenizer from a checkpoint.
         """

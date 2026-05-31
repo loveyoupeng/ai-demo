@@ -45,13 +45,14 @@ class Adam:
         """
         self.t += 1
 
-        if not self.m:
-            for key, val in params.items():
-                self.m[key] = np.zeros_like(val)
-                self.v[key] = np.zeros_like(val)
-
         for key in params:
             if key in grads:
+                # Initialize state for new parameters
+                if key not in self.m:
+                    self.m[key] = np.zeros_like(params[key])
+                if key not in self.v:
+                    self.v[key] = np.zeros_like(params[key])
+
                 g = grads[key]
 
                 self.m[key] = self.beta1 * self.m[key] + (1 - self.beta1) * g

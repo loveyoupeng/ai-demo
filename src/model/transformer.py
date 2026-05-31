@@ -10,6 +10,12 @@ class TransformerBlock(object):
     A single Transformer Decoder Block.
     Combines Multi-Head Attention (MHA) and a Mixture of Experts (MoE) layer,
     wrapped in residual connections and Layer Normalization.
+
+    Dimension tracking:
+    - Input $x$: $[B, L, D]$
+    - MHA Output: $[B, L, D]$
+    - MoE Output: $[B, L, D]$
+    - Final Block Output: $[B, L, D]$
     """
 
     def __init__(self, embed_dim: int, mha: MultiHeadAttention, moe: MoELayer):
@@ -166,6 +172,12 @@ class Transformer:
     The full Decoder-only Transformer model.
     Composed of a stack of Transformer blocks, token/positional embeddings,
     and a language model head.
+
+    Dimension tracking:
+    - Token/Pos Embedding: $[B, L, D]$
+    - Transformer Block stack: $[B, L, D]$
+    - LM Head Input: $[B, L, D]$
+    - Logits: $[B, L, V]$
     """
 
     def __init__(
@@ -317,7 +329,7 @@ class Transformer:
                 i = int(parts[1])
                 sublayer = parts[2]
                 param_name = ".".join(parts[3:])
-                
+
                 block = self.blocks[i]
                 if sublayer == "ln1":
                     block.ln1.set_params({param_name: v})

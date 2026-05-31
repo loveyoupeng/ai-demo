@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from src.backends.numpy_backend import NumPyBackend
+from src.backends.numpy.numpy_backend import NumPyBackend
 from tests.test_parity_utils import ParityTester
 
 class TestParityTesterLogic:
@@ -84,7 +84,3 @@ class TestParityTesterLogic:
         assert is_equal is False
         assert "error" in details
         assert "Key mismatch" in details["error"]
-
-
-
-

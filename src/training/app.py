@@ -8,17 +8,18 @@ from trainer import Trainer
 from utils.checkpoint import ModelCheckpoint
 from inference import AutoregressiveGenerator
 
+
 def run_training(args):
     # 1. Setup Data
     if args.data_path:
-        with open(args.data_path, 'r', encoding='utf-8') as f:
+        with open(args.data_path, "r", encoding="utf-8") as f:
             text = f.read()
         print(f"Loaded {len(text)} characters from {args.data_path}")
     else:
         # In a real scenario, we'd load from a file. For demo, we use a small text.
         text = "the quick brown fox jumps over the lazy dog. " * 50
         print("Using default toy dataset.")
-        
+
     tokenizer = CharTokenizer(text)
     vocab_size = tokenizer.vocab_size
 
@@ -48,6 +49,7 @@ def run_training(args):
     checkpoint.save_checkpoint(model, tokenizer, args.checkpoint_name)
     print(f"Model and tokenizer saved to {args.checkpoint_name}.pkl")
 
+
 def run_inference(args):
     # 1. Load Checkpoint
     checkpoint = ModelCheckpoint()
@@ -65,8 +67,11 @@ def run_inference(args):
 
     print(f"Generated Text: {generated_text}")
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Transformer E2E Training and Inference")
+    parser = argparse.ArgumentParser(
+        description="Transformer E2E Training and Inference"
+    )
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     # Training Subcommand
@@ -81,15 +86,25 @@ def main():
     train_parser.add_argument("--epochs", type=int, default=5)
     train_parser.add_argument("--lr", type=float, default=0.001)
     train_parser.add_argument("--checkpoint_name", type=str, default="demo_model")
-    train_parser.add_argument("--data_path", type=str, default=None, help="Path to a text file for training")
-
+    train_parser.add_argument(
+        "--data_path", type=str, default=None, help="Path to a text file for training"
+    )
 
     # Inference Subcommand
     infer_parser = subparsers.add_parser("infer", help="Run inference")
-    infer_parser.add_argument("--checkpoint_name", type=str, required=True, help="Name of checkpoint file (without .pkl)")
+    infer_parser.add_argument(
+        "--checkpoint_name",
+        type=str,
+        required=True,
+        help="Name of checkpoint file (without .pkl)",
+    )
     infer_parser.add_argument("--prompt", type=str, default="the", help="Prompt text")
-    infer_parser.add_argument("--gen_len", type=int, default=20, help="Number of tokens to generate")
-    infer_parser.add_argument("--temp", type=float, default=1.0, help="Temperature for sampling")
+    infer_parser.add_argument(
+        "--gen_len", type=int, default=20, help="Number of tokens to generate"
+    )
+    infer_parser.add_argument(
+        "--temp", type=float, default=1.0, help="Temperature for sampling"
+    )
 
     args = parser.parse_args()
 
@@ -99,6 +114,7 @@ def main():
         run_inference(args)
     else:
         parser.print_help()
+
 
 if __name__ == "__main__":
     main()

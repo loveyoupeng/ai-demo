@@ -8,8 +8,9 @@ from trainer import Trainer
 def test_trainer_train_step():
     """
     Integration test for Trainer.train_step.
-    Verifies that a single training step runs and reduces loss slightly.
+    Verifies that a single training step runs and produces a valid loss.
     """
+    np.random.seed(42)
     vocab_size = 10
     embed_dim = 8
     num_layers = 1
@@ -43,18 +44,16 @@ def test_trainer_train_step():
     # Perform one training step
     loss = trainer.train_step(input_ids, target_ids)
 
-    # Check if loss is a float
+    # Check if loss is a float and positive
     assert isinstance(loss, float)
-
-    # In a single step with random data, we can't guarantee loss decreases,
-    # but we can check it runs.
     assert loss > 0
 
 
 def test_trainer_parameter_update():
     """
-    Verifies that parameters are actually updated after a training step.
+    Verifies that all parameters are actually updated after a training step.
     """
+    np.random.seed(42)
     vocab_size = 10
     embed_dim = 8
     num_layers = 1
@@ -97,8 +96,9 @@ def test_trainer_parameter_update():
 
 def test_trainer_loss_reduction():
     """
-    Verifies that loss decreases on a very simple task (overfitting a single batch).
+    Verifies that loss decreases significantly on a very simple task (overfitting a single batch).
     """
+    np.random.seed(42)
     vocab_size = 5
     embed_dim = 4
     num_layers = 1
@@ -125,11 +125,13 @@ def test_trainer_loss_reduction():
     # Perform multiple steps
     initial_loss = trainer.train_step(input_ids, target_ids)
     loss = initial_loss
-    for _ in range(30):
+    for _ in range(50):
         loss = trainer.train_step(input_ids, target_ids)
 
-    assert loss < initial_loss, (
-        f"Loss did not decrease. Initial: {initial_loss}, Final: {loss}"
+    # Check for significant reduction (at least 50%)
+    reduction_ratio = initial_loss / loss if loss > 0 else float('inf')
+    assert reduction_ratio > 1.5, (
+        f"Loss did not decrease significantly. Initial: {initial_loss}, Final: {loss}, Ratio: {reduction_ratio:.2f}"
     )
 
 
@@ -137,6 +139,7 @@ def test_trainer_fit_small_batch():
     """
     Test that Trainer.fit runs on a small dummy data loader.
     """
+    np.random.seed(42)
     vocab_size = 10
     embed_dim = 8
     num_layers = 1

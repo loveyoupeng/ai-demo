@@ -1,18 +1,26 @@
 import numpy as np
 from typing import Tuple, Dict, Any
 
+
 class Router:
-    """
+    r"""
     The Routing/Gating network.
     Takes a token embedding and decides which experts to use.
 
     Mathematical context:
-    The router computes logits $z = X W_{router}$ where $W_{router} \in \mathbb{R}^{D \times N}$
-    and $N$ is the number of experts. These logits are then passed through a 
-    softmax to get routing probabilities $P_{b,s,i} = \text{softmax}(z_{b,s,i})$.
+    The router computes logits $$ z = X W_{router} $$ where $$ W_{router} \in \mathbb{R}^{D \times N} $$
+    and $$ N $$ is the number of experts. These logits are then passed through a
+    softmax to get routing probabilities $$ P_{b,s,i} = \text{softmax}(z_{b,s,i}) $$.
+
+    Dimension tracking:
+    - Input $X$: $[B, L, D]$ (Batch, Seq\_Len, Embed\_Dim)
+    - Weights $W_{router}$: $[D, N]$ (Embed\_Dim, Num\_Experts)
+    - Logits $z$: $[B, L, N]$
+    - Routing probabilities $P$: $[B, L, N]$
     """
 
     def __init__(self, embed_dim: int, num_experts: int):
+
         self.embed_dim = embed_dim
         self.num_experts = num_experts
 
@@ -22,12 +30,12 @@ class Router:
     def forward(self, x: np.ndarray) -> np.ndarray:
         """
         Args:
-            x: [Batch, Seq_Len, Embed_Dim]
+            x: Input tensor [Batch, Seq_Len, Embed_Dim]
         Returns:
-            [Batch, Seq_Len, Num_Experts] probabilities
+            [Batch, Seq_Len, Num_Experts] routing probabilities
         """
         # 1. Project to expert space
-        # [Batch, Seq_Len, Num_Experts]
+        # Logits shape: [Batch, Seq_Len, Num_Experts]
         logits = np.dot(x, self.weights)
         self.last_routing_weights = self._softmax(logits, axis=-1)
         return self.last_routing_weights
@@ -103,15 +111,22 @@ class Expert:
 
 
 class MoELayer:
-    """
+    r"""
     Mixture of Experts (MoE) layer.
     Uses a router to select the top-k experts for each token.
 
     Mathematical context:
     For each token $x_i$, we select $k$ experts using the router.
     The output is a weighted sum of the chosen experts:
-    $y_i = \sum_{j \in \text{top}_k(i)} P_{i,j} \cdot \text{Expert}_j(x_i)$
+    $y_i = \\sum_{j \\in \\text{top}_k(i)} P_{i,j} \\cdot \\text{Expert}_j(x_i)$
     where $P_{i,j}$ is the routing weight for the $j$-th expert.
+
+    Dimension tracking:
+    - Input $x$: $[B, L, D]$
+    - Top-k indices: $[B, L, K]$
+    - Top-k weights: $[B, L, K]$
+    - Experts outputs: $[N, B, L, D]$
+    - Combined output: $[B, L, D]$
     """
 
     def __init__(
@@ -143,7 +158,9 @@ class MoELayer:
         routing_weights = self.router.forward(x)
 
         # 2. Identify top-k experts for each token
+        # top_k_indices shape: [Batch, Seq_Len, K]
         top_k_indices = np.argsort(routing_weights, axis=-1)[..., -self.k :]
+        # top_k_weights shape: [Batch, Seq_Len, K]
         top_k_weights = np.take_along_axis(routing_weights, top_k_indices, axis=-1)
 
         # 3. Normalize top-k weights
@@ -152,10 +169,11 @@ class MoELayer:
         )
 
         # 4. Compute expert outputs
-        # [Num_Experts, Batch, Seq_Len, Embed_Dim]
+        # all_expert_outputs shape: [Num_Experts, Batch, Seq_Len, Embed_Dim]
         all_expert_outputs = np.array([exp.forward(x) for exp in self.experts])
 
         # 5. Weighted combination
+        # combined_output shape: [Batch, Seq_Len, Embed_Dim]
         combined_output = np.zeros_like(x)
 
         for b in range(batch_size):
@@ -187,10 +205,10 @@ class MoELayer:
         all_expert_outputs = cache["all_expert_outputs"]
 
         # 1. Gradient w.r.t. expert outputs and weights
-        # d_all_expert_outputs: [Num_Experts, Batch, Seq_Len, Embed_Dim]
+        # d_all_expert_outputs shape: [Num_Experts, Batch, Seq_Len, Embed_Dim]
         d_all_expert_outputs = np.zeros_like(all_expert_outputs)
 
-        # d_top_k_weights: [Batch, Seq_Len, K]
+        # d_top_k_weights shape: [Batch, Seq_Len, K]
         d_top_k_weights = np.zeros_like(top_k_weights)
 
         for b in range(batch_size):
@@ -222,6 +240,7 @@ class MoELayer:
         # 3. Gradient w.r.t. routing weights (router)
         # Account for normalization in forward pass: w_k = R_k / S
         # dL/dR_i = (1/S) * (dL/dw_i - sum_k (w_k * dL/dw_k))
+        # d_routing_weights shape: [Batch, Seq_Len, Num_Experts]
         d_routing_weights = np.zeros((batch_size, seq_len, self.num_experts))
 
         S = np.sum(top_k_weights, axis=-1, keepdims=True) + 1e-8

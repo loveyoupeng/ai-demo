@@ -1,17 +1,23 @@
 import numpy as np
 from typing import Tuple, Dict
 
+
 class TokenEmbedding:
-    """
+    r"""
     Learned token embeddings.
     Maps integer token IDs to continuous vectors.
 
     Mathematical context:
     The embedding layer is a lookup table $E \in \mathbb{R}^{V \times D}$,
     where $V$ is the vocabulary size and $D$ is the embedding dimension.
-    For an input sequence of indices $I \in \mathbb{Z}^{B \times L}$, 
-    the output is $X \in \mathbb{R}^{B \times L \times D}$ where 
+    For an input sequence of indices $I \in \mathbb{Z}^{B \times L}$,
+    the output is $X \in \mathbb{R}^{B \times L \times D}$ where
     $X_{b, l, d} = E_{I_{b, l}, d}$.
+
+    Dimension tracking:
+    - Input indices: $[B, L]$ (Batch, Seq\_Len)
+    - Weights $E$: $[V, D]$ (Vocab\_Size, Embed\_Dim)
+    - Output $X$: $[B, L, D]$
     """
 
     def __init__(self, vocab_size: int, embed_dim: int):
@@ -70,15 +76,19 @@ class TokenEmbedding:
 
 
 class PositionalEmbedding:
-    """
+    r"""
     Fixed sinusoidal positional embeddings.
-    Uses sine and cosine functions of different frequencies to encode 
+    Uses sine and cosine functions of different frequencies to encode
     absolute positions.
 
     Mathematical context:
-    $PE_{(pos, 2i)} = \sin(pos / 10000^{2i/d_{model}})$
-    $PE_{(pos, 2i+1)} = \cos(pos / 10000^{2i/d_{model}})$
+    $$ \\text{PE}_{(pos, 2i)} = \\sin(pos / 10000^{2i/d_{model}}) $$
+    $$ \\text{PE}_{(pos, 2i+1)} = \\cos(pos / 10000^{2i/d_{model}}) $$
     where $pos$ is the position and $i$ is the dimension index.
+
+    Dimension tracking:
+    - PE matrix: $[Max\_Seq\_Len, D]$
+    - Output: $[Seq\_Len, D]$ (broadcasted to $[B, L, D]$)
     """
 
     def __init__(self, max_seq_len: int, embed_dim: int):
@@ -88,10 +98,10 @@ class PositionalEmbedding:
         # [Max_Seq_Len, Embed_Dim]
         pe = np.zeros((max_seq_len, embed_dim))
         position = np.arange(0, max_seq_len)[:, np.newaxis]
-        
+
         # Frequency term calculation in log-space
         div_term = np.exp(np.arange(0, embed_dim, 2) * -(np.log(10000.0) / embed_dim))
-        
+
         pe[:, 0::2] = np.sin(position * div_term)
         pe[:, 1::2] = np.cos(position * div_term)
         self.pe = pe
@@ -115,11 +125,16 @@ class PositionalEmbedding:
 
 
 class FeedForward:
-    """
+    r"""
     Position-wise Feed-Forward Network (FFN).
-    Standard transformer component: $FFN(x) = \max(0, xW_1 + b_1)W_2 + b_2$.
+    Standard transformer component: $FFN(x) = \\max(0, xW_1 + b_1)W_2 + b_2$.
 
     Consists of two linear transformations with a ReLU activation.
+
+    Dimension tracking:
+    - Input $x$: $[B, L, D]$
+    - Intermediate $z_1, h$: $[B, L, D_{ff}]$
+    - Output: $[B, L, D]$
     """
 
     def __init__(self, embed_dim: int, dim_feedforward: int):
@@ -195,29 +210,42 @@ class FeedForward:
 
     def set_params(self, params: Dict[str, np.ndarray]) -> None:
         for k, v in params.items():
-            if k == "W1": self.W1 = v
-            elif k == "b1": self.b1 = v
-            elif k == "W2": self.W2 = v
-            elif k == "b2": self.b2 = v
+            if k == "W1":
+                self.W1 = v
+            elif k == "b1":
+                self.b1 = v
+            elif k == "W2":
+                self.W2 = v
+            elif k == "b2":
+                self.b2 = v
 
     def get_grads(self) -> Dict[str, np.ndarray]:
         return {
-            "W1": self.grad_W1, "b1": self.grad_b1,
-            "W2": self.grad_W2, "b2": self.grad_b2,
+            "W1": self.grad_W1,
+            "b1": self.grad_b1,
+            "W2": self.grad_W2,
+            "b2": self.grad_b2,
         }
 
 
 class LayerNorm:
-    """
+    r"""
     Layer Normalization.
     Normalizes activations across the feature dimension (last axis).
 
     Mathematical context:
-    $\text{LN}(x) = \gamma \cdot \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta$
-    where $\mu$ is the mean and $\sigma^2$ is the variance of $x$ across the feature dimension.
+    $\\text{LN}(x) = \\gamma \\cdot \\frac{x - \\mu}{\\sqrt{\\sigma^2 + \\epsilon}} + \\beta$
+    where $\\mu$ is the mean and $\\sigma^2$ is the variance of $x$ across the feature dimension.
+
+    Dimension tracking:
+    - Input $x$: $[B, L, D]$
+    - $\mu, \\sigma$: $[B, L, 1]$
+    - $\gamma, \\beta$: $[D]$
+    - Output: $[B, L, D]$
     """
 
     def __init__(self, embed_dim: int, eps: float = 1e-6):
+
         self.embed_dim = embed_dim
         self.eps = eps
         # Learnable params: [Embed_Dim]
@@ -238,17 +266,19 @@ class LayerNorm:
         # Mean and var over the feature dimension: [Batch, Seq_Len, 1]
         self.mean = np.mean(x, axis=-1, keepdims=True)
         self.var = np.var(x, axis=-1, keepdims=True)
-        
+
         self.x_norm = (x - self.mean) / np.sqrt(self.var + self.eps)
         return self.gamma * self.x_norm + self.beta
 
-    def backward(self, grad_output: np.ndarray) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    def backward(
+        self, grad_output: np.ndarray
+    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         """
         Returns dx and parameter gradients.
         """
         embed_dim = self.embed_dim
         # grad_output shape: [Batch, Seq_Len, Embed_Dim]
-        
+
         # 1. Gradients w.r.t gamma and beta
         self.grad_gamma = np.sum(grad_output * self.x_norm, axis=(0, 1))
         self.grad_beta = np.sum(grad_output, axis=(0, 1))
@@ -258,7 +288,9 @@ class LayerNorm:
 
         # 3. Gradient through normalization
         N = embed_dim
-        sum_grad_x_norm_x_norm = np.sum(grad_x_norm * self.x_norm, axis=-1, keepdims=True)
+        sum_grad_x_norm_x_norm = np.sum(
+            grad_x_norm * self.x_norm, axis=-1, keepdims=True
+        )
         sum_grad_x_norm = np.sum(grad_x_norm, axis=-1, keepdims=True)
 
         grad_x = (1.0 / np.sqrt(self.var + self.eps)) * (
@@ -274,9 +306,10 @@ class LayerNorm:
 
     def set_params(self, params: Dict[str, np.ndarray]) -> None:
         for k, v in params.items():
-            if k == "gamma": self.gamma = v
-            elif k == "beta": self.beta = v
+            if k == "gamma":
+                self.gamma = v
+            elif k == "beta":
+                self.beta = v
 
     def get_grads(self) -> Dict[str, np.ndarray]:
         return {"gamma": self.grad_gamma, "beta": self.grad_beta}
-

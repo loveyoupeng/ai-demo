@@ -1,16 +1,34 @@
 import numpy as np
 from typing import Optional, Tuple, Dict, Any
 
+
 class MultiHeadAttention:
-    """
-    Multi-Head Attention mechanism.
-    Allows the model to attend to different parts of the sequence simultaneously.
+    r"""
+    Multi-Head Attention (MHA) mechanism.
+
+    Intuition:
+    MHA allows the model to jointly attend to information from different
+    representation subspaces at different positions. Instead of one single
+    attention pass, we split the embedding dimension into multiple "heads,"
+    where each head can learn to focus on different aspects of the sequence
+    (e.g., one head focuses on grammar, another on semantic meaning).
 
     Mathematical context:
-    $\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V$
-    
-    Where $Q, K, V$ are projections of the input $X$ into query, key, and value spaces.
-    The multi-head aspect splits the $d_{model}$ dimension into $h$ heads of $d_k$ dimension each.
+    For a single head, the scaled dot-product attention is:
+    $$ \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V $$
+
+    In the multi-head setting, we project the input $X \in \mathbb{R}^{B \times L \times D}$
+    into $h$ heads using learned weight matrices $W_Q, W_K, W_V \in \mathbb{R}^{D \times D}$.
+    The output is then projected back using $W_O \in \mathbb{R}^{D \times D}$.
+
+    Dimension tracking:
+    - Input $x$: $[B, L, D]$
+    - $Q, K, V$ (after projection): $[B, L, D]$
+    - $Q, K, V$ (after head split): $[B, h, L, d_k]$
+    - Scores: $[B, h, L, L]$
+    - Attn weights: $[B, h, L, L]$
+    - Context: $[B, h, L, d_k]$
+    - Context output (after merge): $[B, L, D]$
     """
 
     def __init__(self, embed_dim: int, num_heads: int):
@@ -21,7 +39,6 @@ class MultiHeadAttention:
         self.head_dim = embed_dim // num_heads
 
         # Linear projections for Q, K, and V
-        # Weights combine all heads for efficiency
         # Shape: [Embed_Dim, Embed_Dim]
         self.W_q = np.random.randn(embed_dim, embed_dim) * 0.01
         self.W_k = np.random.randn(embed_dim, embed_dim) * 0.01
@@ -30,7 +47,7 @@ class MultiHeadAttention:
         # Output projection [Embed_Dim, Embed_Dim]
         self.W_o = np.random.randn(embed_dim, embed_dim) * 0.01
 
-        # Cache for KV values during inference
+        # Cache for KV values during inference (KV Cache)
         self.kv_cache: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
     def forward(
@@ -53,16 +70,22 @@ class MultiHeadAttention:
         batch_size, seq_len, _ = x.shape
 
         # 1. Linear projections
-        # [Batch, Seq_Len, Embed_Dim]
+        # Q, K, V shape: [Batch, Seq_Len, Embed_Dim]
         Q = np.dot(x, self.W_q)
         K = np.dot(x, self.W_k)
         V = np.dot(x, self.W_v)
 
         # 2. Split into multiple heads
-        # Reshape to [Batch, Seq_Len, Num_Heads, Head_Dim] and transpose to [Batch, Num_Heads, Seq_Len, Head_Dim]
-        Q = Q.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
-        K = K.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
-        V = V.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+        # Q, K, V shape: [Batch, Num_Heads, Seq_Len, Head_Dim]
+        Q = Q.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(
+            0, 2, 1, 3
+        )
+        K = K.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(
+            0, 2, 1, 3
+        )
+        V = V.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(
+            0, 2, 1, 3
+        )
 
         # --- KV CACHE LOGIC (for autoregressive generation) ---
         if use_cache and cache_idx is not None:
@@ -76,14 +99,14 @@ class MultiHeadAttention:
         # ----------------------
 
         # 3. Scaled Dot-Product Attention
-        # Scores = (Q @ K^T) / sqrt(d_k)
-        # [Batch, Num_Heads, Q_Seq_Len, K_Seq_Len]
+        # Scores shape: [Batch, Num_Heads, Q_Seq_Len, K_Seq_Len]
         d_k = self.head_dim
         scores = np.matmul(Q, K.transpose(0, 1, 3, 2)) / np.sqrt(d_k)
 
         # 4. Apply causal mask if provided
         if mask is not None:
-            # mask [Seq_Len, Seq_Len] broadcast to [Batch, Num_Heads, Q_Seq_Len, K_Seq_Len]
+            # mask shape: [Seq_Len, Seq_Len]
+            # scores shape: [Batch, Num_Heads, Q_Seq_Len, K_Seq_Len]
             scores = np.where(mask == 0, -1e9, scores)
 
         # 5. Softmax to get attention weights: [Batch, Num_Heads, Q_Seq_Len, K_Seq_Len]
@@ -93,7 +116,9 @@ class MultiHeadAttention:
         context = np.matmul(attn_weights, V)
 
         # 7. Concatenate heads: [Batch, Seq_Len, Embed_Dim]
-        context_out = context.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
+        context_out = context.transpose(0, 2, 1, 3).reshape(
+            batch_size, seq_len, self.embed_dim
+        )
 
         # 8. Final output projection
         output = np.dot(context_out, self.W_o)
@@ -141,8 +166,8 @@ class MultiHeadAttention:
         )
         d_context = np.dot(d_out, self.W_o.T)
 
-        # 2. Gradient w.r.t. attn_weights and V
-        # d_context_heads: [Batch, Num_Heads, Seq_Len, Head_Dim]
+        # 1. Gradient w.r.t. attn_weights and V
+        # d_context_heads shape: [Batch, Num_Heads, Seq_Len, Head_Dim]
         d_context_heads = d_context.reshape(
             batch_size, seq_len, self.num_heads, self.head_dim
         ).transpose(0, 2, 1, 3)
@@ -150,12 +175,15 @@ class MultiHeadAttention:
         if V is None or attn_weights is None:
             raise ValueError("V and attn_weights must be provided for backward pass")
 
+        # d_V shape: [Batch, Num_Heads, Seq_Len, Head_Dim]
         d_V = np.matmul(attn_weights.transpose(0, 1, 3, 2), d_context_heads)
+        # d_attn_weights shape: [Batch, Num_Heads, Seq_Len, Seq_Len]
         d_attn_weights = np.matmul(d_context_heads, V.transpose(0, 1, 3, 2))
 
         # 3. Gradient w.r.t. scores (after softmax)
         d_scores = attn_weights * (
-            d_attn_weights - np.sum(d_attn_weights * attn_weights, axis=-1, keepdims=True)
+            d_attn_weights
+            - np.sum(d_attn_weights * attn_weights, axis=-1, keepdims=True)
         )
 
         # 4. Apply mask gradient
@@ -196,10 +224,14 @@ class MultiHeadAttention:
 
     def set_params(self, params: Dict[str, np.ndarray]) -> None:
         for k, v in params.items():
-            if k == "W_q": self.W_q = v
-            elif k == "W_k": self.W_k = v
-            elif k == "W_v": self.W_v = v
-            elif k == "W_o": self.W_o = v
+            if k == "W_q":
+                self.W_q = v
+            elif k == "W_k":
+                self.W_k = v
+            elif k == "W_v":
+                self.W_v = v
+            elif k == "W_o":
+                self.W_o = v
 
     def get_grads(self) -> Dict[str, np.ndarray]:
         return {
