@@ -43,15 +43,18 @@ details and theories of LLM.
   - [x] LayerNorm (parity test passing ✅ 4/4)
   - [x] FeedForward (parity test passing ✅ 6/6)
   - [x] PositionalEmbedding (parity test passing - PE matrix parity ✅, forward/backward ✅)
-- [x] 15/15 parity tests passing (TokenEmbedding + LayerNorm + FeedForward + PositionalEmbedding).
+  - [x] MultiHeadAttention (parity test passing - forward + all backward params ✅ 7/7)
+- [x] 22/22 parity tests passing (TokenEmbedding + LayerNorm + FeedForward + PositionalEmbedding + MultiHeadAttention).
 
 #### In Progress
 
-- [ ] MoE layer → Attention layer → TransformerBlock → Full Transformer
+- [ ] MoE layer parity (PyTorch implementation needed)
+- [ ] TransformerBlock (attention + FFN + LayerNorm in composition)
+- [ ] Full Transformer
 
 #### Next Steps
 
-- [ ] Complete PyTorch implementation for all remaining layers with parity tests.
+- [ ] Complete Phase 1: All remaining PyTorch layers with parity tests.
 - [ ] Training Orchestration: Trainer, Optimizer, Loss functions.
 - [ ] Evaluation: perplexity and accuracy metrics.
 - [ ] Level 2: Triton Implementation (Kernel-level optimization).
