@@ -37,21 +37,27 @@ details and theories of LLM.
 - [x] Implementation of core transformer components using NumPy.
 - [x] Implementation of manual backward passes for NumPy.
 - [x] Archiving of failed PyTorch prototype.
+- [x] Phase 0: Infrastructure (Canonical Registry & BaseBackend).
+- [x] Phase 1: PyTorch Re-implementation (TDD approach)
+  - [x] TokenEmbedding (parity test passing ✅ 1/1)
+  - [x] LayerNorm (parity test passing ✅ 4/4)
+  - [x] FeedForward (parity test passing ✅ 6/6)
+- [x] All 11 parity tests passing (TokenEmbedding + LayerNorm + FeedForward).
 
 #### In Progress
 
-- [ ] Phase 0: Infrastructure (Canonical Registry & BaseBackend)
-- [ ] Phase 1: PyTorch Re-implementation (TDD approach)
-      - [ ] TokenEmbedding
-      - [ ] LayerNorm
-      - [ ] Attention
-      - [ ] FeedForward
-      - [ ] MoE
-      - [ ] Transformer
+- [ ] PyTorch Layer 2: PositionalEmbedding → Attention → TransformerBlock → MoE → Full Transformer
+- [ ] Training Orchestration: Trainer, Optimizer, Loss functions
+- [ ] Evaluation: perplexity and accuracy metrics
 
 #### Next Steps
 
-- [ ] Complete Level 1: PyTorch Implementation.
+- [x] Complete Phase 1 PyTorch layers for TokenEmbedding, LayerNorm, FeedForward.
+- [ ] Complete Phase 1: All remaining PyTorch layers with parity tests.
+- [ ] Level 2: Triton Implementation (Kernel-level optimization).
+- [ ] Level 3: CUDA Implementation (Low-level hardware control).
+- [ ] Benchmarking & Profiling.
+- [ ] Final Educational Synthesis: Concept-to-Tool mapping guide.
 - [ ] Level 2: Triton Implementation (Kernel-level optimization).
 - [ ] Level 3: CUDA Implementation (Low-level hardware control).
 - [ ] Final Educational Synthesis: Concept-to-Tool mapping guide.
