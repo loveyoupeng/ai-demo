@@ -144,8 +144,9 @@ class MoELayer(nn.Module):
             if k.startswith("router."):
                 param_name = k.replace("router.", "")
                 self.router.set_params({param_name: v})
-            elif k.startswith("expert."):
+            elif k.startswith("experts."):
                 parts = k.split(".")
                 i = int(parts[1])
                 param_name = ".".join(parts[2:])
                 self.experts[i].set_params({param_name: v})
+

@@ -34,44 +34,27 @@ details and theories of LLM.
 #### Finished
 
 - [x] Project structure and repository initialization.
-- [x] Implementation of core transformer components (`TokenEmbedding`,
-      `PositionalEmbedding`, `FeedForward`, `LayerNorm`, `MultiHeadAttention`,
-      `Router`, `Expert`, `MoELayer`, `TransformerBlock`, `Transformer`,
-      `AutoregressiveGenerator`) using NumPy.
-- [x] Implementation of manual backward passes for all core layers.
-- [x] Implementation of `SGD` and `Adam` optimizers.
-- [x] Implementation of `CrossEntropyLoss`.
-- [x] Implementation of `Trainer` orchestration.
-- [x] Refactoring of codebase for consistent return signatures.
-- [x] Fixed integration bugs in `Expert.backward` and `MoELayer`.
-- [x] Implemented Training App (data loading and loop driver).
-- [x] Implemented Evaluation Framework (Perplexity, Accuracy).
-- [x] E2E Verification: Full training-to-inference pipeline.
-- [x] Code Quality Audit: Linting and type checking.
-- [x] Pedagogical Audit: Enhancing documentation (NumPy modules) with deep theoretical,
-      mathematical, and intuitive explanations, including dimension tracking.
+- [x] Implementation of core transformer components using NumPy.
+- [x] Implementation of manual backward passes for NumPy.
+- [x] Archiving of failed PyTorch prototype.
 
 #### In Progress
 
-- [ ] Infrastructure: Implement Parity Test Suite and Profiling Engine (Debugging parity mismatch)
-- [x] Level 1: PyTorch Implementation (High-level API)
-      - [x] `MultiHeadAttention` in `src/model/pytorch/attention.py`
-      - [x] `FeedForward` in `src/model/pytorch/layers.py`
-      - [x] `TransformerBlock` and `Transformer` in `src/model/pytorch/transformer.py`
-      - [x] Follow cleanup workflow: Pyright fix, Ruff reorg/format, Test verification, Checkpoint commit.
+- [ ] Phase 0: Infrastructure (Canonical Registry & BaseBackend)
+- [ ] Phase 1: PyTorch Re-implementation (TDD approach)
+      - [ ] TokenEmbedding
+      - [ ] LayerNorm
+      - [ ] Attention
+      - [ ] FeedForward
+      - [ ] MoE
+      - [ ] Transformer
 
 #### Next Steps
 
-- [ ] Resolve PyTorch vs NumPy parity mismatch in forward pass.
-- [ ] Implement full parity testing (Forward & Backward).
-- [ ] Complete PyTorch backend implementation.
-
-
-- [ ] Level 1: PyTorch Implementation (High-level API)
-      - Follow cleanup workflow: Pyright fix, Ruff reorg/format, Test verification, Checkpoint commit.
-- [ ] Level 2: Triton Implementation (Kernel-level optimization)
-- [ ] Level 3: CUDA Implementation (Low-level hardware control)
-- [ ] Final Educational Synthesis: Concept-to-Tool mapping guide and Comparison Report.
+- [ ] Complete Level 1: PyTorch Implementation.
+- [ ] Level 2: Triton Implementation (Kernel-level optimization).
+- [ ] Level 3: CUDA Implementation (Low-level hardware control).
+- [ ] Final Educational Synthesis: Concept-to-Tool mapping guide.
 
 ## Tooling
 
