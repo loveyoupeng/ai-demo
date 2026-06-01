@@ -25,6 +25,11 @@ class ParameterRegistry:
         self._mappings[backend][internal_name] = canonical_name
         self._rev_mappings[backend][canonical_name] = internal_name
 
+    def clear(self) -> None:
+        """Clear all registered mappings."""
+        self._mappings = {}
+        self._rev_mappings = {}
+
     def get_canonical_name(self, backend: str, internal_name: str) -> str:
         """
         Translates an internal backend name to a canonical name.

@@ -1,5 +1,6 @@
 import numpy as np
 from typing import Tuple, Dict, Any
+from src.model.layers import FeedForward
 
 
 class Router:
@@ -53,7 +54,7 @@ class Router:
         """
         for k, v in params.items():
             if k == "weights":
-                self.weights = v
+                self.weights = v.copy()
 
     def backward(
         self, x: np.ndarray, d_probs: np.ndarray
@@ -86,8 +87,6 @@ class Expert:
     """
 
     def __init__(self, embed_dim: int, dim_ff: int):
-        from model.layers import FeedForward
-
         self.ffn = FeedForward(embed_dim, dim_ff)
 
     def forward(self, x: np.ndarray) -> np.ndarray:
@@ -118,7 +117,7 @@ class MoELayer:
     Mathematical context:
     For each token $x_i$, we select $k$ experts using the router.
     The output is a weighted sum of the chosen experts:
-    $y_i = \\sum_{j \\in \\text{top}_k(i)} P_{i,j} \\cdot \\text{Expert}_j(x_i)$
+    $y_i = \sum_{j \in \text{top}_k(i)} P_{i,j} \cdot \text{Expert}_j(x_i)$
     where $P_{i,j}$ is the routing weight for the $j$-th expert.
 
     Dimension tracking:
