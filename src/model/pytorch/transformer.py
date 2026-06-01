@@ -1,22 +1,21 @@
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, cast
+from typing import Optional, Dict, cast, Any
 from model.pytorch.attention import MultiHeadAttention
 from model.pytorch.layers import (
-    FeedForward,
     LayerNorm,
     TokenEmbedding,
     PositionalEmbedding,
 )
-
+from model.pytorch.moe import MoELayer
 
 class TransformerBlock(nn.Module):
-    def __init__(self, embed_dim: int, num_heads: int, ffn_intermediate_dim: int):
+    def __init__(self, embed_dim: int, num_heads: int, num_experts: int):
         super().__init__()
         self.ln1 = LayerNorm(embed_dim)
         self.attn = MultiHeadAttention(embed_dim, num_heads)
         self.ln2 = LayerNorm(embed_dim)
-        self.ffn = FeedForward(embed_dim, ffn_intermediate_dim)
+        self.moe = MoELayer(embed_dim, num_experts)
 
     def forward(
         self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
@@ -24,18 +23,31 @@ class TransformerBlock(nn.Module):
         # Pre-LN residual connection
         attn_out, _ = self.attn(self.ln1(x), mask=mask)
         x = x + attn_out
-        x = x + self.ffn(self.ln2(x))
+        x = x + self.moe(self.ln2(x))
         return x
 
     def get_params(self) -> Dict[str, torch.Tensor]:
-        return {}
+        params = {}
+        for k, v in self.ln1.get_params().items():
+            params[f"ln1.{k}"] = v
+        for k, v in self.ln2.get_params().items():
+            params[f"ln2.{k}"] = v
+        for k, v in self.attn.get_params().items():
+            params[f"attn.{k}"] = v
+        for k, v in self.moe.get_params().items():
+            params[f"moe.{k}"] = v
+        return params
 
     def set_params(self, params: Dict[str, torch.Tensor]) -> None:
-        pass
-
-    def get_grads(self) -> Dict[str, torch.Tensor]:
-        return {}
-
+        for k, v in params.items():
+            if k.startswith("ln1."):
+                self.ln1.set_params({k.replace("ln1.", ""): v})
+            elif k.startswith("ln2."):
+                self.ln2.set_params({k.replace("ln2.", ""): v})
+            elif k.startswith("attn."):
+                self.attn.set_params({k.replace("attn.", ""): v})
+            elif k.startswith("moe."):
+                self.moe.set_params({k.replace("moe.", ""): v})
 
 class Transformer(nn.Module):
     def __init__(
@@ -45,15 +57,16 @@ class Transformer(nn.Module):
         num_heads: int,
         num_layers: int,
         max_seq_len: int,
-        ffn_intermediate_dim: int,
+        num_experts: int,
     ):
         super().__init__()
         self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
         self.token_embedding = TokenEmbedding(vocab_size, embed_dim)
         self.positional_embedding = PositionalEmbedding(max_seq_len, embed_dim)
         self.layers = nn.ModuleList(
             [
-                TransformerBlock(embed_dim, num_heads, ffn_intermediate_dim)
+                TransformerBlock(embed_dim, num_heads, num_experts)
                 for _ in range(num_layers)
             ]
         )
@@ -68,9 +81,8 @@ class Transformer(nn.Module):
         pe = self.positional_embedding()
         x = x + pe[:seq_len, :].unsqueeze(0)
 
-        # If no mask is provided, create a causal mask for decoder-only transformer
         if mask is None:
-            mask = torch.tril(torch.ones(seq_len, seq_len, device=indices.device))  # type: ignore
+            mask = torch.tril(torch.ones((seq_len, seq_len), device=indices.device))
 
         for layer in self.layers:
             x = layer(x, mask=mask)
@@ -80,10 +92,26 @@ class Transformer(nn.Module):
         return logits
 
     def get_params(self) -> Dict[str, torch.Tensor]:
-        return {"lm_head_weight": self.lm_head.weight}
+        params = {}
+        for k, v in self.token_embedding.get_params().items():
+            params[f"token_embedding.{k}"] = v
+        for i, layer in enumerate(self.layers):
+            for k, v in layer.get_params().items():
+                params[f"layers.{i}.{k}"] = v
+        for k, v in self.ln_f.get_params().items():
+            params[f"ln_f.{k}"] = v
+        params["lm_head.weight"] = self.lm_head.weight
+        return params
 
     def set_params(self, params: Dict[str, torch.Tensor]) -> None:
-        pass
-
-    def get_grads(self) -> Dict[str, torch.Tensor]:
-        return {"lm_head_weight": cast(torch.Tensor, self.lm_head.weight.grad)}
+        for k, v in params.items():
+            if k.startswith("token_embedding."):
+                self.token_embedding.set_params({k.replace("token_embedding.", ""): v})
+            elif k.startswith("layers."):
+                parts = k.split(".")
+                idx = int(parts[1])
+                self.layers[idx].set_params({ ".".join(parts[2:]): v })
+            elif k.startswith("ln_f."):
+                self.ln_f.set_params({k.replace("ln_f.", ""): v})
+            elif k == "lm_head.weight":
+                self.lm_head.weight.data.copy_(v)
