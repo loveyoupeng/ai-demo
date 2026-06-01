@@ -174,7 +174,7 @@ class PyTorchPositionalEmbedding(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self.x = x
-        return x + self.pe[:x.shape[0], :]
+        return x +         self.pe[:x.shape[1], :]
 
     def backward(self, grad_output: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         return grad_output, {"pe": torch.zeros_like(self.pe)}

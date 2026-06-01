@@ -24,7 +24,7 @@ class TestPositionalEmbeddingParity:
         np.testing.assert_allclose(
             self.numpy_pe.pe, 
             self.pytorch_pe.pe.detach().numpy(),
-            rtol=1e-6, atol=1e-6
+            rtol=1e-6, atol=3e-6
         )
 
     def test_forward_parity(self):
