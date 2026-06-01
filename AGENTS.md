@@ -53,14 +53,19 @@ details and theories of LLM.
 
 #### In Progress
 
-- [ ] Infrastructure: Implement Parity Test Suite and Profiling Engine.
+- [ ] Infrastructure: Implement Parity Test Suite and Profiling Engine (Debugging parity mismatch)
 - [x] Level 1: PyTorch Implementation (High-level API)
       - [x] `MultiHeadAttention` in `src/model/pytorch/attention.py`
       - [x] `FeedForward` in `src/model/pytorch/layers.py`
       - [x] `TransformerBlock` and `Transformer` in `src/model/pytorch/transformer.py`
       - [x] Follow cleanup workflow: Pyright fix, Ruff reorg/format, Test verification, Checkpoint commit.
 
-#### Remaining
+#### Next Steps
+
+- [ ] Resolve PyTorch vs NumPy parity mismatch in forward pass.
+- [ ] Implement full parity testing (Forward & Backward).
+- [ ] Complete PyTorch backend implementation.
+
 
 - [ ] Level 1: PyTorch Implementation (High-level API)
       - Follow cleanup workflow: Pyright fix, Ruff reorg/format, Test verification, Checkpoint commit.
