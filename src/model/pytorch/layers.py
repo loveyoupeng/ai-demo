@@ -156,3 +156,34 @@ class PyTorchFeedForward(nn.Module):
         if self.w2.grad is not None: grads["ffn.w2"] = self.w2.grad
         if self.b2.grad is not None: grads["ffn.b2"] = self.b2.grad
         return grads
+
+class PyTorchPositionalEmbedding(nn.Module):
+    def __init__(self, max_seq_len: int, embed_dim: int):
+        super().__init__()
+        self.max_seq_len = max_seq_len
+        self.embed_dim = embed_dim
+        
+        pe = torch.zeros((max_seq_len, embed_dim))
+        position = torch.arange(0, max_seq_len, dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, embed_dim, 2, dtype=torch.float32) * -(torch.log(torch.tensor(10000.0)) / embed_dim)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer("pe", pe)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.x = x
+        return x + self.pe[:x.shape[0], :]
+
+    def backward(self, grad_output: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        return grad_output, {"pe": torch.zeros_like(self.pe)}
+
+    def get_params(self) -> Dict[str, torch.Tensor]:
+        return {"pos.pe": self.pe}
+
+    def set_params(self, params: Dict[str, Any]) -> None:
+        pass
+
+    def get_grads(self) -> Dict[str, torch.Tensor]:
+        return {}

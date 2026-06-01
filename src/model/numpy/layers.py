@@ -41,7 +41,7 @@ class NumPyPositionalEmbedding:
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         self.x = x
-        return x + self.pe[:x.shape[0], :]
+        return x + self.pe[:x.shape[1], :]
 
     def backward(self, grad_output: np.ndarray) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         return grad_output, {}

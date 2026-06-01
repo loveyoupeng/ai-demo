@@ -42,24 +42,21 @@ details and theories of LLM.
   - [x] TokenEmbedding (parity test passing ✅ 1/1)
   - [x] LayerNorm (parity test passing ✅ 4/4)
   - [x] FeedForward (parity test passing ✅ 6/6)
-- [x] All 11 parity tests passing (TokenEmbedding + LayerNorm + FeedForward).
+  - [x] PositionalEmbedding (parity test passing - PE matrix parity ✅, forward/backward ✅)
+- [x] 15/15 parity tests passing (TokenEmbedding + LayerNorm + FeedForward + PositionalEmbedding).
 
 #### In Progress
 
-- [ ] PyTorch Layer 2: PositionalEmbedding → Attention → TransformerBlock → MoE → Full Transformer
-- [ ] Training Orchestration: Trainer, Optimizer, Loss functions
-- [ ] Evaluation: perplexity and accuracy metrics
+- [ ] MoE layer → Attention layer → TransformerBlock → Full Transformer
 
 #### Next Steps
 
-- [x] Complete Phase 1 PyTorch layers for TokenEmbedding, LayerNorm, FeedForward.
-- [ ] Complete Phase 1: All remaining PyTorch layers with parity tests.
+- [ ] Complete PyTorch implementation for all remaining layers with parity tests.
+- [ ] Training Orchestration: Trainer, Optimizer, Loss functions.
+- [ ] Evaluation: perplexity and accuracy metrics.
 - [ ] Level 2: Triton Implementation (Kernel-level optimization).
 - [ ] Level 3: CUDA Implementation (Low-level hardware control).
 - [ ] Benchmarking & Profiling.
-- [ ] Final Educational Synthesis: Concept-to-Tool mapping guide.
-- [ ] Level 2: Triton Implementation (Kernel-level optimization).
-- [ ] Level 3: CUDA Implementation (Low-level hardware control).
 - [ ] Final Educational Synthesis: Concept-to-Tool mapping guide.
 
 ## Tooling
