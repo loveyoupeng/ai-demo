@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import numpy as np
 from model.attention import MultiHeadAttention
@@ -81,7 +81,7 @@ class TransformerBlock(object):
         return x_after_moe, cache
 
     def backward(
-        self, grad_output: np.ndarray, cache: dict[str, object]
+        self, grad_output: np.ndarray, cache: dict[str, Any]
     ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """
         Backward pass for TransformerBlock.
@@ -279,7 +279,7 @@ class Transformer:
         Returns all gradients collected from the backward pass.
         """
         # 1. LM Head
-        lm_head_input = cache["lm_head_input"]
+        lm_head_input = cast(np.ndarray, cache["lm_head_input"])
         d_lm_head = np.dot(
             lm_head_input.reshape(-1, self.embed_dim).T,
             grad_logits.reshape(-1, self.vocab_size),
@@ -290,7 +290,7 @@ class Transformer:
 
         # 2. Transformer Blocks
         dx = d_lm_head_input
-        block_caches = cache["blocks_cache"]
+        block_caches = cast(list[dict[str, object]], cache["blocks_cache"])
         for i in range(self.num_layers - 1, -1, -1):
             block = self.blocks[i]
             block_cache = block_caches[i]

@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 import numpy as np
 import torch
-from src.model.numpy.layers import NumPyFeedForward
-from src.model.pytorch.layers import PyTorchFeedForward
-from src.core.registry import registry
+from model.numpy.layers import NumPyFeedForward
+from model.pytorch.layers import PyTorchFeedForward
+from core.registry import registry
 
 class TestFeedForwardParity:
     def setup_method(self):

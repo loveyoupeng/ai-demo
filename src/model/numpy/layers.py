@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-from src.core.registry import registry
+from core.registry import registry
 
 class NumPyTokenEmbedding:
     def __init__(self, vocab_size: int, embed_dim: int):

@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 import numpy as np
 import torch
-from src.model.attention import MultiHeadAttention as NumPyAttention
-from src.model.pytorch.attention import PyTorchMultiHeadAttention as PyTorchAttention
+from model.attention import MultiHeadAttention as NumPyAttention
+from model.pytorch.attention import PyTorchMultiHeadAttention as PyTorchAttention
 
 class TestMultiHeadAttentionParity:
     def setup_method(self):

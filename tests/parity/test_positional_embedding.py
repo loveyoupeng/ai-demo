@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 import numpy as np
 import torch
-from src.model.numpy.layers import NumPyPositionalEmbedding
-from src.model.pytorch.layers import PyTorchPositionalEmbedding
+from model.numpy.layers import NumPyPositionalEmbedding
+from model.pytorch.layers import PyTorchPositionalEmbedding
 
 class TestPositionalEmbeddingParity:
     """

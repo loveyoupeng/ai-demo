@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 
 
@@ -300,11 +302,11 @@ class MoELayer:
             dx       : Gradient w.r.t. input :math:`[B, L, D]`.
             grads    : Flat parameter-gradient dict (router keys prefixed with ``"router."``).
         """
-        top_k_indices: np.ndarray = cache["top_k_indices"]     # [B, L, K]
-        top_k_weights: np.ndarray = cache["top_k_weights"]     # [B, L, K] normalised
-        top_k_sum: np.ndarray = cache["top_k_sum"]             # [B, L, 1]
-        routing_weights: np.ndarray = cache["routing_weights"] # [B, L, N]
-        all_expert_outputs: np.ndarray = cache["all_expert_outputs"]  # [N, B, L, D]
+        top_k_indices: np.ndarray = cast(np.ndarray, cache["top_k_indices"])
+        top_k_weights: np.ndarray = cast(np.ndarray, cache["top_k_weights"])
+        top_k_sum: np.ndarray = cast(np.ndarray, cache["top_k_sum"])
+        routing_weights: np.ndarray = cast(np.ndarray, cache["routing_weights"])
+        all_expert_outputs: np.ndarray = cast(np.ndarray, cache["all_expert_outputs"])
 
         batch_size, seq_len, embed_dim = x.shape
 

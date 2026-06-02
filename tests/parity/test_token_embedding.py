@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 import numpy as np
 import torch
-from src.model.numpy.layers import NumPyTokenEmbedding
-from src.model.pytorch.layers import PyTorchTokenEmbedding
-from src.core.registry import registry
+from model.numpy.layers import NumPyTokenEmbedding
+from model.pytorch.layers import PyTorchTokenEmbedding
+from core.registry import registry
 
 def test_token_embedding_parity():
     vocab_size = 32

@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import numpy as np
-from src.core.registry import registry
+from core.registry import registry
 
 class PyTorchTokenEmbedding(nn.Module):
     def __init__(self, vocab_size: int, embed_dim: int):
@@ -20,14 +20,16 @@ class PyTorchTokenEmbedding(nn.Module):
         output = self.embedding(self.indices)
         loss = (output * grad_output).sum()
         loss.backward()
-        dx = grad_output
+        if self.embedding.weight.grad is None:
+            raise RuntimeError("embedding.weight.grad is None")
+        dx = grad_output 
         grads = self.get_grads()
         return dx, grads
 
     def get_params(self) -> dict[str, torch.Tensor]:
         return {"embedding.weights": self.embedding.weight}
 
-    def set_params(self, params: dict[str, object]) -> None:
+    def set_params(self, params: dict[str, np.ndarray | torch.Tensor]) -> None:
         if "embedding.weights" in params:
             val = params["embedding.weights"]
             if isinstance(val, np.ndarray):
@@ -69,13 +71,14 @@ class PyTorchLayerNorm(nn.Module):
         loss.backward()
         
         grad_x = x.grad
+        assert grad_x is not None, "grad_x should not be None after backward"
         grads = self.get_grads()
         return grad_x, grads
 
     def get_params(self) -> dict[str, torch.Tensor]:
         return {"ln.gamma": self.gamma, "ln.beta": self.beta}
 
-    def set_params(self, params: dict[str, object]) -> None:
+    def set_params(self, params: dict[str, np.ndarray | torch.Tensor]) -> None:
         if "ln.gamma" in params:
             val = params["ln.gamma"]
             if isinstance(val, np.ndarray):
@@ -129,6 +132,7 @@ class PyTorchFeedForward(nn.Module):
         loss.backward()
         
         grad_x = x.grad
+        assert grad_x is not None, "x.grad should not be None after backward"
         grads = self.get_grads()
         return grad_x, grads
 
@@ -140,7 +144,7 @@ class PyTorchFeedForward(nn.Module):
             "ffn.b2": self.b2
         }
 
-    def set_params(self, params: dict[str, object]) -> None:
+    def set_params(self, params: dict[str, np.ndarray | torch.Tensor]) -> None:
         for k in ["w1", "b1", "w2", "b2"]:
             canonical_key = f"ffn.{k}"
             if canonical_key in params:
@@ -179,13 +183,15 @@ class PyTorchPositionalEmbedding(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self.x = x
-        return x +         self.pe[:x.shape[1], :]
+        pe = self.get_buffer("pe")  # type: ignore[arg-type]
+        return x + pe[:x.shape[1], :]
 
     def backward(self, grad_output: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        return grad_output, {"pe": torch.zeros_like(self.pe)}
+        pe = self.get_buffer("pe")  # type: ignore[arg-type]
+        return grad_output, {"pe": torch.zeros_like(pe)}
 
     def get_params(self) -> dict[str, torch.Tensor]:
-        return {"pos.pe": self.pe}
+        return {"pos.pe": self.get_buffer("pe")}  # type: ignore[return-value]
 
     def set_params(self, params: dict[str, object]) -> None:
         pass

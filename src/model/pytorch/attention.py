@@ -5,7 +5,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import numpy as np
-from src.core.registry import registry
+from core.registry import registry
 
 
 class PyTorchMultiHeadAttention(nn.Module):

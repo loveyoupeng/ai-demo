@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 import torch.nn as nn
 import numpy as np
-from src.core.registry import registry
+from core.registry import registry
 
 
 class PyTorchRouter(nn.Module):
@@ -77,7 +79,7 @@ class PyTorchRouter(nn.Module):
                 if isinstance(param, np.ndarray):
                     param = torch.from_numpy(param)
                 with torch.no_grad():
-                    self.w.copy_(param)
+                    self.w.copy_(cast(torch.Tensor, param))
 
 
 class PyTorchExpert(nn.Module):
@@ -304,10 +306,10 @@ class PyTorchMoELayer(nn.Module):
             dx      : Gradient w.r.t. input :math:`[B, L, D]`.
             grads   : Flat parameter-gradient dict.
         """
-        top_k_indices: torch.Tensor = cache["top_k_indices"]      # [B, L, K]
-        top_k_weights: torch.Tensor = cache["top_k_weights"]      # [B, L, K]
-        top_k_sum: torch.Tensor = cache["top_k_sum"]              # [B, L, 1]
-        all_expert_outputs: torch.Tensor = cache["all_expert_outputs"]  # [N, B, L, D]
+        top_k_indices: torch.Tensor = cast(torch.Tensor, cache["top_k_indices"])
+        top_k_weights: torch.Tensor = cast(torch.Tensor, cache["top_k_weights"])
+        top_k_sum: torch.Tensor = cast(torch.Tensor, cache["top_k_sum"])
+        all_expert_outputs: torch.Tensor = cast(torch.Tensor, cache["all_expert_outputs"])
 
         batch_size, seq_len, embed_dim = x.shape
 
@@ -352,7 +354,7 @@ class PyTorchMoELayer(nn.Module):
             if mask.any():
                 dx_i: torch.Tensor
                 grads_i: dict[str, torch.Tensor]
-                dx_i, grads_i = self.experts[i].backward(x, d_all_expert_outputs[i])
+                dx_i, grads_i = self.experts[i].backward(x, d_all_expert_outputs[i])  # type: ignore[index]
                 d_x_from_experts = d_x_from_experts + dx_i
                 for name, grad in grads_i.items():
                     grads_experts[f"expert.{i}.{name}"] = grad
@@ -401,8 +403,8 @@ class PyTorchMoELayer(nn.Module):
         params: dict[str, torch.Tensor] = {}
         for name, param in self.router.get_params().items():
             params[f"router.{name}"] = param
-        for i, expert in enumerate(self.experts):
-            for name, param in expert.get_params().items():
+        for i, expert in enumerate(self.experts):  # type: ignore[call-arg]
+            for name, param in expert.get_params().items():  # type: ignore[union-attr]
                 params[f"expert.{i}.{name}"] = param
         return params
 
@@ -418,4 +420,4 @@ class PyTorchMoELayer(nn.Module):
                 assert parts[0] == "expert" and parts[1].isdigit()
                 idx = int(parts[1])
                 key = parts[2]
-                self.experts[idx].set_params({key: param})
+                self.experts[idx].set_params({key: param})  # type: ignore[union-attr]

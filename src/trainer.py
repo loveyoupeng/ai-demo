@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 from model.transformer import Transformer
 from loss import CrossEntropyLoss
@@ -43,19 +45,21 @@ class Trainer:
         grads = self.model.backward(grad_logits, cache)
 
         # 4. Update weights
-        self.optimizer.step(self.model.get_params(), grads)
+        any_optimizer: Any = self.optimizer
+        any_optimizer.step(self.model.get_params(), grads)
 
         return loss
 
     def fit(self, data_loader: object, epochs: int):
+        any_loader: Any = data_loader
         for epoch in range(epochs):
             total_loss = 0
-            for batch_idx, (input_ids, target_ids) in enumerate(data_loader):
+            for batch_idx, (input_ids, target_ids) in enumerate(any_loader):
                 loss = self.train_step(input_ids, target_ids)
                 total_loss += loss
                 if batch_idx % 10 == 0:
                     print(f"Epoch {epoch}, Batch {batch_idx}, Loss: {loss:.4f}")
 
-            avg_loss = total_loss / len(data_loader)
+            avg_loss = total_loss / len(any_loader)
             self.history["loss"].append(avg_loss)
             print(f"Epoch {epoch} completed. Avg Loss: {avg_loss:.4f}")

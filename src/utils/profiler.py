@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import numpy as np
-from utils.backend_interface import BaseTransformerBackend
+from core.base_backend import BaseTransformerBackend
 
 
 class Profiler:

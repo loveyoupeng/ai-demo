@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from typing import cast
 from model.transformer import Transformer
 from loss import CrossEntropyLoss
 from optimizer import Adam
@@ -55,9 +56,9 @@ def run_training(args):
 def run_inference(args):
     # 1. Load Checkpoint
     checkpoint = ModelCheckpoint()
-    model, tokenizer = checkpoint.load_checkpoint(
-        args.checkpoint_name, Transformer, CharTokenizer
-    )
+    loaded = checkpoint.load_checkpoint(args.checkpoint_name, Transformer, CharTokenizer)
+    model: Transformer = cast(Transformer, loaded[0])
+    tokenizer: CharTokenizer = cast(CharTokenizer, loaded[1])
 
     # 2. Setup Generator
     generator = AutoregressiveGenerator(model, tokenizer, temperature=args.temp)

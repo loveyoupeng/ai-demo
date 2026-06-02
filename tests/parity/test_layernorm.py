@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 import numpy as np
 import torch
-from src.model.numpy.layers import NumPyLayerNorm
-from src.model.pytorch.layers import PyTorchLayerNorm
-from src.core.registry import registry
+from model.numpy.layers import NumPyLayerNorm
+from model.pytorch.layers import PyTorchLayerNorm
+from core.registry import registry
 
 @pytest.fixture
 def registry_layer_norm():

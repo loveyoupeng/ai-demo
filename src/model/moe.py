@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
-from src.model.layers import FeedForward
+from model.layers import FeedForward
 
 
 class Router:
@@ -215,9 +217,9 @@ class MoELayer:
         """
         batch_size, seq_len, embed_dim = x.shape
 
-        top_k_indices = cache["top_k_indices"]
-        top_k_weights = cache["top_k_weights"]
-        all_expert_outputs = cache["all_expert_outputs"]
+        top_k_indices: np.ndarray = cast(np.ndarray, cache["top_k_indices"])
+        top_k_weights: np.ndarray = cast(np.ndarray, cache["top_k_weights"])
+        all_expert_outputs: np.ndarray = cast(np.ndarray, cache["all_expert_outputs"])
 
         # 1. Gradient w.r.t. expert outputs and weights
         # d_all_expert_outputs shape: [Num_Experts, Batch, Seq_Len, Embed_Dim]

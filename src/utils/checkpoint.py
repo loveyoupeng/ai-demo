@@ -3,6 +3,11 @@ from __future__ import annotations
 import pickle
 import os
 
+from typing import cast
+
+from model.transformer import Transformer
+from tokenizer.char_tokenizer import CharTokenizer
+
 
 class ModelCheckpoint:
     """
@@ -14,7 +19,7 @@ class ModelCheckpoint:
         if not os.path.exists(self.base_dir):
             os.makedirs(self.base_dir)
 
-    def save_checkpoint(self, model: object, tokenizer: object, filename: str):
+    def save_checkpoint(self, model: Transformer, tokenizer: CharTokenizer, filename: str):
         """
         Saves the model parameters and the tokenizer.
         """
@@ -41,7 +46,7 @@ class ModelCheckpoint:
         """
         filepath = os.path.join(self.base_dir, f"{filename}.pkl")
         with open(filepath, "rb") as f:
-            checkpoint = pickle.load(f)
+            checkpoint = pickle.load(f)  # type: ignore[assignment]
 
         # 1. Reconstruct Tokenizer
         tokenizer = tokenizer_class()
