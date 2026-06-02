@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 import numpy as np
-from typing import Dict
 
 
 class SGD:
@@ -10,7 +11,7 @@ class SGD:
     def __init__(self, learning_rate: float = 0.01):
         self.learning_rate = learning_rate
 
-    def step(self, params: Dict[str, np.ndarray], grads: Dict[str, np.ndarray]) -> None:
+    def step(self, params: dict[str, np.ndarray], grads: dict[str, np.ndarray]) -> None:
         """
         Update parameters using gradients.
         """
@@ -35,11 +36,11 @@ class Adam:
         self.beta1 = beta1
         self.beta2 = beta2
         self.eps = eps
-        self.m: Dict[str, np.ndarray] = {}
-        self.v: Dict[str, np.ndarray] = {}
+        self.m: dict[str, np.ndarray] = {}
+        self.v: dict[str, np.ndarray] = {}
         self.t = 0
 
-    def step(self, params: Dict[str, np.ndarray], grads: Dict[str, np.ndarray]) -> None:
+    def step(self, params: dict[str, np.ndarray], grads: dict[str, np.ndarray]) -> None:
         """
         Update parameters using Adam update rule.
         """

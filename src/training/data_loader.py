@@ -1,5 +1,8 @@
+from __future__ import annotations
+
+from collections.abc import Iterator
+
 import numpy as np
-from typing import Tuple, Iterator
 from tokenizer.char_tokenizer import CharTokenizer
 
 
@@ -18,7 +21,7 @@ class TextDataLoader:
         self.encoded = self.tokenizer.encode(text)
         self.num_samples = len(self.encoded) - seq_len - 1
 
-    def __iter__(self) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+    def __iter__(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:
         indices = np.arange(self.num_samples)
         np.random.shuffle(indices)
 

@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 import numpy as np
-from typing import Tuple
 
 
 class CrossEntropyLoss:
@@ -9,7 +10,7 @@ class CrossEntropyLoss:
 
     def forward(
         self, logits: np.ndarray, targets: np.ndarray
-    ) -> Tuple[float, np.ndarray]:
+    ) -> tuple[float, np.ndarray]:
         """
         Args:
             logits: [Batch, Seq_Len, Vocab_Size]

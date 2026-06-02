@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 import numpy as np
-from typing import Any
 from model.transformer import Transformer
 from loss import CrossEntropyLoss
 
@@ -12,7 +13,7 @@ class Trainer:
     def __init__(
         self,
         model: Transformer,
-        optimizer: Any,
+        optimizer: object,
         loss_fn: CrossEntropyLoss,
     ):
         self.model = model
@@ -46,7 +47,7 @@ class Trainer:
 
         return loss
 
-    def fit(self, data_loader: Any, epochs: int):
+    def fit(self, data_loader: object, epochs: int):
         for epoch in range(epochs):
             total_loss = 0
             for batch_idx, (input_ids, target_ids) in enumerate(data_loader):

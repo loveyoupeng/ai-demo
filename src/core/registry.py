@@ -1,5 +1,4 @@
-from typing import Dict, Any
-
+from __future__ import annotations
 
 class ParameterRegistry:
     """
@@ -10,9 +9,9 @@ class ParameterRegistry:
 
     def __init__(self):
         # mappings[backend][internal_name] = canonical_name
-        self._mappings: Dict[str, Dict[str, str]] = {}
+        self._mappings: dict[str, dict[str, str]] = {}
         # rev_mappings[backend][canonical_name] = internal_name
-        self._rev_mappings: Dict[str, Dict[str, str]] = {}
+        self._rev_mappings: dict[str, dict[str, str]] = {}
 
     def register(self, backend: str, canonical_name: str, internal_name: str) -> None:
         """

@@ -1,8 +1,13 @@
+from __future__ import annotations
+
+from typing import Any, Optional
+
 import numpy as np
-from typing import Optional, Tuple, Dict, Any
 from model.attention import MultiHeadAttention
 from model.moe import MoELayer
 from model.layers import LayerNorm
+
+_CacheDict = dict[str, Any]
 
 
 class TransformerBlock(object):
@@ -31,8 +36,8 @@ class TransformerBlock(object):
         x: np.ndarray,
         mask: Optional[np.ndarray] = None,
         use_cache: bool = False,
-        cache_idx: Optional[int] = None,
-    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        cache_idx: int | None = None,
+    ) -> tuple[np.ndarray, dict[str, object]]:
         """
         Args:
             x: [Batch, Seq_Len, Embed_Dim]
@@ -76,8 +81,8 @@ class TransformerBlock(object):
         return x_after_moe, cache
 
     def backward(
-        self, grad_output: np.ndarray, cache: Dict[str, Any]
-    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+        self, grad_output: np.ndarray, cache: dict[str, object]
+    ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """
         Backward pass for TransformerBlock.
         """
@@ -124,7 +129,7 @@ class TransformerBlock(object):
         dx = dx_ln1
 
         # Combine all gradients
-        combined_grads: Dict[str, np.ndarray] = {}
+        combined_grads: dict[str, np.ndarray] = {}
         for k, v in grads_ln1.items():
             combined_grads[f"ln1.{k}"] = v
         for k, v in grads_mha.items():
@@ -136,7 +141,7 @@ class TransformerBlock(object):
 
         return dx, combined_grads
 
-    def get_params(self) -> Dict[str, np.ndarray]:
+    def get_params(self) -> dict[str, np.ndarray]:
         params = {}
         for k, v in self.ln1.get_params().items():
             params[f"ln1.{k}"] = v
@@ -148,7 +153,7 @@ class TransformerBlock(object):
             params[f"moe.{k}"] = v
         return params
 
-    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+    def set_params(self, params: dict[str, np.ndarray]) -> None:
         """
         Sets the model parameters from a dictionary.
         """
@@ -216,8 +221,8 @@ class Transformer:
         input_ids: np.ndarray,
         mask: Optional[np.ndarray] = None,
         use_cache: bool = False,
-        cache_idx: Optional[int] = None,
-    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        cache_idx: int | None = None,
+    ) -> tuple[np.ndarray, dict[str, object]]:
         """
         Args:
             input_ids: [Batch, Seq_Len] integer token IDs
@@ -268,8 +273,8 @@ class Transformer:
         return logits, cache
 
     def backward(
-        self, grad_logits: np.ndarray, cache: Dict[str, Any]
-    ) -> Dict[str, np.ndarray]:
+        self, grad_logits: np.ndarray, cache: dict[str, object]
+    ) -> dict[str, np.ndarray]:
         """
         Returns all gradients collected from the backward pass.
         """
@@ -302,7 +307,7 @@ class Transformer:
 
         return grads
 
-    def get_params(self) -> Dict[str, np.ndarray]:
+    def get_params(self) -> dict[str, np.ndarray]:
         params = {}
         # Token Embedding
         for k, v in self.token_embedding.get_params().items():
@@ -315,7 +320,7 @@ class Transformer:
         params["lm_head"] = self.lm_head
         return params
 
-    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+    def set_params(self, params: dict[str, np.ndarray]) -> None:
         """
         Sets the model parameters from a dictionary.
         """

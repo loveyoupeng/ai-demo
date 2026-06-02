@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Any, Optional
+
 import pytest
 import numpy as np
 from typing import Any, Dict, Optional, Tuple

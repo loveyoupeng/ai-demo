@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 import pytest
 from evaluation import calculate_perplexity, calculate_accuracy

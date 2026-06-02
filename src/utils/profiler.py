@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 import time
 import numpy as np
-from typing import Dict
 from utils.backend_interface import BaseTransformerBackend
 
 
@@ -15,7 +16,7 @@ class Profiler:
 
     def profile_latency(
         self, input_ids: np.ndarray, num_runs: int = 10, mode: str = "forward"
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """
         Measures the average latency of a single operation.
 
@@ -69,7 +70,7 @@ class Profiler:
 
     def profile_throughput(
         self, input_ids: np.ndarray, num_steps: int = 10
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """
         Measures throughput in tokens per second.
 
@@ -90,7 +91,7 @@ class Profiler:
         tokens_per_sec = total_tokens / latencies
         return {"tokens_per_second": float(tokens_per_sec)}
 
-    def profile_memory(self, input_ids: np.ndarray) -> Dict[str, float]:
+    def profile_memory(self, input_ids: np.ndarray) -> dict[str, float]:
         """
         Measures the memory usage (placeholder for now).
 

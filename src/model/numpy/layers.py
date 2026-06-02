@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 import numpy as np
-from typing import Dict, Tuple, Any
 from src.core.registry import registry
 
 class NumPyTokenEmbedding:
@@ -13,19 +14,19 @@ class NumPyTokenEmbedding:
         self.indices = indices
         return self.weights[indices]
 
-    def backward(self, grad_output: np.ndarray) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    def backward(self, grad_output: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         grad_weights = np.zeros_like(self.weights)
         np.add.at(grad_weights, self.indices, grad_output)
         return grad_output, {"weights": grad_weights}
 
-    def get_params(self) -> Dict[str, np.ndarray]:
+    def get_params(self) -> dict[str, np.ndarray]:
         return {"weights": self.weights}
 
-    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+    def set_params(self, params: dict[str, np.ndarray]) -> None:
         if "weights" in params:
             self.weights = params["weights"].copy()
 
-    def get_grads(self) -> Dict[str, np.ndarray]:
+    def get_grads(self) -> dict[str, np.ndarray]:
         return {"weights": np.zeros_like(self.weights)}
 
 class NumPyPositionalEmbedding:
@@ -43,13 +44,13 @@ class NumPyPositionalEmbedding:
         self.x = x
         return x + self.pe[:x.shape[1], :]
 
-    def backward(self, grad_output: np.ndarray) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    def backward(self, grad_output: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         return grad_output, {}
 
-    def get_params(self) -> Dict[str, np.ndarray]:
+    def get_params(self) -> dict[str, np.ndarray]:
         return {}
 
-    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+    def set_params(self, params: dict[str, np.ndarray]) -> None:
         pass
 
 class NumPyFeedForward:
@@ -68,7 +69,7 @@ class NumPyFeedForward:
         self.output = np.dot(self.h, self.w2) + self.b2
         return self.output
 
-    def backward(self, grad_output: np.ndarray) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    def backward(self, grad_output: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         N, D = self.x.shape
         grad_w2 = np.dot(self.h.reshape(-1, self.dim_ff).T, grad_output.reshape(-1, self.embed_dim))
         grad_b2 = np.sum(grad_output, axis=0)
@@ -89,10 +90,10 @@ class NumPyFeedForward:
         }
         return grad_x, grads
 
-    def get_params(self) -> Dict[str, np.ndarray]:
+    def get_params(self) -> dict[str, np.ndarray]:
         return {"w1": self.w1, "b1": self.b1, "w2": self.w2, "b2": self.b2}
 
-    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+    def set_params(self, params: dict[str, np.ndarray]) -> None:
         for k, v in params.items():
             setattr(self, k, v.copy())
 
@@ -113,7 +114,7 @@ class NumPyLayerNorm:
         self.output = self.gamma * self.x_norm + self.beta
         return self.output
 
-    def backward(self, grad_output: np.ndarray) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    def backward(self, grad_output: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         # LayerNorm backward gradients
         # https://arxiv.org/abs/1607.06450
         N = self.x.shape[-1]
@@ -132,9 +133,11 @@ class NumPyLayerNorm:
         }
         return grad_x, grads
 
-    def get_params(self) -> Dict[str, np.ndarray]:
+    def get_params(self) -> dict[str, np.ndarray]:
         return {"gamma": self.gamma, "beta": self.beta}
 
-    def set_params(self, params: Dict[str, np.ndarray]) -> None:
-        if "gamma" in params: self.gamma = params["gamma"].copy()
-        if "beta" in params: self.beta = params["beta"].copy()
+    def set_params(self, params: dict[str, np.ndarray]) -> None:
+        if "gamma" in params:
+            self.gamma = params["gamma"].copy()
+        if "beta" in params:
+            self.beta = params["beta"].copy()

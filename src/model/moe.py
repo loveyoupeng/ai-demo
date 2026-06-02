@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 import numpy as np
-from typing import Tuple, Dict, Any
 from src.model.layers import FeedForward
 
 
@@ -45,10 +46,10 @@ class Router:
         e_x = np.exp(x - np.max(x, axis=axis, keepdims=True))
         return e_x / np.sum(e_x, axis=axis, keepdims=True)
 
-    def get_params(self) -> Dict[str, np.ndarray]:
+    def get_params(self) -> dict[str, np.ndarray]:
         return {"weights": self.weights}
 
-    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+    def set_params(self, params: dict[str, np.ndarray]) -> None:
         """
         Sets the weights of the router.
         """
@@ -58,7 +59,7 @@ class Router:
 
     def backward(
         self, x: np.ndarray, d_probs: np.ndarray
-    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """
         Backward pass for Router.
         """
@@ -92,10 +93,10 @@ class Expert:
     def forward(self, x: np.ndarray) -> np.ndarray:
         return self.ffn.forward(x)
 
-    def get_params(self) -> Dict[str, np.ndarray]:
+    def get_params(self) -> dict[str, np.ndarray]:
         return self.ffn.get_params()
 
-    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+    def set_params(self, params: dict[str, np.ndarray]) -> None:
         """
         Sets the parameters of the expert.
         """
@@ -103,7 +104,7 @@ class Expert:
 
     def backward(
         self, x: np.ndarray, d_out: np.ndarray
-    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         dx = self.ffn.backward(d_out)
         grads = self.ffn.get_grads()
         return dx, grads
@@ -142,7 +143,7 @@ class MoELayer:
         self.router = Router(embed_dim, num_experts)
         self.experts = [Expert(embed_dim, dim_ff) for _ in range(num_experts)]
 
-    def forward(self, x: np.ndarray) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    def forward(self, x: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """
         Args:
             x: [Batch, Seq_Len, Embed_Dim]
@@ -196,8 +197,8 @@ class MoELayer:
         return combined_output, cache
 
     def backward(
-        self, x: np.ndarray, d_out: np.ndarray, cache: Dict[str, Any]
-    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+        self, x: np.ndarray, d_out: np.ndarray, cache: dict[str, object]
+    ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """
         Backward pass for MoE layer.
 
@@ -281,7 +282,7 @@ class MoELayer:
 
         return dx, combined_grads
 
-    def get_params(self) -> Dict[str, np.ndarray]:
+    def get_params(self) -> dict[str, np.ndarray]:
         params = {}
         for k, v in self.router.get_params().items():
             params[f"router.{k}"] = v
@@ -290,7 +291,7 @@ class MoELayer:
                 params[f"expert.{i}.{k}"] = v
         return params
 
-    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+    def set_params(self, params: dict[str, np.ndarray]) -> None:
         """
         Sets the parameters of the MoE layer.
         """

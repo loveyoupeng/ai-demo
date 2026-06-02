@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 from model.transformer import Transformer
 from loss import CrossEntropyLoss

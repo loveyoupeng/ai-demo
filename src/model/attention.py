@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 import numpy as np
-from typing import Optional, Tuple, Dict, Any
 
 
 class MultiHeadAttention:
@@ -14,12 +15,12 @@ class MultiHeadAttention:
     (e.g., one head focuses on grammar, another on semantic meaning).
 
     Mathematical context:
-    For a single head, the scaled dot-product attention is:
-    $$ \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V $$
+    Single-head scaled dot-product attention:
+    $$ \text{Attention}(Q, K, V) = \text{softmax}(QK^T / \sqrt{d_k})V $$
 
-    In the multi-head setting, we project the input $X \in \mathbb{R}^{B \times L \times D}$
-    into $h$ heads using learned weight matrices $W_Q, W_K, W_V \in \mathbb{R}^{D \times D}$.
-    The output is then projected back using $W_O \in \mathbb{R}^{D \times D}$.
+    Multi-head: project $X \in \mathbb{R}^{B \times L \times D}$ into $h$ heads
+    using $W_Q, W_K, W_V \in \mathbb{R}^{D \times D}$.
+    Output projected back via $W_O \in \mathbb{R}^{D \times D}$.
 
     Dimension tracking:
     - Input $x$: $[B, L, D]$
@@ -48,15 +49,15 @@ class MultiHeadAttention:
         self.W_o = np.random.randn(embed_dim, embed_dim) * 0.01
 
         # Cache for KV values during inference (KV Cache)
-        self.kv_cache: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+        self.kv_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
     def forward(
         self,
         x: np.ndarray,
-        mask: Optional[np.ndarray] = None,
+        mask: np.ndarray | None = None,
         use_cache: bool = False,
-        cache_idx: Optional[int] = None,
-    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        cache_idx: int | None = None,
+    ) -> tuple[np.ndarray, dict[str, object]]:
         """
         Args:
             x: Input tensor [Batch, Seq_Len, Embed_Dim]
@@ -144,13 +145,13 @@ class MultiHeadAttention:
         self,
         x: np.ndarray,
         d_out: np.ndarray,
-        mask: Optional[np.ndarray] = None,
-        Q: Optional[np.ndarray] = None,
-        K: Optional[np.ndarray] = None,
-        V: Optional[np.ndarray] = None,
-        attn_weights: Optional[np.ndarray] = None,
-        context: Optional[np.ndarray] = None,
-    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+        mask: np.ndarray | None = None,
+        Q: np.ndarray | None = None,
+        K: np.ndarray | None = None,
+        V: np.ndarray | None = None,
+        attn_weights: np.ndarray | None = None,
+        context: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """
         Backward pass for Multi-Head Attention.
 
@@ -236,10 +237,10 @@ class MultiHeadAttention:
         grads = {"W_q": d_W_q, "W_k": d_W_k, "W_v": d_W_v, "W_o": d_W_o}
         return dx, grads
 
-    def get_params(self) -> Dict[str, np.ndarray]:
+    def get_params(self) -> dict[str, np.ndarray]:
         return {"W_q": self.W_q, "W_k": self.W_k, "W_v": self.W_v, "W_o": self.W_o}
 
-    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+    def set_params(self, params: dict[str, np.ndarray]) -> None:
         for k, v in params.items():
             if k == "W_q":
                 self.W_q = v
@@ -250,7 +251,7 @@ class MultiHeadAttention:
             elif k == "W_o":
                 self.W_o = v
 
-    def get_grads(self) -> Dict[str, np.ndarray]:
+    def get_grads(self) -> dict[str, np.ndarray]:
         return {
             "W_q": self.grad_W_q,
             "W_k": self.grad_W_k,

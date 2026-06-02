@@ -1,4 +1,7 @@
-from typing import Dict, Any, Tuple, Optional
+from __future__ import annotations
+
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -48,7 +51,7 @@ class PyTorchMultiHeadAttention(nn.Module):
         self,
         x: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """
         Args:
             x: Input tensor [Batch, Seq_Len, Embed_Dim]
@@ -112,7 +115,7 @@ class PyTorchMultiHeadAttention(nn.Module):
         self,
         grad_output: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """
         Backward pass using autograd on a detached computation graph.
         
@@ -190,7 +193,7 @@ class PyTorchMultiHeadAttention(nn.Module):
         
         return dx, grads
 
-    def get_params(self) -> Dict[str, torch.Tensor]:
+    def get_params(self) -> dict[str, torch.Tensor]:
         return {
             "qkv.W_q": self.W_q,
             "qkv.W_k": self.W_k,
@@ -198,7 +201,7 @@ class PyTorchMultiHeadAttention(nn.Module):
             "o.W_o": self.W_o,
         }
 
-    def set_params(self, params: Dict[str, Any]) -> None:
+    def set_params(self, params: dict[str, object]) -> None:
         mapping = {
             "qkv.W_q": "W_q",
             "qkv.W_k": "W_k",
@@ -213,7 +216,7 @@ class PyTorchMultiHeadAttention(nn.Module):
                 with torch.no_grad():
                     getattr(self, attr_name).copy_(val)
 
-    def get_grads(self) -> Dict[str, torch.Tensor]:
+    def get_grads(self) -> dict[str, torch.Tensor]:
         return {
             "qkv.W_q": self.W_q.grad if self.W_q.grad is not None else torch.zeros_like(self.W_q),
             "qkv.W_k": self.W_k.grad if self.W_k.grad is not None else torch.zeros_like(self.W_k),

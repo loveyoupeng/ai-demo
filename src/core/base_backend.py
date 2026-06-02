@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Tuple
 import numpy as np
 
 
@@ -13,10 +14,10 @@ class BaseTransformerBackend(ABC):
     def forward(
         self,
         input_ids: np.ndarray,
-        mask: Optional[np.ndarray] = None,
+        mask: np.ndarray | None = None,
         use_cache: bool = False,
-        cache_idx: Optional[int] = None,
-    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        cache_idx: int | None = None,
+    ) -> tuple[np.ndarray, dict[str, object]]:
         """
         Forward pass for the transformer.
 
@@ -34,8 +35,8 @@ class BaseTransformerBackend(ABC):
 
     @abstractmethod
     def backward(
-        self, grad_logits: np.ndarray, cache: Dict[str, Any]
-    ) -> Dict[str, np.ndarray]:
+        self, grad_logits: np.ndarray, cache: dict[str, object]
+    ) -> dict[str, np.ndarray]:
         """
         Backward pass for the transformer.
 
@@ -49,7 +50,7 @@ class BaseTransformerBackend(ABC):
         pass
 
     @abstractmethod
-    def get_params(self) -> Dict[str, np.ndarray]:
+    def get_params(self) -> dict[str, np.ndarray]:
         """
         Returns all model parameters in canonical form.
 
@@ -59,7 +60,7 @@ class BaseTransformerBackend(ABC):
         pass
 
     @abstractmethod
-    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+    def set_params(self, params: dict[str, np.ndarray]) -> None:
         """
         Sets all model parameters using canonical names.
 

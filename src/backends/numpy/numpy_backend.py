@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 import numpy as np
-from typing import Any, Dict, Optional, Tuple
 from utils.backend_interface import BaseTransformerBackend
 from model.transformer import Transformer
 
@@ -34,10 +35,10 @@ class NumPyBackend(BaseTransformerBackend):
     def forward(
         self,
         input_ids: np.ndarray,
-        mask: Optional[np.ndarray] = None,
+        mask: np.ndarray | None = None,
         use_cache: bool = False,
-        cache_idx: Optional[int] = None,
-    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        cache_idx: int | None = None,
+    ) -> tuple[np.ndarray, dict[str, object]]:
         """
         Wraps the NumPy Transformer forward pass.
         """
@@ -46,20 +47,20 @@ class NumPyBackend(BaseTransformerBackend):
         )
 
     def backward(
-        self, grad_logits: np.ndarray, cache: Dict[str, Any]
-    ) -> Dict[str, np.ndarray]:
+        self, grad_logits: np.ndarray, cache: dict[str, object]
+    ) -> dict[str, np.ndarray]:
         """
         Wraps the NumPy Transformer backward pass.
         """
         return self.model.backward(grad_logits, cache)
 
-    def get_params(self) -> Dict[str, np.ndarray]:
+    def get_params(self) -> dict[str, np.ndarray]:
         """
         Wraps the NumPy Transformer param retrieval.
         """
         return self.model.get_params()
 
-    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+    def set_params(self, params: dict[str, np.ndarray]) -> None:
         """
         Wraps the NumPy Transformer param setting.
         """

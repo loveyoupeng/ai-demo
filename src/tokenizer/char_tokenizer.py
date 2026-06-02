@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 import numpy as np
-from typing import Dict
 
 
 class CharTokenizer:
@@ -20,9 +21,9 @@ class CharTokenizer:
         self.vocab_size = len(self.chars)
 
         # Mapping: char -> index
-        self.char_to_int: Dict[str, int] = {ch: i for i, ch in enumerate(self.chars)}
+        self.char_to_int: dict[str, int] = {ch: i for i, ch in enumerate(self.chars)}
         # Mapping: index -> char
-        self.int_to_char: Dict[int, str] = {i: ch for i, ch in enumerate(self.chars)}
+        self.int_to_char: dict[int, str] = {i: ch for i, ch in enumerate(self.chars)}
 
     def encode(self, text: str) -> np.ndarray:
         """

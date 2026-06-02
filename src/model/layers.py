@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 import numpy as np
-from typing import Tuple, Dict
 
 
 class TokenEmbedding:
@@ -42,7 +43,7 @@ class TokenEmbedding:
 
     def backward(
         self, grad_output: np.ndarray
-    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """
         Args:
             grad_output: [Batch, Seq_Len, Embed_Dim] gradient from next layer
@@ -64,14 +65,14 @@ class TokenEmbedding:
         grads = self.get_grads()
         return dx, grads
 
-    def get_params(self) -> Dict[str, np.ndarray]:
+    def get_params(self) -> dict[str, np.ndarray]:
         return {"weights": self.weights}
 
-    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+    def set_params(self, params: dict[str, np.ndarray]) -> None:
         if "weights" in params:
             self.weights = params["weights"]
 
-    def get_grads(self) -> Dict[str, np.ndarray]:
+    def get_grads(self) -> dict[str, np.ndarray]:
         return {"weights": self.grad_weights}
 
 
@@ -117,10 +118,10 @@ class PositionalEmbedding:
         # Fixed embeddings have zero gradient
         return np.zeros_like(grad_output)
 
-    def get_params(self) -> Dict[str, np.ndarray]:
+    def get_params(self) -> dict[str, np.ndarray]:
         return {}
 
-    def get_grads(self) -> Dict[str, np.ndarray]:
+    def get_grads(self) -> dict[str, np.ndarray]:
         return {}
 
 
@@ -205,10 +206,10 @@ class FeedForward:
         grad_x = np.dot(grad_z1, self.W1.T)
         return grad_x
 
-    def get_params(self) -> Dict[str, np.ndarray]:
+    def get_params(self) -> dict[str, np.ndarray]:
         return {"W1": self.W1, "b1": self.b1, "W2": self.W2, "b2": self.b2}
 
-    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+    def set_params(self, params: dict[str, np.ndarray]) -> None:
         for k, v in params.items():
             if k == "W1":
                 self.W1 = v
@@ -219,7 +220,7 @@ class FeedForward:
             elif k == "b2":
                 self.b2 = v
 
-    def get_grads(self) -> Dict[str, np.ndarray]:
+    def get_grads(self) -> dict[str, np.ndarray]:
         return {
             "W1": self.grad_W1,
             "b1": self.grad_b1,
@@ -272,7 +273,7 @@ class LayerNorm:
 
     def backward(
         self, grad_output: np.ndarray
-    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """
         Returns dx and parameter gradients.
         """
@@ -301,15 +302,15 @@ class LayerNorm:
 
         return grad_x, self.get_grads()
 
-    def get_params(self) -> Dict[str, np.ndarray]:
+    def get_params(self) -> dict[str, np.ndarray]:
         return {"gamma": self.gamma, "beta": self.beta}
 
-    def set_params(self, params: Dict[str, np.ndarray]) -> None:
+    def set_params(self, params: dict[str, np.ndarray]) -> None:
         for k, v in params.items():
             if k == "gamma":
                 self.gamma = v
             elif k == "beta":
                 self.beta = v
 
-    def get_grads(self) -> Dict[str, np.ndarray]:
+    def get_grads(self) -> dict[str, np.ndarray]:
         return {"gamma": self.grad_gamma, "beta": self.grad_beta}

@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 import pickle
-from typing import Any, Tuple
 import os
 
 
@@ -13,7 +14,7 @@ class ModelCheckpoint:
         if not os.path.exists(self.base_dir):
             os.makedirs(self.base_dir)
 
-    def save_checkpoint(self, model: Any, tokenizer: Any, filename: str):
+    def save_checkpoint(self, model: object, tokenizer: object, filename: str):
         """
         Saves the model parameters and the tokenizer.
         """
@@ -34,7 +35,7 @@ class ModelCheckpoint:
 
     def load_checkpoint(
         self, filename: str, model_class: type, tokenizer_class: type
-    ) -> Tuple[Any, Any]:
+    ) -> tuple[object, object]:
         """
         Loads a model and tokenizer from a checkpoint.
         """
