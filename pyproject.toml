@@ -14,7 +14,10 @@ dependencies = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]
 
 [tool.pyright]
 reportPrivateImportUsage = false
+include = ["src"]
+# Only check src/, not tests/ (tests have cross-imports that pyright can't resolve)
