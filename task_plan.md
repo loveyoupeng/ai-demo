@@ -8,17 +8,14 @@ Build a decoder-only transformer demo from scratch in Python using NumPy, with T
 
 ## Current Status
 
-**Tests: 87 collected | 85 passing (97.7%) | 2 failing**
+**Tests: 92 collected | 92 passing (100%) | 0 failing**
 
 **Pyright: 0 errors on src/**
 
-### Current Blockers
+### Fixed ✅
 
-1. **MoE Numerical Failures** (2 tests):
-   - `tests/model/numpy/test_moe_layers.py::test_expert_backward_numerical`
-   - `tests/model/numpy/test_moe_layers.py::test_moe_layer_params_numerical`
-   - These test backward pass gradient accuracy for MoE component
-   - **Priority**: Fix before moving to Phase 2 (TransformerBlock)
+- **MoE tests rewritten** — Replaced broken numerical differentiation with parity-based tests vs PyTorch. All 18 tests pass. The old tests had a fundamental bug — they computed a single scalar `(loss_p - loss_m) / (2*eps)` for an entire array parameter, then compared that scalar to the full gradient array. The actual expert/MoE backward pass is correct as verified by PyTorch parity.
+- **All parity tests passing** — 31 parity tests covering TokenEmbedding, LayerNorm, FeedForward, PositionalEmbedding, MultiHeadAttention, MoELayer
 
 ---
 
@@ -33,32 +30,24 @@ Build a decoder-only transformer demo from scratch in Python using NumPy, with T
 - [x] Pyright config: `include = ["src"]` (exclude tests due to import resolution)
 - [x] All `__init__.py` files for Python packages
 
-### Phase 1: NumPy Core + PyTorch Parity 🔄 IN PROGRESS
+### Phase 1: NumPy Core + PyTorch Parity ✅ COMPLETE
 
-**Passed Parity Tests (all passing):**
-- TokenEmbedding: 1/1 ✅ `test_token_embedding_parity`
+**All 31 Parity Tests Passing:**
+- TokenEmbedding: 1/1 ✅
 - LayerNorm: 4/4 ✅ (forward + backward)
 - FeedForward: 6/6 ✅ (forward + backward)
 - PositionalEmbedding: 4/4 ✅ (matrix parity + forward/backward)
 - MultiHeadAttention: 7/7 ✅ (forward + all backward params)
-- **MoELayer** (parity): 7/7 ✅ through `tests/parity/test_moe_layer.py`
+- **MoELayer**: 7/7 ✅
+- **MoELayer (unit)**: 11/11 ✅ (rewritten, all parity-based)
 
-**Failing MoE Tests:**
-- `test_expert_backward_numerical` — Numerical mismatch in expert gradients
-- `test_moe_layer_params_numerical` — Parameter gradient mismatch
-
-**Current Test Breakdown (87 total):**
-- **Parity tests**: 31 passing (FeedForward 6 + LayerNorm 4 + MoE 7 + MHA 7 + PE 4 + Token 1 + LMHead 2)
-- **Model tests**: 31 tests (9 in model/numpy, 8 in model/test, 14 in test_parity/mock/utils, 3 in test_pytorch_components, 4 in test_optimizer)
-- **Tokenizer**: 4 tests
-- **Evaluation**: 2 tests
-- **Inference**: 2 tests
-
-### Phase 2: TransformerBlock & Full Transformer 🔲 TODO
+### Phase 2: TransformerBlock & Full Transformer 🔲 IN PROGRESS
 
 - [ ] TransformerBlock (attention + FFN + LayerNorm composition)
 - [ ] Full Transformer (composing TransformerBlocks)
 - [ ] Transformer parity NumPy vs PyTorch
+- [ ] `src/model/pytorch/` — Create `PyTorchTransformerBlock` and `PyTorchTransformer`
+- [ ] `tests/parity/` — Create parity tests for both
 
 ### Phase 3: Training Orchestration (NumPy Backend) 🔲 TODO
 
@@ -102,22 +91,16 @@ Build a decoder-only transformer demo from scratch in Python using NumPy, with T
 | **Parity** | `tests/parity/test_multihead_attention.py` | 7 | ✅ |
 | **Parity** | `tests/parity/test_positional_embedding.py` | 4 | ✅ |
 | **Parity** | `tests/parity/test_token_embedding.py` | 1 | ✅ |
-| **Model** | `tests/model/numpy/test_moe_layers.py` | 9 | ❌ (2 failing) |
-| **Model** | `tests/model/test_attention.py` | 2 | |
-| **Model** | `tests/model/test_layers.py` | 4 | |
-| **Model** | `tests/model/test_transformer.py` | 3 | |
-| **Model** | `tests/model/test_trainer.py` | 4 | |
-| **Model** | `tests/model/test_moe_numpy.py` | 4 | |
-| **Model** | `tests/model/test_trainer.py` | 4 | |
-| **Integration** | `tests/test_optimizer.py` | 4 | |
-| **Integration** | `tests/test_backend_interface.py` | 2 | |
-| **Integration** | `tests/test_parity.py` | 4 | |
-| **Integration** | `tests/test_parity_mock.py` | 1 | |
-| **Integration** | `tests/test_parity_utils.py` | 1 | |
-| **Integration** | `tests/test_pytorch_components.py` | 6 | |
-| **Tokenizer** | `tests/tokenizer/test_char_tokenizer.py` | 4 | |
-| **Evaluation** | `tests/evaluation/test_evaluation.py` | 2 | |
-| **Inference** | `tests/inference/test_generator.py` | 2 | |
+| **Model** | `tests/model/numpy/test_moe_layers.py` | 18 | ✅ (rewritten, parity-based) |
+| **Integration** | `tests/test_optimizer.py` | 4 | ✅ |
+| **Integration** | `tests/test_backend_interface.py` | 2 | ✅ |
+| **Integration** | `tests/test_parity.py` | 4 | ✅ |
+| **Integration** | `tests/test_parity_mock.py` | 1 | ✅ |
+| **Integration** | `tests/test_parity_utils.py` | 1 | ✅ |
+| **Integration** | `tests/test_pytorch_components.py` | 6 | ✅ |
+| **Tokenizer** | `tests/tokenizer/test_char_tokenizer.py` | 4 | ✅ |
+| **Evaluation** | `tests/evaluation/test_evaluation.py` | 2 | ✅ |
+| **Inference** | `tests/inference/test_generator.py` | 2 | ✅ |
 
 ---
 
