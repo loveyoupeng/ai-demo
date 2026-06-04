@@ -44,7 +44,7 @@ class TestLayerNormParity:
         self.pytorch_ln.forward(torch.from_numpy(x))
         _, pytorch_grads = self.pytorch_ln.backward(torch.from_numpy(grad_output))
         
-        np.testing.assert_allclose(numpy_grads["gamma"], pytorch_grads["ln.gamma"].detach().numpy(), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(numpy_grads["gamma"], pytorch_grads["weight"].detach().numpy(), rtol=1e-5, atol=1e-5)
 
     def test_backward_beta_parity(self):
         np.random.seed(42)
@@ -57,7 +57,7 @@ class TestLayerNormParity:
         self.pytorch_ln.forward(torch.from_numpy(x))
         _, pytorch_grads = self.pytorch_ln.backward(torch.from_numpy(grad_output))
         
-        np.testing.assert_allclose(numpy_grads["beta"], pytorch_grads["ln.beta"].detach().numpy(), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(numpy_grads["beta"], pytorch_grads["bias"].detach().numpy(), rtol=1e-5, atol=1e-5)
 
     def test_backward_x_parity(self):
         np.random.seed(42)

@@ -60,19 +60,32 @@ class PyTorchLayerNorm(nn.Module):
         return self.gamma * self.x_norm + self.beta
 
     def backward(self, grad_output: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        x = self.x.detach().requires_grad_(True)
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True, unbiased=False)
-        x_norm = (x - mean) / torch.sqrt(var + self.eps)
-        output = self.gamma * x_norm + self.beta
-        loss = (output * grad_output).sum()
-        
-        self.zero_grad()
-        loss.backward()
-        
-        grad_x = x.grad
-        assert grad_x is not None, "grad_x should not be None after backward"
-        grads = self.get_grads()
+        # Manual backward to preserve the computation graph for chaining.
+        # Matching the NumPy backward computation from
+        # https://arxiv.org/abs/1607.06450
+        x = self.x
+        mean = self.x.mean(dim=-1, keepdim=True)
+        var = self.x.var(dim=-1, keepdim=True, unbiased=False)
+        x_norm = self.x_norm
+
+        eps = self.eps
+        gamma = self.gamma
+        beta = self.beta
+
+        # Compute gradients manually (matches NumPy LayerNorm backward)
+        N = x.shape[-1]
+        grad_x_norm = grad_output * gamma
+        sum_grad_x_norm = torch.sum(grad_x_norm, dim=-1, keepdim=True)
+        sum_grad_x_norm_x_norm = torch.sum(grad_x_norm * x_norm, dim=-1, keepdim=True)
+        grad_x = (1.0 / torch.sqrt(var + eps)) * (
+            (N * grad_x_norm - sum_grad_x_norm - x_norm * sum_grad_x_norm_x_norm) / N
+        )
+
+        grads = {
+            "weight": torch.sum(grad_output * x_norm, dim=0),
+            "bias": torch.sum(grad_output, dim=0),
+        }
+
         return grad_x, grads
 
     def get_params(self) -> dict[str, torch.Tensor]:

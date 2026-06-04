@@ -302,23 +302,30 @@ class PyTorchTransformer(nn.Module):
     ) -> dict[str, torch.Tensor]:
         """
         Returns all gradients collected from the backward pass.
+        Uses manual computation (not autograd) to preserve the computation graph
+        for chaining through blocks.
         """
-        # 1. LM Head
-        lm_head_input = cast(torch.Tensor, cache["lm_head_input"])
-        # Re-execute lm_head forward to build the graph
-        lm_head_output = self.lm_head(lm_head_input)
-        loss = (lm_head_output * grad_logits).sum()
-        loss.backward()
-
         grads: dict[str, torch.Tensor] = {}
-        grads["lm_head"] = self.lm_head.weight.grad.clone() if self.lm_head.weight.grad is not None else torch.zeros_like(self.lm_head.weight)
+
+        # 1. LM Head
+        # Manual forward: logits = x @ W_head.T -> [B,L,V]
+        lm_head_input = cast(torch.Tensor, cache["lm_head_input"])
+        lm_head_weight = self.lm_head.weight  # [D,V]
+        # Gradient w.r.t. lm_head: [D,V]
+        d_lm_head = torch.matmul(
+            lm_head_input.reshape(-1, self.embed_dim).T,  # [D, B*L]
+            grad_logits.reshape(-1, self.vocab_size),      # [B*L, V]
+        )
+        # Gradient w.r.t. lm_head_input: [B,L,D]
+        d_lm_head_input = torch.matmul(grad_logits, lm_head_weight)
+
+        grads["lm_head"] = d_lm_head
 
         # 2. Transformer Blocks
-        # Gradient w.r.t. lm_head_input
-        d_lm_head_input = torch.matmul(grad_logits, self.lm_head.weight)
-
         dx = d_lm_head_input
-        block_caches = cast(list[dict[str, object]], cache["blocks_cache"])
+        block_caches: list[dict[str, object]] = cast(
+            list[dict[str, object]], cache["blocks_cache"]
+        )
         for i in range(self.num_layers - 1, -1, -1):
             block = self.blocks[i]
             block_cache = block_caches[i]
@@ -329,15 +336,18 @@ class PyTorchTransformer(nn.Module):
                 grads[f"blocks.{i}.{k}"] = v
 
         # 3. Token Embedding
-        # Backward through token embedding
-        self.token_embedding.zero_grad()
+        # Manual backward through token embedding (lookup gradient)
         input_ids = cast(torch.Tensor, cache["token_embedding_input"])
-        embed_output = self.token_embedding(input_ids)
-        embed_loss = (embed_output * dx).sum()
-        embed_loss.backward()
+        embed_weight = self.token_embedding.weight
+        vocab_size, embed_dim = embed_weight.shape
+        d_token_embed = torch.zeros_like(embed_weight)
+        # Scatter grad_dx into gradient matrix at positions given by input_ids
+        dx_flat = dx.reshape(-1, self.embed_dim)  # [B*L, D]
+        ids_flat = input_ids.reshape(-1)          # [B*L]
+        # d_token_embed[ids_flat, :] += dx_flat
+        d_token_embed.scatter_add_(0, ids_flat.unsqueeze(1).expand(-1, embed_dim), dx_flat)
 
-        if self.token_embedding.weight.grad is not None:
-            grads["token_embedding.embedding.weight"] = self.token_embedding.weight.grad
+        grads["token_embedding.embedding.weight"] = d_token_embed
 
         return grads
 
