@@ -7,6 +7,7 @@ import torch.nn as nn
 import numpy as np
 from core.registry import registry
 from model.pytorch.attention import PyTorchMultiHeadAttention
+from model.pytorch.layers import PyTorchLayerNorm
 from model.pytorch.moe import PyTorchMoELayer
 
 
@@ -34,12 +35,10 @@ class PyTorchTransformerBlock(nn.Module):
         moe: PyTorchMoELayer,
     ):
         super().__init__()
+        self.ln1 = PyTorchLayerNorm(embed_dim)
+        self.ln2 = PyTorchLayerNorm(embed_dim)
         self.mha = mha
         self.moe = moe
-
-        # Pre-norm architecture: LayerNorm is applied BEFORE the sub-layers
-        self.ln1 = nn.LayerNorm(embed_dim)
-        self.ln2 = nn.LayerNorm(embed_dim)
 
     def forward(
         self,
@@ -120,11 +119,12 @@ class PyTorchTransformerBlock(nn.Module):
         d_residual1 = d_ln2_input
         d_mha_out = d_ln2_input
 
-        dx_mha, grads_mha = self.mha.backward(
-            cast(torch.Tensor, cache["mha_input"]),
-            d_mha_out,
-            cast(torch.Tensor, cache["mha_cache"]).get("mask"),
+        mask = (
+            cast(torch.Tensor, cache["mha_cache"]).get("mask")
+            if cast(dict, cache["mha_cache"]).get("mask") is not None
+            else None
         )
+        dx_mha, grads_mha = self.mha.backward(d_mha_out, mask)
 
         # 4. Gradient w.r.t. residual 1 and ln1
         # d_ln1_input = d_residual1 + dx_mha
