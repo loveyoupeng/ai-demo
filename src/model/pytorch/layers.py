@@ -44,7 +44,7 @@ class PyTorchTokenEmbedding(nn.Module):
         return grads
 
 class PyTorchLayerNorm(nn.Module):
-    def __init__(self, embed_dim: int, eps: float = 1e-5):
+    def __init__(self, embed_dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
         self.gamma = nn.Parameter(torch.ones(embed_dim))
@@ -54,9 +54,9 @@ class PyTorchLayerNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self.x = x
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True, unbiased=False)
-        self.x_norm = (x - mean) / torch.sqrt(var + self.eps)
+        self.x_mean = x.mean(dim=-1, keepdim=True)
+        self.x_var = x.var(dim=-1, keepdim=True, unbiased=False)
+        self.x_norm = (x - self.x_mean) / torch.sqrt(self.x_var + self.eps)
         return self.gamma * self.x_norm + self.beta
 
     def backward(self, grad_output: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -64,8 +64,8 @@ class PyTorchLayerNorm(nn.Module):
         # Matching the NumPy backward computation from
         # https://arxiv.org/abs/1607.06450
         x = self.x
-        mean = self.x.mean(dim=-1, keepdim=True)
-        var = self.x.var(dim=-1, keepdim=True, unbiased=False)
+        mean = self.x_mean
+        var = self.x_var
         x_norm = self.x_norm
 
         eps = self.eps
@@ -73,17 +73,18 @@ class PyTorchLayerNorm(nn.Module):
         beta = self.beta
 
         # Compute gradients manually (matches NumPy LayerNorm backward)
-        N = x.shape[-1]
         grad_x_norm = grad_output * gamma
-        sum_grad_x_norm = torch.sum(grad_x_norm, dim=-1, keepdim=True)
-        sum_grad_x_norm_x_norm = torch.sum(grad_x_norm * x_norm, dim=-1, keepdim=True)
+        mean_grad_x_norm = torch.mean(grad_x_norm, dim=-1, keepdim=True)
+        mean_grad_x_norm_x_norm = torch.mean(grad_x_norm * x_norm, dim=-1, keepdim=True)
         grad_x = (1.0 / torch.sqrt(var + eps)) * (
-            (N * grad_x_norm - sum_grad_x_norm - x_norm * sum_grad_x_norm_x_norm) / N
+            grad_x_norm
+            - mean_grad_x_norm
+            - x_norm * mean_grad_x_norm_x_norm
         )
 
         grads = {
-            "weight": torch.sum(grad_output * x_norm, dim=0),
-            "bias": torch.sum(grad_output, dim=0),
+            "weight": torch.sum(grad_output * x_norm, dim=(0, 1)),
+            "bias": torch.sum(grad_output, dim=(0, 1)),
         }
 
         return grad_x, grads

@@ -288,16 +288,13 @@ class LayerNorm:
         grad_x_norm = grad_output * self.gamma
 
         # 3. Gradient through normalization
-        N = embed_dim
-        sum_grad_x_norm_x_norm = np.sum(
-            grad_x_norm * self.x_norm, axis=-1, keepdims=True
-        )
-        sum_grad_x_norm = np.sum(grad_x_norm, axis=-1, keepdims=True)
+        mean_grad_x_norm = np.mean(grad_x_norm, axis=-1, keepdims=True)
+        mean_grad_x_norm_x_norm = np.mean(grad_x_norm * self.x_norm, axis=-1, keepdims=True)
 
         grad_x = (1.0 / np.sqrt(self.var + self.eps)) * (
             grad_x_norm
-            - (1.0 / N) * sum_grad_x_norm_x_norm
-            - (1.0 / N) * self.mean * sum_grad_x_norm
+            - mean_grad_x_norm
+            - self.x_norm * mean_grad_x_norm_x_norm
         )
 
         return grad_x, self.get_grads()

@@ -45,6 +45,272 @@ class TestTransformerBackwardLmHeadParity:
             rtol=1e-4, atol=1e-4,
         )
 
+    def test_backward_0_ln1_gamma_parity(self):
+        """Backward w.r.t. blocks.0.ln1.gamma should match between NumPy and PyTorch."""
+        np.random.seed(42)
+        batch_size, seq_len, vocab_size, embed_dim = 2, 8, 64, 64
+        input_ids = np.random.randint(0, vocab_size, (batch_size, seq_len))
+        mask = np.tril(np.ones((seq_len, seq_len))).astype(np.float64)
+        grad_logits = np.random.randn(batch_size, seq_len, vocab_size).astype(np.float64)
+
+        from model.transformer import Transformer as NumPyTransformer
+        from model.pytorch.transformer import PyTorchTransformer as PyTorchTransformerModel
+
+        model_np = NumPyTransformer(
+            vocab_size, embed_dim, 2, 4, 4, max_seq_len=512,
+        )
+        model_pt = PyTorchTransformerModel(
+            vocab_size, embed_dim, 2, 4, 4, max_seq_len=512,
+        )
+
+        # Convert to double first, then sync to avoid float32 truncation during copy_()
+        model_pt.double()
+        self._sync_model_params(model_np, model_pt)
+
+        _, numpy_cache = model_np.forward(input_ids, mask)
+        _, pytorch_cache = model_pt.forward(
+            torch.from_numpy(input_ids).long(), torch.from_numpy(mask)
+        )
+
+        numpy_grads = model_np.backward(grad_logits, numpy_cache)
+        pytorch_grads = model_pt.backward(
+            torch.from_numpy(grad_logits), pytorch_cache
+        )
+
+        np.testing.assert_allclose(
+            numpy_grads["blocks.0.ln1.gamma"],
+            pytorch_grads["blocks.0.ln1.weight"].detach().numpy(),
+            rtol=1e-4, atol=1e-4,
+        )
+
+    def test_backward_0_ln1_beta_parity(self):
+        """Backward w.r.t. blocks.0.ln1.beta should match between NumPy and PyTorch."""
+        np.random.seed(42)
+        batch_size, seq_len, vocab_size, embed_dim = 2, 8, 64, 64
+        input_ids = np.random.randint(0, vocab_size, (batch_size, seq_len))
+        mask = np.tril(np.ones((seq_len, seq_len))).astype(np.float64)
+        grad_logits = np.random.randn(batch_size, seq_len, vocab_size).astype(np.float64)
+
+        from model.transformer import Transformer as NumPyTransformer
+        from model.pytorch.transformer import PyTorchTransformer as PyTorchTransformerModel
+
+        model_np = NumPyTransformer(
+            vocab_size, embed_dim, 2, 4, 4, max_seq_len=512,
+        )
+        model_pt = PyTorchTransformerModel(
+            vocab_size, embed_dim, 2, 4, 4, max_seq_len=512,
+        )
+
+        # Convert to double first, then sync to avoid float32 truncation during copy_()
+        model_pt.double()
+        self._sync_model_params(model_np, model_pt)
+
+        _, numpy_cache = model_np.forward(input_ids, mask)
+        _, pytorch_cache = model_pt.forward(
+            torch.from_numpy(input_ids).long(), torch.from_numpy(mask)
+        )
+
+        numpy_grads = model_np.backward(grad_logits, numpy_cache)
+        pytorch_grads = model_pt.backward(
+            torch.from_numpy(grad_logits), pytorch_cache
+        )
+
+        np.testing.assert_allclose(
+            numpy_grads["blocks.0.ln1.beta"],
+            pytorch_grads["blocks.0.ln1.bias"].detach().numpy(),
+            rtol=1e-4, atol=1e-4,
+        )
+
+    def test_backward_0_ln2_gamma_parity(self):
+        """Backward w.r.t. blocks.0.ln2.gamma should match between NumPy and PyTorch."""
+        np.random.seed(42)
+        batch_size, seq_len, vocab_size, embed_dim = 2, 8, 64, 64
+        input_ids = np.random.randint(0, vocab_size, (batch_size, seq_len))
+        mask = np.tril(np.ones((seq_len, seq_len))).astype(np.float64)
+        grad_logits = np.random.randn(batch_size, seq_len, vocab_size).astype(np.float64)
+
+        from model.transformer import Transformer as NumPyTransformer
+        from model.pytorch.transformer import PyTorchTransformer as PyTorchTransformerModel
+
+        model_np = NumPyTransformer(
+            vocab_size, embed_dim, 2, 4, 4, max_seq_len=512,
+        )
+        model_pt = PyTorchTransformerModel(
+            vocab_size, embed_dim, 2, 4, 4, max_seq_len=512,
+        )
+
+        # Convert to double first, then sync to avoid float32 truncation during copy_()
+        model_pt.double()
+        self._sync_model_params(model_np, model_pt)
+
+        _, numpy_cache = model_np.forward(input_ids, mask)
+        _, pytorch_cache = model_pt.forward(
+            torch.from_numpy(input_ids).long(), torch.from_numpy(mask)
+        )
+
+        numpy_grads = model_np.backward(grad_logits, numpy_cache)
+        pytorch_grads = model_pt.backward(
+            torch.from_numpy(grad_logits), pytorch_cache
+        )
+
+        np.testing.assert_allclose(
+            numpy_grads["blocks.0.ln2.gamma"],
+            pytorch_grads["blocks.0.ln2.weight"].detach().numpy(),
+            rtol=1e-4, atol=1e-4,
+        )
+
+    def test_backward_0_ln2_beta_parity(self):
+        """Backward w.r.t. blocks.0.ln2.beta should match between NumPy and PyTorch."""
+        np.random.seed(42)
+        batch_size, seq_len, vocab_size, embed_dim = 2, 8, 64, 64
+        input_ids = np.random.randint(0, vocab_size, (batch_size, seq_len))
+        mask = np.tril(np.ones((seq_len, seq_len))).astype(np.float64)
+        grad_logits = np.random.randn(batch_size, seq_len, vocab_size).astype(np.float64)
+
+        from model.transformer import Transformer as NumPyTransformer
+        from model.pytorch.transformer import PyTorchTransformer as PyTorchTransformerModel
+
+        model_np = NumPyTransformer(
+            vocab_size, embed_dim, 2, 4, 4, max_seq_len=512,
+        )
+        model_pt = PyTorchTransformerModel(
+            vocab_size, embed_dim, 2, 4, 4, max_seq_len=512,
+        )
+
+        # Convert to double first, then sync to avoid float32 truncation during copy_()
+        model_pt.double()
+        self._sync_model_params(model_np, model_pt)
+
+        _, numpy_cache = model_np.forward(input_ids, mask)
+        _, pytorch_cache = model_pt.forward(
+            torch.from_numpy(input_ids).long(), torch.from_numpy(mask)
+        )
+
+        numpy_grads = model_np.backward(grad_logits, numpy_cache)
+        pytorch_grads = model_pt.backward(
+            torch.from_numpy(grad_logits), pytorch_cache
+        )
+
+        np.testing.assert_allclose(
+            numpy_grads["blocks.0.ln2.beta"],
+            pytorch_grads["blocks.0.ln2.bias"].detach().numpy(),
+            rtol=1e-4, atol=1e-4,
+        )
+
+    def test_backward_0_mha_Wq_parity(self):
+        """Backward w.r.t. blocks.0.mha.W_q should match between NumPy and PyTorch."""
+        np.random.seed(42)
+        batch_size, seq_len, vocab_size, embed_dim = 2, 8, 64, 64
+        input_ids = np.random.randint(0, vocab_size, (batch_size, seq_len))
+        mask = np.tril(np.ones((seq_len, seq_len))).astype(np.float64)
+        grad_logits = np.random.randn(batch_size, seq_len, vocab_size).astype(np.float64)
+
+        from model.transformer import Transformer as NumPyTransformer
+        from model.pytorch.transformer import PyTorchTransformer as PyTorchTransformerModel
+
+        model_np = NumPyTransformer(
+            vocab_size, embed_dim, 2, 4, 4, max_seq_len=512,
+        )
+        model_pt = PyTorchTransformerModel(
+            vocab_size, embed_dim, 2, 4, 4, max_seq_len=512,
+        )
+
+        # Convert to double first, then sync to avoid float32 truncation during copy_()
+        model_pt.double()
+        self._sync_model_params(model_np, model_pt)
+
+        _, numpy_cache = model_np.forward(input_ids, mask)
+        _, pytorch_cache = model_pt.forward(
+            torch.from_numpy(input_ids).long(), torch.from_numpy(mask)
+        )
+
+        numpy_grads = model_np.backward(grad_logits, numpy_cache)
+        pytorch_grads = model_pt.backward(
+            torch.from_numpy(grad_logits), pytorch_cache
+        )
+
+        np.testing.assert_allclose(
+            numpy_grads["blocks.0.mha.W_q"],
+            pytorch_grads["blocks.0.mha.qkv.W_q"].detach().numpy(),
+            rtol=1e-4, atol=1e-4,
+        )
+
+    def test_backward_0_mha_Wk_parity(self):
+        """Backward w.r.t. blocks.0.mha.W_k should match between NumPy and PyTorch."""
+        np.random.seed(42)
+        batch_size, seq_len, vocab_size, embed_dim = 2, 8, 64, 64
+        input_ids = np.random.randint(0, vocab_size, (batch_size, seq_len))
+        mask = np.tril(np.ones((seq_len, seq_len))).astype(np.float64)
+        grad_logits = np.random.randn(batch_size, seq_len, vocab_size).astype(np.float64)
+
+        from model.transformer import Transformer as NumPyTransformer
+        from model.pytorch.transformer import PyTorchTransformer as PyTorchTransformerModel
+
+        model_np = NumPyTransformer(
+            vocab_size, embed_dim, 2, 4, 4, max_seq_len=512,
+        )
+        model_pt = PyTorchTransformerModel(
+            vocab_size, embed_dim, 2, 4, 4, max_seq_len=512,
+        )
+
+        # Convert to double first, then sync to avoid float32 truncation during copy_()
+        model_pt.double()
+        self._sync_model_params(model_np, model_pt)
+
+        _, numpy_cache = model_np.forward(input_ids, mask)
+        _, pytorch_cache = model_pt.forward(
+            torch.from_numpy(input_ids).long(), torch.from_numpy(mask)
+        )
+
+        numpy_grads = model_np.backward(grad_logits, numpy_cache)
+        pytorch_grads = model_pt.backward(
+            torch.from_numpy(grad_logits), pytorch_cache
+        )
+
+        np.testing.assert_allclose(
+            numpy_grads["blocks.0.mha.W_k"],
+            pytorch_grads["blocks.0.mha.qkv.W_k"].detach().numpy(),
+            rtol=1e-4, atol=1e-4,
+        )
+
+    def test_backward_0_moe_expert_0_W1_parity(self):
+        """Backward w.r.t. blocks.0.moe.expert.0.W1 should match between NumPy and PyTorch."""
+        np.random.seed(42)
+        batch_size, seq_len, vocab_size, embed_dim = 2, 8, 64, 64
+        input_ids = np.random.randint(0, vocab_size, (batch_size, seq_len))
+        mask = np.tril(np.ones((seq_len, seq_len))).astype(np.float64)
+        grad_logits = np.random.randn(batch_size, seq_len, vocab_size).astype(np.float64)
+
+        from model.transformer import Transformer as NumPyTransformer
+        from model.pytorch.transformer import PyTorchTransformer as PyTorchTransformerModel
+
+        model_np = NumPyTransformer(
+            vocab_size, embed_dim, 2, 4, 4, max_seq_len=512,
+        )
+        model_pt = PyTorchTransformerModel(
+            vocab_size, embed_dim, 2, 4, 4, max_seq_len=512,
+        )
+
+        # Convert to double first, then sync to avoid float32 truncation during copy_()
+        model_pt.double()
+        self._sync_model_params(model_np, model_pt)
+
+        _, numpy_cache = model_np.forward(input_ids, mask)
+        _, pytorch_cache = model_pt.forward(
+            torch.from_numpy(input_ids).long(), torch.from_numpy(mask)
+        )
+
+        numpy_grads = model_np.backward(grad_logits, numpy_cache)
+        pytorch_grads = model_pt.backward(
+            torch.from_numpy(grad_logits), pytorch_cache
+        )
+
+        np.testing.assert_allclose(
+            numpy_grads["blocks.0.moe.expert.0.W1"],
+            pytorch_grads["blocks.0.moe.expert.0.w1"].detach().numpy(),
+            rtol=1e-4, atol=1e-4,
+        )
+
     def _sync_model_params(self, model_np, model_pt):
         """Sync all NumPy model params to PyTorch model."""
         np_params = model_np.get_params()
