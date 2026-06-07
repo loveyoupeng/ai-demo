@@ -2,41 +2,78 @@
 
 ## Architecture
 
-- Core transformer components in NumPy (`src/model/`)
-- PyTorch parity implementations in `src/model/pytorch/`
-- MoE implementation in `src/model/moe.py`
-- Transformer in `src/model/transformer.py` with full attention+FFN+LayerNorm
-- Backends: NumPy (baseline) → PyTorch → Triton → CUDA (planned)
+- Core transformer components in NumPy (`src/model/`) — pedagogical with detailed comments
+- Parallel NumPy implementations in `src/model/numpy/` — production API (`get_params`/`set_params`, registry)
+- PyTorch implementations in `src/model/pytorch/` — manual backward (no autograd) for parity
+- Backend abstraction: `src/backends/numpy/numpy_backend.py` wraps NumPy Transformer
+- Training: `src/trainer.py`, `src/training/app.py` (not yet tested E2E)
+- Two parallel NumPy implementations is intentional — one for learning, one for production patterns
+
+## Codebase Structure
+
+```
+src/model/         # Pedagogical implementations (comments, manual grad)
+  layers.py        # TokenEmbedding, PositionalEmbedding, FeedForward, LayerNorm
+  attention.py     # MultiHeadAttention
+  moe.py           # Router, Expert, MoELayer
+  transformer.py   # TransformerBlock, Transformer
+src/model/numpy/   # Production API implementations
+  layers.py        # NumPy* prefixed versions with get_params/set_params
+  moe.py           # Registry-integrated MoE (459 lines)
+  transformer.py   # NumPyTransformerBlock (175 lines)
+src/model/pytorch/ # PyTorch manual backward versions
+  layer.py, attention.py, moe.py, transformer.py
+src/backends/      # Backend wrapper layer
+src/training/      # Training orchestration
+src/utils/         # Checkpoint, profiler
+tests/
+  parity/          # NumPy ↔ PyTorch parity tests
+  model/           # Component tests
+```
 
 ## Current Discoveries
 
-### Test Status (2026-06-03)
-- **85/87 tests passing** (97.7%)
-- **2 failing**: MoE backward numerical issues (`test_expert_backward_numerical`, `test_moe_layer_params_numerical`)
-- All parity tests for individual layers pass (29/29 originally, now 31/29 with additions)
+### Test Status (2026-06-07)
+- **98/109 tests passing (90%)**
+- **11 failing** — all backward gradient parity for LayerNorm parameters
+- LayerNorm `gamma`/`beta` backward gradients diverge between NumPy and PyTorch at ~0.001 max diff
+- Full Transformer backward has additional MoE `W1` gradient mismatch
+
+### Key Structural Discovery
+
+The codebase has **two complete NumPy implementation sets**:
+
+| Feature | `src/model/` | `src/model/numpy/` |
+|---------|-------------|-------------------|
+| Purpose | Pedagogical learning | Production API |
+| LayerNorm | 313 lines | 146 lines |
+| Layers files | classes without `NumPy` prefix | classes with `NumPy*` prefix |
+| API | Direct attribute access | `get_params()`/`set_params()`/registry |
+| Test source | `tests/model/*.py`, training pipeline | `tests/parity/*.py` |
+
+**Why both exist**: One is for showing the raw math, the other for demonstrating how a real production framework manages parameters. This is intentional for the educational goal.
+
+### LayerNorm Backward Analysis
+
+All 11 failures are in backward gradient computation for LayerNorm:
+- `test_backward_gamma_parity` / `test_backward_beta_parity` in `test_layernorm.py` (2 tests)
+- 4x backward parity in `test_transformer_block.py` (ln1 ln2 gamma/beta)
+- 4x backward parity in `test_transformer.py` (ln1 ln2 gamma/beta + MoE W1)
+
+The error magnitude (~0.001) suggests:
+- Not a formula bug (formula bugs produce larger errors)
+- Likely accumulation of float32/float64 boundary issues
+- Possible difference in how epsilon interacts with variance computation
 
 ### Pyright Configuration
 - Source files (`src/`): 0 pyright errors ✅
-- Test files (`tests/`): 44 errors (pyright doesn't read pytest `pythonpath` from pyproject.toml)
-- Tests import from flat relative paths (e.g., `from model.layers import ...`), which pyright resolves as if `tests/` is the root
-- **Solution**: Configure pyright to only check `src/` explicitly, or add a pyrightconfig.json
-
-### Test File Structure
-- **Parity tests** (`tests/parity/`): 7 files, test NumPy vs PyTorch parity
-- **Model tests** (`tests/model/`): 9 files, component-specific tests
-- **Integration tests** (root `tests/*.py`): 5 files
-- **Unit tests** (`tests/tokenizer/`, `tests/evaluation/`, `tests/inference/`): 4 files
-- Total: 25 test Python files (excluding `__init__.py`)
-
-### Import Patterns
-- All `src/` code uses flat imports: `from model.layers import ...`, `from optimizer import ...`
-- No `src.` prefix used anywhere (pythonpath = ["src"] in pyproject.toml)
-- Tests import from flat packages too: `from src.model.layers import ...` (after fix)
+- Test files (`tests/`): ~20 errors (cross-imports pyright can't resolve)
+- Solution: pyright only checks `src/`, configured in pyproject.toml
 
 ## Errors Encountered
 
 | Error | Count | Category |
 |-------|-------|----------|
-| `ModuleNotFoundError: No module named 'tests'` | 1 | Import path |
-| Pyright: "Import could not be resolved" | 44 | Tool config |
-| MoE backward numerical mismatch | 2 | Test failure |
+| LayerNorm backward gradient mismatch | 11 | Test failure (all backward parity for ln params) |
+| MoE W1 backward gradient mismatch | 1 | Test failure (chain gradient in transformer) |
+| ModuleNotFoundError: No module named 'model' | ~50 | During test refactoring |
