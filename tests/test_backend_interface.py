@@ -4,12 +4,13 @@ from typing import Any, Optional
 
 import pytest
 import numpy as np
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Tuple
 from utils.backend_interface import BaseTransformerBackend
 
 
 class MockBackend(BaseTransformerBackend):
     """A minimal mock implementation for testing the interface contract."""
+
     def __init__(self):
         self.params = {"weight": np.array([1.0])}
         self.grads = {"weight": np.array([0.0])}
@@ -42,21 +43,23 @@ def test_cannot_instantiate_abstract_class():
     """Invariant: The BaseTransformerBackend should not be instantiable directly."""
     with pytest.raises(TypeError) as excinfo:
         BaseTransformerBackend()
-    assert "Can't instantiate abstract class BaseTransformerBackend" in str(excinfo.value)
+    assert "Can't instantiate abstract class BaseTransformerBackend" in str(
+        excinfo.value
+    )
 
 
 def test_mock_backend_contract():
     """Contract: MockBackend should satisfy the interface signature and return types."""
     backend = MockBackend()
-    
+
     # Test forward
     input_ids = np.array([[1, 2, 3]], dtype=np.int32)
     logits, cache = backend.forward(input_ids)
-    
+
     assert isinstance(logits, np.ndarray)
     assert isinstance(cache, dict)
     assert logits.shape == (1, 3, 1)
-    
+
     # Test backward
     grad_logits = np.ones((1, 3, 1))
     grads = backend.backward(grad_logits, cache)
@@ -66,7 +69,7 @@ def test_mock_backend_contract():
     # Test params
     params = backend.get_params()
     assert params == {"weight": np.array([1.0])}
-    
+
     new_params = {"weight": np.array([2.0])}
     backend.set_params(new_params)
     assert backend.get_params() == new_params

@@ -120,7 +120,7 @@ class PyTorchTransformerBlock(nn.Module):
         d_mha_out = d_ln2_input
 
         mask = (
-            cast(torch.Tensor, cache["mha_cache"]).get("mask")
+            cast(torch.Tensor, cache["mha_cache"]).get("mask")  # pyright: ignore
             if cast(dict, cache["mha_cache"]).get("mask") is not None
             else None
         )
@@ -171,9 +171,9 @@ class PyTorchTransformerBlock(nn.Module):
                     val = torch.from_numpy(val)
                 with torch.no_grad():
                     if param_name == "weight":
-                        self.ln1.weight.copy_(cast(torch.Tensor, val))
+                        self.ln1.weight.copy_(cast(torch.Tensor, val))  # pyright: ignore
                     elif param_name == "bias":
-                        self.ln1.bias.copy_(cast(torch.Tensor, val))
+                        self.ln1.bias.copy_(cast(torch.Tensor, val))  # pyright: ignore
             elif k.startswith("ln2."):
                 param_name = k[4:]
                 val = v
@@ -181,9 +181,9 @@ class PyTorchTransformerBlock(nn.Module):
                     val = torch.from_numpy(val)
                 with torch.no_grad():
                     if param_name == "weight":
-                        self.ln2.weight.copy_(cast(torch.Tensor, val))
+                        self.ln2.weight.copy_(cast(torch.Tensor, val))  # pyright: ignore
                     elif param_name == "bias":
-                        self.ln2.bias.copy_(cast(torch.Tensor, val))
+                        self.ln2.bias.copy_(cast(torch.Tensor, val))  # pyright: ignore
             elif k.startswith("mha."):
                 param_name = k[4:]
                 self.mha.set_params({param_name: v})
@@ -241,7 +241,9 @@ class PyTorchTransformer(nn.Module):
         self.lm_head = nn.Linear(embed_dim, vocab_size, bias=False)
 
         # Registry mappings
-        registry.register("pytorch", "token_embedding.embedding.weight", "token_embedding.weight")
+        registry.register(
+            "pytorch", "token_embedding.embedding.weight", "token_embedding.weight"
+        )
         registry.register("pytorch", "pos_embedding.pe", "pos_embedding.pe")
         registry.register("pytorch", "lm_head.weight", "lm_head.weight")
 
@@ -274,12 +276,16 @@ class PyTorchTransformer(nn.Module):
 
         # 2. Causal Mask
         if mask is None:
-            mask = torch.tril(torch.ones((seq_len, seq_len), dtype=x.dtype, device=x.device))
+            mask = torch.tril(
+                torch.ones((seq_len, seq_len), dtype=x.dtype, device=x.device)
+            )
 
         # 3. Transformer Blocks
         block_caches: list[dict[str, object]] = []
         for block in self.blocks:
-            block_out, block_cache = block.forward(x, mask=mask, use_cache=use_cache, cache_idx=cache_idx)
+            block_out, block_cache = block.forward(
+                x, mask=mask, use_cache=use_cache, cache_idx=cache_idx
+            )
             block_caches.append(block_cache)
             x = block_out
 
@@ -314,7 +320,7 @@ class PyTorchTransformer(nn.Module):
         # Gradient w.r.t. lm_head: [D,V]
         d_lm_head = torch.matmul(
             lm_head_input.reshape(-1, self.embed_dim).T,  # [D, B*L]
-            grad_logits.reshape(-1, self.vocab_size),      # [B*L, V]
+            grad_logits.reshape(-1, self.vocab_size),  # [B*L, V]
         )
         # Gradient w.r.t. lm_head_input: [B,L,D]
         d_lm_head_input = torch.matmul(grad_logits, lm_head_weight)
@@ -329,7 +335,7 @@ class PyTorchTransformer(nn.Module):
         for i in range(self.num_layers - 1, -1, -1):
             block = self.blocks[i]
             block_cache = block_caches[i]
-            dx, block_grads = block.backward(dx, block_cache)
+            dx, block_grads = block.backward(dx, block_cache)  # pyright: ignore
 
             # Prefix block grads
             for k, v in block_grads.items():
@@ -343,9 +349,11 @@ class PyTorchTransformer(nn.Module):
         d_token_embed = torch.zeros_like(embed_weight)
         # Scatter grad_dx into gradient matrix at positions given by input_ids
         dx_flat = dx.reshape(-1, self.embed_dim)  # [B*L, D]
-        ids_flat = input_ids.reshape(-1)          # [B*L]
+        ids_flat = input_ids.reshape(-1)  # [B*L]
         # d_token_embed[ids_flat, :] += dx_flat
-        d_token_embed.scatter_add_(0, ids_flat.unsqueeze(1).expand(-1, embed_dim), dx_flat)
+        d_token_embed.scatter_add_(
+            0, ids_flat.unsqueeze(1).expand(-1, embed_dim), dx_flat
+        )
 
         grads["token_embedding.embedding.weight"] = d_token_embed
 
@@ -358,7 +366,7 @@ class PyTorchTransformer(nn.Module):
             params["token_embedding.embedding.weight"] = self.token_embedding.weight
         # Transformer Blocks
         for i, block in enumerate(self.blocks):
-            for k, v in block.get_params().items():
+            for k, v in block.get_params().items():  # pyright: ignore
                 params[f"blocks.{i}.{k}"] = v
         # LM Head
         params["lm_head"] = self.lm_head.weight
@@ -374,7 +382,7 @@ class PyTorchTransformer(nn.Module):
         """
         for k, v in params.items():
             if k.startswith("token_embedding."):
-                param_name = k[len("token_embedding."):]
+                param_name = k[len("token_embedding.") :]
                 val = v
                 if isinstance(val, np.ndarray):
                     val = torch.from_numpy(val)
@@ -395,22 +403,30 @@ class PyTorchTransformer(nn.Module):
                         val = torch.from_numpy(val)
                     with torch.no_grad():
                         if param_name == "weight":
-                            cast(nn.LayerNorm, block.ln1).weight.copy_(cast(torch.Tensor, val))
+                            cast(nn.LayerNorm, block.ln1).weight.copy_(
+                                cast(torch.Tensor, val)
+                            )
                         elif param_name == "bias":
-                            cast(nn.LayerNorm, block.ln1).bias.copy_(cast(torch.Tensor, val))
+                            cast(nn.LayerNorm, block.ln1).bias.copy_(
+                                cast(torch.Tensor, val)
+                            )
                 elif sublayer == "ln2":
                     val = v
                     if isinstance(val, np.ndarray):
                         val = torch.from_numpy(val)
                     with torch.no_grad():
                         if param_name == "weight":
-                            cast(nn.LayerNorm, block.ln2).weight.copy_(cast(torch.Tensor, val))
+                            cast(nn.LayerNorm, block.ln2).weight.copy_(
+                                cast(torch.Tensor, val)
+                            )
                         elif param_name == "bias":
-                            cast(nn.LayerNorm, block.ln2).bias.copy_(cast(torch.Tensor, val))
+                            cast(nn.LayerNorm, block.ln2).bias.copy_(
+                                cast(torch.Tensor, val)
+                            )
                 elif sublayer == "mha":
-                    block.mha.set_params({param_name: v})
+                    block.mha.set_params({param_name: v})  # pyright: ignore
                 elif sublayer == "moe":
-                    block.moe.set_params({param_name: v})
+                    block.moe.set_params({param_name: v})  # pyright: ignore
             elif k == "lm_head":
                 val = v
                 if isinstance(val, np.ndarray):

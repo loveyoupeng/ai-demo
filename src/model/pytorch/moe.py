@@ -142,24 +142,24 @@ class PyTorchExpert(nn.Module):
         batch_size, seq_len, embed_dim = x.shape
 
         # Flatten for matrix operations
-        h_flat = self.h.reshape(-1, self.dim_ff)       # [B*L, D_ff]
-        d_out_flat = d_out.reshape(-1, embed_dim)       # [B*L, D]
+        h_flat = self.h.reshape(-1, self.dim_ff)  # [B*L, D_ff]
+        d_out_flat = d_out.reshape(-1, embed_dim)  # [B*L, D]
 
         # --- gradient w.r.t. w2, b2 ---
-        grad_w2 = torch.matmul(h_flat.T, d_out_flat)        # [D_ff, D]
-        grad_b2 = d_out_flat.sum(dim=0)                     # [D]
+        grad_w2 = torch.matmul(h_flat.T, d_out_flat)  # [D_ff, D]
+        grad_b2 = d_out_flat.sum(dim=0)  # [D]
 
         # --- gradient through W2 back to h ---
-        grad_h = torch.matmul(d_out_flat, self.w2.T)        # [B*L, D_ff]
+        grad_h = torch.matmul(d_out_flat, self.w2.T)  # [B*L, D_ff]
 
         # --- ReLU backward ---
-        z1_flat = self.z1.reshape(-1, self.dim_ff)        # [B*L, D_ff]
-        grad_z1 = grad_h * (z1_flat > 0).float()          # [B*L, D_ff]
+        z1_flat = self.z1.reshape(-1, self.dim_ff)  # [B*L, D_ff]
+        grad_z1 = grad_h * (z1_flat > 0).float()  # [B*L, D_ff]
 
         # --- gradient w.r.t. w1, b1 ---
-        x_flat = x.reshape(-1, self.embed_dim)              # [B*L, D]
-        grad_w1 = torch.matmul(x_flat.T, grad_z1)           # [D, D_ff]
-        grad_b1 = grad_z1.sum(dim=0)                        # [D_ff]
+        x_flat = x.reshape(-1, self.embed_dim)  # [B*L, D]
+        grad_w1 = torch.matmul(x_flat.T, grad_z1)  # [D, D_ff]
+        grad_b1 = grad_z1.sum(dim=0)  # [D_ff]
 
         # --- gradient w.r.t. x ---
         dx = torch.matmul(grad_z1, self.w1.T).reshape(
@@ -243,14 +243,12 @@ class PyTorchMoELayer(nn.Module):
         routing_weights: torch.Tensor = self.router.forward(x)
 
         # 2. Top-k indices   [B, L, K]
-        top_k_indices: torch.Tensor = torch.argsort(
-            routing_weights, dim=-1
-        )[..., -self.k:]
+        top_k_indices: torch.Tensor = torch.argsort(routing_weights, dim=-1)[
+            ..., -self.k :
+        ]
 
         # 3. Unnormalised top-k weights   [B, L, K]
-        top_k_raw: torch.Tensor = torch.gather(
-            routing_weights, -1, top_k_indices
-        )
+        top_k_raw: torch.Tensor = torch.gather(routing_weights, -1, top_k_indices)
 
         # 4. Normalise   [B, L, K]
         top_k_sum: torch.Tensor = top_k_raw.sum(dim=-1, keepdim=True) + 1e-8
@@ -262,12 +260,12 @@ class PyTorchMoELayer(nn.Module):
         )
 
         # 6. Weighted combination  [B, L, D]
-        batch_idx: torch.Tensor = torch.arange(
-            batch_size, device=x.device
-        ).view(batch_size, 1, 1)  # [B,1,1]
-        seq_idx: torch.Tensor = torch.arange(
-            seq_len, device=x.device
-        ).view(1, seq_len, 1)  # [1,L,1]
+        batch_idx: torch.Tensor = torch.arange(batch_size, device=x.device).view(
+            batch_size, 1, 1
+        )  # [B,1,1]
+        seq_idx: torch.Tensor = torch.arange(seq_len, device=x.device).view(
+            1, seq_len, 1
+        )  # [1,L,1]
         # index: [N,B,L,D][top_k_indices, batch_idx, seq_idx] -> [B,L,K,D]
         expert_outputs_for_tokens: torch.Tensor = all_expert_outputs[
             top_k_indices, batch_idx, seq_idx
@@ -309,7 +307,9 @@ class PyTorchMoELayer(nn.Module):
         top_k_indices: torch.Tensor = cast(torch.Tensor, cache["top_k_indices"])
         top_k_weights: torch.Tensor = cast(torch.Tensor, cache["top_k_weights"])
         top_k_sum: torch.Tensor = cast(torch.Tensor, cache["top_k_sum"])
-        all_expert_outputs: torch.Tensor = cast(torch.Tensor, cache["all_expert_outputs"])
+        all_expert_outputs: torch.Tensor = cast(
+            torch.Tensor, cache["all_expert_outputs"]
+        )
 
         batch_size, seq_len, embed_dim = x.shape
 
@@ -321,27 +321,26 @@ class PyTorchMoELayer(nn.Module):
 
         # Gather d_out[b, s, :] with shape [B, L, D]
         b_idx = torch.arange(batch_size, device=x.device).unsqueeze(-1)  # [B, 1]
-        s_idx = torch.arange(seq_len, device=x.device).unsqueeze(0)     # [1, L]
-        d_out_gathered: torch.Tensor = d_out[b_idx, s_idx]               # [B, L, D]
+        s_idx = torch.arange(seq_len, device=x.device).unsqueeze(0)  # [1, L]
+        d_out_gathered: torch.Tensor = d_out[b_idx, s_idx]  # [B, L, D]
 
         # Accumulate weight-scaled d_out into d_all_expert_outputs[expert_idx, b, s, :]
         for k_idx in range(self.k):
             expert_for_k = top_k_indices[:, :, k_idx]  # [B, L]
             # broadcast expert_for_k [B,L], b_idx [B,1], s_idx [1,L] -> [B,L,D]
             d_all_expert_outputs[expert_for_k, b_idx, s_idx] += (
-                top_k_weights[:, :, k_idx].unsqueeze(-1)
-                * d_out_gathered
+                top_k_weights[:, :, k_idx].unsqueeze(-1) * d_out_gathered
             )
 
         # d_top_k_weights[b, s, k] = sum_d top_k_w * d_out[b,s,d] * expert_out[b,s,d]
         for k_idx in range(self.k):
             expert_for_k = top_k_indices[:, :, k_idx]
             # all_expert_outputs[expert_for_k, b_idx, s_idx] -> [B, L, D]
-            expert_out_for_k = all_expert_outputs[expert_for_k, b_idx, s_idx]  # [B, L, D]
+            expert_out_for_k = all_expert_outputs[
+                expert_for_k, b_idx, s_idx
+            ]  # [B, L, D]
             d_top_k_weights[:, :, k_idx] = torch.sum(
-                top_k_weights[:, :, k_idx, None]
-                * d_out_gathered
-                * expert_out_for_k,
+                top_k_weights[:, :, k_idx, None] * d_out_gathered * expert_out_for_k,
                 dim=-1,
             )
 
@@ -361,7 +360,9 @@ class PyTorchMoELayer(nn.Module):
 
         # 3. Back-propagate through top-k normalisation
         d_top_k_sum: torch.Tensor = -torch.sum(
-            top_k_weights * d_top_k_weights, dim=-1, keepdim=True,
+            top_k_weights * d_top_k_weights,
+            dim=-1,
+            keepdim=True,
         ) / (top_k_sum + 1e-8)  # [B, L, 1]
 
         d_top_k_raw: torch.Tensor = (d_top_k_weights + d_top_k_sum) / (
@@ -370,7 +371,9 @@ class PyTorchMoELayer(nn.Module):
 
         # Place d_raw into d_routing_weights only at top-k positions
         d_routing_weights: torch.Tensor = torch.zeros(
-            (batch_size, seq_len, self.num_experts), dtype=x.dtype, device=x.device,
+            (batch_size, seq_len, self.num_experts),
+            dtype=x.dtype,
+            device=x.device,
         )
         for k_idx in range(self.k):
             d_routing_weights[
@@ -412,7 +415,7 @@ class PyTorchMoELayer(nn.Module):
         """Assign parameters from a flat dict produced by :meth:`get_params`."""
         for name, param in params.items():
             if name.startswith("router."):
-                key = name[len("router."):]
+                key = name[len("router.") :]
                 self.router.set_params({key: param})
             elif name.startswith("expert."):
                 # e.g. "expert.2.w1" -> expert_idx=2, key="w1"

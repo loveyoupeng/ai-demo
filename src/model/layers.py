@@ -277,7 +277,6 @@ class LayerNorm:
         """
         Returns dx and parameter gradients.
         """
-        embed_dim = self.embed_dim
         # grad_output shape: [Batch, Seq_Len, Embed_Dim]
 
         # 1. Gradients w.r.t gamma and beta
@@ -289,12 +288,12 @@ class LayerNorm:
 
         # 3. Gradient through normalization
         mean_grad_x_norm = np.mean(grad_x_norm, axis=-1, keepdims=True)
-        mean_grad_x_norm_x_norm = np.mean(grad_x_norm * self.x_norm, axis=-1, keepdims=True)
+        mean_grad_x_norm_x_norm = np.mean(
+            grad_x_norm * self.x_norm, axis=-1, keepdims=True
+        )
 
         grad_x = (1.0 / np.sqrt(self.var + self.eps)) * (
-            grad_x_norm
-            - mean_grad_x_norm
-            - self.x_norm * mean_grad_x_norm_x_norm
+            grad_x_norm - mean_grad_x_norm - self.x_norm * mean_grad_x_norm_x_norm
         )
 
         return grad_x, self.get_grads()

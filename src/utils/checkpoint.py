@@ -3,7 +3,6 @@ from __future__ import annotations
 import pickle
 import os
 
-from typing import cast
 
 from model.transformer import Transformer
 from tokenizer.char_tokenizer import CharTokenizer
@@ -19,7 +18,9 @@ class ModelCheckpoint:
         if not os.path.exists(self.base_dir):
             os.makedirs(self.base_dir)
 
-    def save_checkpoint(self, model: Transformer, tokenizer: CharTokenizer, filename: str):
+    def save_checkpoint(
+        self, model: Transformer, tokenizer: CharTokenizer, filename: str
+    ):
         """
         Saves the model parameters and the tokenizer.
         """

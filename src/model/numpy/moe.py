@@ -163,7 +163,7 @@ class Expert:
         grad_h: np.ndarray = np.dot(d_out_flat, self.w2.T)  # [B*L, D_ff]
 
         # --- ReLU backward ---
-        z1_flat: np.ndarray = self.z1.reshape(-1, self.dim_ff)         # [B*L, D_ff]
+        z1_flat: np.ndarray = self.z1.reshape(-1, self.dim_ff)  # [B*L, D_ff]
         grad_z1: np.ndarray = grad_h * (z1_flat > 0).astype(np.float64)  # [B*L, D_ff]
 
         # --- gradient w.r.t. w1, b1 ---
@@ -172,7 +172,9 @@ class Expert:
         grad_b1: np.ndarray = np.sum(grad_z1, axis=0)  # [D_ff]
 
         # --- gradient w.r.t. x ---
-        dx: np.ndarray = np.dot(grad_z1, self.w1.T).reshape(batch_size, seq_len, self.embed_dim)
+        dx: np.ndarray = np.dot(grad_z1, self.w1.T).reshape(
+            batch_size, seq_len, self.embed_dim
+        )
 
         grads: dict[str, np.ndarray] = {
             "w1": grad_w1,
@@ -254,7 +256,9 @@ class MoELayer:
         # 2. Top-k indices   [B, L, K]
         top_k_indices: np.ndarray = np.argsort(routing_weights, axis=-1)[..., -self.k :]
         # 3. Unnormalised top-k weights   [B, L, K]
-        top_k_raw: np.ndarray = np.take_along_axis(routing_weights, top_k_indices, axis=-1)
+        top_k_raw: np.ndarray = np.take_along_axis(
+            routing_weights, top_k_indices, axis=-1
+        )
         # 4. Normalise   [B, L, K]
         top_k_sum: np.ndarray = np.sum(top_k_raw, axis=-1, keepdims=True) + 1e-8
         top_k_weights: np.ndarray = top_k_raw / top_k_sum
@@ -315,12 +319,14 @@ class MoELayer:
         #    d_all_expert_outputs[i, b, s, :] += top_k_weights[b, s, k] * d_out[b, s, :]
         #    for each (b, s, k) where top_k_indices[b, s, k] == i
         # ------------------------------------------------------------------
-        d_all_expert_outputs: np.ndarray = np.zeros_like(all_expert_outputs)  # [N, B, L, D]
+        d_all_expert_outputs: np.ndarray = np.zeros_like(
+            all_expert_outputs
+        )  # [N, B, L, D]
         d_top_k_weights: np.ndarray = np.zeros_like(top_k_weights)  # [B, L, K]
 
         # Use flat 2D views for consistent broadcasting
         b_flat = np.arange(batch_size)[:, np.newaxis]  # [B, 1]
-        s_flat = np.arange(seq_len)[np.newaxis, :]     # [1, L]
+        s_flat = np.arange(seq_len)[np.newaxis, :]  # [1, L]
 
         # d_all_expert_outputs[i, b, s, :] += weight * d_out[b, s, :]
         for k_idx in range(top_k_indices.shape[2]):
@@ -334,7 +340,9 @@ class MoELayer:
             # Assign to all_expert_outputs[expert_idx, b, s, :]
             for b_i in range(batch_size):
                 for s_i in range(seq_len):
-                    d_all_expert_outputs[expert_idx[b_i, s_i], b_i, s_i, :] += grad_contrib[b_i, s_i, :]
+                    d_all_expert_outputs[expert_idx[b_i, s_i], b_i, s_i, :] += (
+                        grad_contrib[b_i, s_i, :]
+                    )
 
         for k_idx in range(self.k):
             # all_expert_outputs[expert for k at b, s, :] -> [B, L, D]
@@ -367,7 +375,9 @@ class MoELayer:
                     grads_experts[f"expert.{i}.{name}"] = grad
             else:
                 for name in self.experts[i].get_params():
-                    grads_experts[f"expert.{i}.{name}"] = np.zeros_like(self.experts[i].get_params()[name])
+                    grads_experts[f"expert.{i}.{name}"] = np.zeros_like(
+                        self.experts[i].get_params()[name]
+                    )
 
         # ------------------------------------------------------------------
         # 3. Back-propagate through top-k normalisation
@@ -383,7 +393,9 @@ class MoELayer:
         #    For non-selected positions dR = 0.
         # ------------------------------------------------------------------
         d_top_k_sum: np.ndarray = -np.sum(
-            top_k_weights * d_top_k_weights, axis=-1, keepdims=True,
+            top_k_weights * d_top_k_weights,
+            axis=-1,
+            keepdims=True,
         ) / (top_k_sum + 1e-8)  # [B, L, 1]
 
         d_top_k_raw: np.ndarray = (d_top_k_weights + d_top_k_sum) / (
@@ -392,16 +404,17 @@ class MoELayer:
 
         # Place d_raw into d_routing_weights only at top-k positions
         d_routing_weights: np.ndarray = np.zeros(
-            (batch_size, seq_len, self.num_experts), dtype=np.float64,
+            (batch_size, seq_len, self.num_experts),
+            dtype=np.float64,
         )
         for k_idx in range(self.k):
             expert_indices = top_k_indices[:, :, k_idx]  # [B, L]
             b_coords = np.arange(batch_size)[:, np.newaxis]  # [B, 1]
             s_coords = np.arange(seq_len)[np.newaxis, :]  # [1, L]
             # d_routing_weights shape is (B, L, N) -> index as (b, s, expert)
-            d_routing_weights[b_coords, s_coords, expert_indices] += (
-                d_top_k_raw[:, :, k_idx]
-            )
+            d_routing_weights[b_coords, s_coords, expert_indices] += d_top_k_raw[
+                :, :, k_idx
+            ]
         # Zero out non-selected positions (keep only top-k gradients)
         selected_mask = np.zeros_like(routing_weights)  # [B, L, N]
         for k_idx in range(self.k):
@@ -458,5 +471,3 @@ class MoELayer:
                 idx: int = int(parts[1])
                 key: str = parts[2]
                 self.experts[idx].set_params({key: param})
-
-

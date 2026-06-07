@@ -3,15 +3,21 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-from typing import Any, Dict, Type, Tuple
+from typing import Dict, Tuple
 from utils.backend_interface import BaseTransformerBackend
+
 
 class ParityTester:
     """
     Utility to compare two Transformer backends for mathematical parity.
     """
 
-    def __init__(self, baseline: BaseTransformerBackend, target: BaseTransformerBackend, tol: float = 1e-5):
+    def __init__(
+        self,
+        baseline: BaseTransformerBackend,
+        target: BaseTransformerBackend,
+        tol: float = 1e-5,
+    ):
         self.baseline = baseline
         self.target = target
         self.tol = tol
@@ -31,18 +37,20 @@ class ParityTester:
 
         diff = np.abs(logits_base - logits_target)
         max_diff = np.max(diff)
-        
+
         is_equal = max_diff <= self.tol
-        
+
         details = {
             "max_diff": max_diff,
             "logits_base_shape": logits_base.shape,
-            "logits_target_shape": logits_target.shape
+            "logits_target_shape": logits_target.shape,
         }
-        
+
         return is_equal, details
 
-    def compare_backward(self, input_ids: np.ndarray, grad_logits: np.ndarray) -> Tuple[bool, Dict[str, Any]]:
+    def compare_backward(
+        self, input_ids: np.ndarray, grad_logits: np.ndarray
+    ) -> Tuple[bool, Dict[str, Any]]:
         """
         Compares backward pass gradients.
         Returns (is_equal, error_details).
@@ -60,20 +68,17 @@ class ParityTester:
 
         # Check if all keys exist in both
         all_keys = set(grads_base.keys()) | set(grads_target.keys())
-        
+
         max_diff = 0.0
         for key in all_keys:
             if key not in grads_base or key not in grads_target:
                 return False, {"error": f"Key mismatch: {key} not in both"}
-            
+
             diff = np.abs(grads_base[key] - grads_target[key])
             max_diff = max(max_diff, np.max(diff))
 
         is_equal = max_diff <= self.tol
-        
-        details = {
-            "max_diff": max_diff,
-            "keys_compared": list(all_keys)
-        }
-        
+
+        details = {"max_diff": max_diff, "keys_compared": list(all_keys)}
+
         return is_equal, details

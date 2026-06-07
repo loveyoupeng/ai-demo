@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 from optimizer import Adam, SGD
-from typing import Dict
+
 
 def test_sgd_update():
     """
@@ -11,13 +11,14 @@ def test_sgd_update():
     np.random.seed(42)
     lr = 0.1
     optimizer = SGD(learning_rate=lr)
-    
+
     params = {"w": np.array([1.0, 2.0], dtype=np.float64)}
     grads = {"w": np.array([0.5, -0.5], dtype=np.float64)}
-    
+
     optimizer.step(params, grads)
-    
+
     np.testing.assert_allclose(params["w"], np.array([0.95, 2.05]))
+
 
 def test_adam_update():
     """
@@ -34,13 +35,13 @@ def test_adam_update():
     beta2 = 0.99
     eps = 1e-8
     optimizer = Adam(learning_rate=lr, beta1=beta1, beta2=beta2, eps=eps)
-    
+
     params = {"w": np.array([1.0], dtype=np.float64)}
     grads = {"w": np.array([0.5], dtype=np.float64)}
-    
+
     # Step 1
     optimizer.step(params, grads)
-    
+
     # t=1
     # m = 0.9 * 0 + (1-0.9) * 0.5 = 0.05
     # m_hat = 0.05 / (1 - 0.9^1) = 0.05 / 0.1 = 0.5
@@ -48,8 +49,9 @@ def test_adam_update():
     # v_hat = 0.0025 / (1 - 0.99^1) = 0.0025 / 0.01 = 0.25
     # update = 0.1 * 0.5 / (sqrt(0.25) + 1e-8) = 0.1 * 0.5 / 0.5 = 0.1
     # new_param = 1.0 - 0.1 = 0.9
-    
+
     np.testing.assert_allclose(params["w"], np.array([0.9]))
+
 
 def test_adam_momentum_consistency():
     """
@@ -59,14 +61,15 @@ def test_adam_momentum_consistency():
     optimizer = Adam(learning_rate=0.1)
     params = {"w": np.array([1.0], dtype=np.float64)}
     grads = {"w": np.array([0.5], dtype=np.float64)}
-    
+
     optimizer.step(params, grads)
     assert "w" in optimizer.m
     assert "w" in optimizer.v
     assert optimizer.t == 1
-    
+
     optimizer.step(params, grads)
     assert optimizer.t == 2
+
 
 def test_adam_new_parameters():
     """
@@ -75,18 +78,24 @@ def test_adam_new_parameters():
     """
     np.random.seed(42)
     optimizer = Adam(learning_rate=0.1)
-    
+
     # First step with param 'w'
     params1 = {"w": np.array([1.0], dtype=np.float64)}
     grads1 = {"w": np.array([0.5], dtype=np.float64)}
     optimizer.step(params1, grads1)
-    
+
     # Second step with new param 'b'
-    params2 = {"w": np.array([0.9], dtype=np.float64), "b": np.array([2.0], dtype=np.float64)}
-    grads2 = {"w": np.array([0.1], dtype=np.float64), "b": np.array([0.5], dtype=np.float64)}
-    
+    params2 = {
+        "w": np.array([0.9], dtype=np.float64),
+        "b": np.array([2.0], dtype=np.float64),
+    }
+    grads2 = {
+        "w": np.array([0.1], dtype=np.float64),
+        "b": np.array([0.5], dtype=np.float64),
+    }
+
     # This is expected to fail with KeyError: 'b'
     optimizer.step(params2, grads2)
-    
+
     assert "b" in optimizer.m
     assert "b" in optimizer.v

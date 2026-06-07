@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import torch
-import pytest
 from model.pytorch.attention import PyTorchMultiHeadAttention
 from model.pytorch.layers import (
     PyTorchTokenEmbedding,
@@ -39,8 +38,12 @@ def test_layer_norm():
     x = torch.randn(batch_size, seq_len, embed_dim)
     output = model(x)
     assert output.shape == (batch_size, seq_len, embed_dim)
-    assert torch.allclose(output.mean(dim=-1), torch.zeros(batch_size, seq_len), atol=1e-5)
-    assert torch.allclose(output.std(dim=-1, correction=0), torch.ones(batch_size, seq_len), atol=1e-2)
+    assert torch.allclose(
+        output.mean(dim=-1), torch.zeros(batch_size, seq_len), atol=1e-5
+    )
+    assert torch.allclose(
+        output.std(dim=-1, correction=0), torch.ones(batch_size, seq_len), atol=1e-2
+    )
 
 
 def test_feed_forward():
@@ -73,7 +76,6 @@ def test_mha_kv_cache():
     embed_dim = 32
     num_heads = 4
     batch_size = 2
-    seq_len = 5
     model = PyTorchMultiHeadAttention(embed_dim, num_heads)
     x1 = torch.randn(batch_size, 1, embed_dim)
     output1, _ = model(x1)

@@ -131,7 +131,7 @@ def test_trainer_loss_reduction():
         loss = trainer.train_step(input_ids, target_ids)
 
     # Check for significant reduction (at least 50%)
-    reduction_ratio = initial_loss / loss if loss > 0 else float('inf')
+    reduction_ratio = initial_loss / loss if loss > 0 else float("inf")
     assert reduction_ratio > 1.5, (
         f"Loss did not decrease significantly. Initial: {initial_loss}, Final: {loss}, Ratio: {reduction_ratio:.2f}"
     )

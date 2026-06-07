@@ -5,6 +5,7 @@ import torch.nn as nn
 import numpy as np
 from core.registry import registry
 
+
 class PyTorchTokenEmbedding(nn.Module):
     def __init__(self, vocab_size: int, embed_dim: int):
         super().__init__()
@@ -16,13 +17,15 @@ class PyTorchTokenEmbedding(nn.Module):
         self.indices = indices
         return self.embedding(indices)
 
-    def backward(self, grad_output: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def backward(
+        self, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         output = self.embedding(self.indices)
         loss = (output * grad_output).sum()
         loss.backward()
         if self.embedding.weight.grad is None:
             raise RuntimeError("embedding.weight.grad is None")
-        dx = grad_output 
+        dx = grad_output
         grads = self.get_grads()
         return dx, grads
 
@@ -43,6 +46,7 @@ class PyTorchTokenEmbedding(nn.Module):
             grads["embedding.weights"] = self.embedding.weight.grad
         return grads
 
+
 class PyTorchLayerNorm(nn.Module):
     def __init__(self, embed_dim: int, eps: float = 1e-6):
         super().__init__()
@@ -59,27 +63,25 @@ class PyTorchLayerNorm(nn.Module):
         self.x_norm = (x - self.x_mean) / torch.sqrt(self.x_var + self.eps)
         return self.gamma * self.x_norm + self.beta
 
-    def backward(self, grad_output: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def backward(
+        self, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         # Manual backward to preserve the computation graph for chaining.
         # Matching the NumPy backward computation from
         # https://arxiv.org/abs/1607.06450
         x = self.x
-        mean = self.x_mean
         var = self.x_var
         x_norm = self.x_norm
 
         eps = self.eps
         gamma = self.gamma
-        beta = self.beta
 
         # Compute gradients manually (matches NumPy LayerNorm backward)
         grad_x_norm = grad_output * gamma
         mean_grad_x_norm = torch.mean(grad_x_norm, dim=-1, keepdim=True)
         mean_grad_x_norm_x_norm = torch.mean(grad_x_norm * x_norm, dim=-1, keepdim=True)
         grad_x = (1.0 / torch.sqrt(var + eps)) * (
-            grad_x_norm
-            - mean_grad_x_norm
-            - x_norm * mean_grad_x_norm_x_norm
+            grad_x_norm - mean_grad_x_norm - x_norm * mean_grad_x_norm_x_norm
         )
 
         grads = {
@@ -114,6 +116,7 @@ class PyTorchLayerNorm(nn.Module):
             grads["ln.beta"] = self.beta.grad
         return grads
 
+
 class PyTorchFeedForward(nn.Module):
     def __init__(self, embed_dim: int, dim_ff: int):
         super().__init__()
@@ -135,16 +138,18 @@ class PyTorchFeedForward(nn.Module):
         self.output = torch.matmul(self.h, self.w2) + self.b2
         return self.output
 
-    def backward(self, grad_output: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def backward(
+        self, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         x = self.x.detach().requires_grad_(True)
         z1 = torch.matmul(x, self.w1) + self.b1
         h = torch.nn.functional.relu(z1)
         output = torch.matmul(h, self.w2) + self.b2
         loss = (output * grad_output).sum()
-        
+
         self.zero_grad()
         loss.backward()
-        
+
         grad_x = x.grad
         assert grad_x is not None, "x.grad should not be None after backward"
         grads = self.get_grads()
@@ -155,7 +160,7 @@ class PyTorchFeedForward(nn.Module):
             "ffn.w1": self.w1,
             "ffn.b1": self.b1,
             "ffn.w2": self.w2,
-            "ffn.b2": self.b2
+            "ffn.b2": self.b2,
         }
 
     def set_params(self, params: dict[str, np.ndarray | torch.Tensor]) -> None:
@@ -180,16 +185,18 @@ class PyTorchFeedForward(nn.Module):
             grads["ffn.b2"] = self.b2.grad
         return grads
 
+
 class PyTorchPositionalEmbedding(nn.Module):
     def __init__(self, max_seq_len: int, embed_dim: int):
         super().__init__()
         self.max_seq_len = max_seq_len
         self.embed_dim = embed_dim
-        
+
         pe = torch.zeros((max_seq_len, embed_dim))
         position = torch.arange(0, max_seq_len, dtype=torch.float32).unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, embed_dim, 2, dtype=torch.float32) * -(torch.log(torch.tensor(10000.0)) / embed_dim)
+            torch.arange(0, embed_dim, 2, dtype=torch.float32)
+            * -(torch.log(torch.tensor(10000.0)) / embed_dim)
         )
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
@@ -198,9 +205,11 @@ class PyTorchPositionalEmbedding(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self.x = x
         pe = self.get_buffer("pe")  # type: ignore[arg-type]
-        return x + pe[:x.shape[1], :]
+        return x + pe[: x.shape[1], :]
 
-    def backward(self, grad_output: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def backward(
+        self, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         pe = self.get_buffer("pe")  # type: ignore[arg-type]
         return grad_output, {"pe": torch.zeros_like(pe)}
 

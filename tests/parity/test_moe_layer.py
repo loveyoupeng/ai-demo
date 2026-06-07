@@ -54,15 +54,12 @@ class TestMoEParity:
     def test_forward_parity(self):
         """Forward pass should match with tolerance rtol=1e-4, atol=1e-4."""
         np.random.seed(42)
-        x = np.random.randn(
-            self.batch_size, self.seq_len, self.embed_dim
-        ).astype(np.float64)
-        mask = np.zeros((self.seq_len, self.seq_len))
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
 
         numpy_out, numpy_cache = self.numpy_moe.forward(x)
-        pytorch_out, pytorch_cache = self.pytorch_moe.forward(
-            torch.from_numpy(x)
-        )
+        pytorch_out, pytorch_cache = self.pytorch_moe.forward(torch.from_numpy(x))
 
         assert torch.from_numpy(numpy_out).dtype == torch.float64
         np.testing.assert_allclose(
@@ -75,9 +72,9 @@ class TestMoEParity:
     def test_backward_router_w(self):
         """Backward w.r.t. router.w should match."""
         np.random.seed(42)
-        x = np.random.randn(
-            self.batch_size, self.seq_len, self.embed_dim
-        ).astype(np.float64)
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
         grad_output = np.random.randn(
             self.batch_size, self.seq_len, self.embed_dim
         ).astype(np.float64)
@@ -110,9 +107,9 @@ class TestMoEParity:
     def test_backward_expert_0_w1(self):
         """Backward w.r.t. expert.0.w1 should match."""
         np.random.seed(42)
-        x = np.random.randn(
-            self.batch_size, self.seq_len, self.embed_dim
-        ).astype(np.float64)
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
         grad_output = np.random.randn(
             self.batch_size, self.seq_len, self.embed_dim
         ).astype(np.float64)
@@ -145,9 +142,9 @@ class TestMoEParity:
     def test_backward_expert_1_b2(self):
         """Backward w.r.t. expert.1.b2 should match."""
         np.random.seed(42)
-        x = np.random.randn(
-            self.batch_size, self.seq_len, self.embed_dim
-        ).astype(np.float64)
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
         grad_output = np.random.randn(
             self.batch_size, self.seq_len, self.embed_dim
         ).astype(np.float64)
@@ -180,9 +177,9 @@ class TestMoEParity:
     def test_backward_input(self):
         """Backward w.r.t. input x (dx) should match."""
         np.random.seed(42)
-        x = np.random.randn(
-            self.batch_size, self.seq_len, self.embed_dim
-        ).astype(np.float64)
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
         grad_output = np.random.randn(
             self.batch_size, self.seq_len, self.embed_dim
         ).astype(np.float64)
@@ -215,9 +212,9 @@ class TestMoEParity:
     def test_no_mask_parity(self):
         """Forward pass without mask should match."""
         np.random.seed(42)
-        x = np.random.randn(
-            self.batch_size, self.seq_len, self.embed_dim
-        ).astype(np.float64)
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
 
         numpy_out, _ = self.numpy_moe.forward(x)
         pytorch_out, _ = self.pytorch_moe.forward(torch.from_numpy(x))
@@ -232,9 +229,9 @@ class TestMoEParity:
     def test_cache_integrity(self):
         """Verify cache keys are identical between NumPy and PyTorch."""
         np.random.seed(42)
-        x = np.random.randn(
-            self.batch_size, self.seq_len, self.embed_dim
-        ).astype(np.float64)
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
 
         _, numpy_cache = self.numpy_moe.forward(x)
         _, pytorch_cache = self.pytorch_moe.forward(torch.from_numpy(x))
@@ -242,8 +239,7 @@ class TestMoEParity:
         numpy_keys = set(numpy_cache.keys())
         pytorch_keys = set(pytorch_cache.keys())
         assert numpy_keys == pytorch_keys, (
-            f"Cache keys differ: NumPy has {numpy_keys}, "
-            f"PyTorch has {pytorch_keys}"
+            f"Cache keys differ: NumPy has {numpy_keys}, PyTorch has {pytorch_keys}"
         )
 
         for key in numpy_keys:

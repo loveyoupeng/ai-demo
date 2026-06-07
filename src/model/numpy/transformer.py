@@ -105,7 +105,9 @@ class NumPyTransformerBlock:
         dx_moe: np.ndarray
         grads_moe: dict[str, np.ndarray]
         dx_moe, grads_moe = self.moe.backward(
-            cast(np.ndarray, cache["moe_input"]), d_moe_out, cast(dict[str, object], cache["moe_cache"])
+            cast(np.ndarray, cache["moe_input"]),
+            d_moe_out,
+            cast(dict[str, object], cache["moe_cache"]),
         )
 
         # 2. Gradient w.r.t. residual 2 and ln2
@@ -121,7 +123,9 @@ class NumPyTransformerBlock:
         d_mha_out: np.ndarray = d_ln2_input
 
         mha_cache = cache["mha_cache"]
-        mask: np.ndarray | None = mha_cache.get("mask") if isinstance(mha_cache, dict) else None
+        mask: np.ndarray | None = (
+            mha_cache.get("mask") if isinstance(mha_cache, dict) else None
+        )
         dx_mha: np.ndarray
         grads_mha: dict[str, np.ndarray]
         dx_mha, grads_mha = self.mha.backward(
@@ -131,7 +135,9 @@ class NumPyTransformerBlock:
             Q=mha_cache.get("Q") if isinstance(mha_cache, dict) else None,
             K=mha_cache.get("K") if isinstance(mha_cache, dict) else None,
             V=mha_cache.get("V") if isinstance(mha_cache, dict) else None,
-            attn_weights=mha_cache.get("attn_weights") if isinstance(mha_cache, dict) else None,
+            attn_weights=mha_cache.get("attn_weights")
+            if isinstance(mha_cache, dict)
+            else None,
             context=mha_cache.get("context") if isinstance(mha_cache, dict) else None,
         )
 

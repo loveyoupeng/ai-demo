@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 class ParameterRegistry:
     """
     The 'Rosetta Stone' for the Transformer architecture.

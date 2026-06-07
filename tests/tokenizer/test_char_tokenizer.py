@@ -37,11 +37,11 @@ def test_tokenizer_vocab_size():
 @pytest.mark.timeout(2)
 def test_tokenizer_unknown_char():
     """
-    Test that attempting to encode a character not in the vocabulary 
+    Test that attempting to encode a character not in the vocabulary
     does not raise a KeyError but handles it via the fallback mechanism.
     """
     tokenizer = CharTokenizer("abc")
-    # Since we modified tokenizer.py to handle unknown via fallback, 
+    # Since we modified tokenizer.py to handle unknown via fallback,
     # it should NOT raise KeyError. It should return the index of the fallback char.
     encoded = tokenizer.encode("d")
     assert len(encoded) == 1

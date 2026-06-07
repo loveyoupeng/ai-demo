@@ -55,12 +55,16 @@ class TestTransformerBlockParity:
                 elif name.startswith("expert."):
                     parts = name.split(".", 2)
                     idx = int(parts[1])
-                    self.moe_pt.experts[idx].set_params({parts[2]: torch.from_numpy(param)})
+                    self.moe_pt.experts[idx].set_params(
+                        {parts[2]: torch.from_numpy(param)}
+                    )
 
     def test_forward_parity(self):
         """Forward pass should match with tolerance rtol=1e-4, atol=1e-4."""
         np.random.seed(42)
-        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
         mask = np.tril(np.ones((self.seq_len, self.seq_len))).astype(np.float64)
 
         # Import here so we get a clean failure if class doesn't exist yet
@@ -80,8 +84,12 @@ class TestTransformerBlockParity:
     def test_backward_ln1_gamma_parity(self):
         """Backward w.r.t. ln1 gamma should match."""
         np.random.seed(42)
-        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
-        grad_output = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
+        grad_output = np.random.randn(
+            self.batch_size, self.seq_len, self.embed_dim
+        ).astype(np.float64)
         mask = np.tril(np.ones((self.seq_len, self.seq_len))).astype(np.float64)
 
         from model.numpy.transformer import NumPyTransformerBlock
@@ -89,13 +97,17 @@ class TestTransformerBlockParity:
 
         self.mha_np = NumPyMHA(self.embed_dim, self.num_heads)
         self.moe_np = NumPyMoE(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt = PyTorchMultiHeadAttention(self.embed_dim, self.num_heads)
         self.moe_pt = PyTorchMoELayer(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt.double()
         self.moe_pt.double()
@@ -113,7 +125,9 @@ class TestTransformerBlockParity:
                 elif name.startswith("expert."):
                     parts = name.split(".", 2)
                     idx = int(parts[1])
-                    self.moe_pt.experts[idx].set_params({parts[2]: torch.from_numpy(param)})
+                    self.moe_pt.experts[idx].set_params(
+                        {parts[2]: torch.from_numpy(param)}
+                    )
 
         block_np = NumPyTransformerBlock(self.embed_dim, self.mha_np, self.moe_np)
         block_pt = PyTorchTransformerBlock(self.embed_dim, self.mha_pt, self.moe_pt)
@@ -122,19 +136,26 @@ class TestTransformerBlockParity:
         _, numpy_grads = block_np.backward(grad_output, numpy_cache)
 
         _, pytorch_cache = block_pt.forward(torch.from_numpy(x), torch.from_numpy(mask))
-        _, pytorch_grads = block_pt.backward(torch.from_numpy(grad_output), pytorch_cache)
+        _, pytorch_grads = block_pt.backward(
+            torch.from_numpy(grad_output), pytorch_cache
+        )
 
         np.testing.assert_allclose(
             numpy_grads["ln1.gamma"],
             pytorch_grads["ln1.weight"].detach().numpy(),
-            rtol=1e-3, atol=1e-3,
+            rtol=1e-3,
+            atol=1e-3,
         )
 
     def test_backward_ln1_beta_parity(self):
         """Backward w.r.t. ln1 beta should match."""
         np.random.seed(42)
-        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
-        grad_output = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
+        grad_output = np.random.randn(
+            self.batch_size, self.seq_len, self.embed_dim
+        ).astype(np.float64)
         mask = np.tril(np.ones((self.seq_len, self.seq_len))).astype(np.float64)
 
         from model.numpy.transformer import NumPyTransformerBlock
@@ -142,13 +163,17 @@ class TestTransformerBlockParity:
 
         self.mha_np = NumPyMHA(self.embed_dim, self.num_heads)
         self.moe_np = NumPyMoE(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt = PyTorchMultiHeadAttention(self.embed_dim, self.num_heads)
         self.moe_pt = PyTorchMoELayer(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt.double()
         self.moe_pt.double()
@@ -166,7 +191,9 @@ class TestTransformerBlockParity:
                 elif name.startswith("expert."):
                     parts = name.split(".", 2)
                     idx = int(parts[1])
-                    self.moe_pt.experts[idx].set_params({parts[2]: torch.from_numpy(param)})
+                    self.moe_pt.experts[idx].set_params(
+                        {parts[2]: torch.from_numpy(param)}
+                    )
 
         block_np = NumPyTransformerBlock(self.embed_dim, self.mha_np, self.moe_np)
         block_pt = PyTorchTransformerBlock(self.embed_dim, self.mha_pt, self.moe_pt)
@@ -175,19 +202,26 @@ class TestTransformerBlockParity:
         _, numpy_grads = block_np.backward(grad_output, numpy_cache)
 
         _, pytorch_cache = block_pt.forward(torch.from_numpy(x), torch.from_numpy(mask))
-        _, pytorch_grads = block_pt.backward(torch.from_numpy(grad_output), pytorch_cache)
+        _, pytorch_grads = block_pt.backward(
+            torch.from_numpy(grad_output), pytorch_cache
+        )
 
         np.testing.assert_allclose(
             numpy_grads["ln1.beta"],
             pytorch_grads["ln1.bias"].detach().numpy(),
-            rtol=1e-3, atol=1e-3,
+            rtol=1e-3,
+            atol=1e-3,
         )
 
     def test_backward_ln2_gamma_parity(self):
         """Backward w.r.t. ln2 gamma should match."""
         np.random.seed(42)
-        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
-        grad_output = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
+        grad_output = np.random.randn(
+            self.batch_size, self.seq_len, self.embed_dim
+        ).astype(np.float64)
         mask = np.tril(np.ones((self.seq_len, self.seq_len))).astype(np.float64)
 
         from model.numpy.transformer import NumPyTransformerBlock
@@ -195,13 +229,17 @@ class TestTransformerBlockParity:
 
         self.mha_np = NumPyMHA(self.embed_dim, self.num_heads)
         self.moe_np = NumPyMoE(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt = PyTorchMultiHeadAttention(self.embed_dim, self.num_heads)
         self.moe_pt = PyTorchMoELayer(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt.double()
         self.moe_pt.double()
@@ -219,7 +257,9 @@ class TestTransformerBlockParity:
                 elif name.startswith("expert."):
                     parts = name.split(".", 2)
                     idx = int(parts[1])
-                    self.moe_pt.experts[idx].set_params({parts[2]: torch.from_numpy(param)})
+                    self.moe_pt.experts[idx].set_params(
+                        {parts[2]: torch.from_numpy(param)}
+                    )
 
         block_np = NumPyTransformerBlock(self.embed_dim, self.mha_np, self.moe_np)
         block_pt = PyTorchTransformerBlock(self.embed_dim, self.mha_pt, self.moe_pt)
@@ -228,19 +268,26 @@ class TestTransformerBlockParity:
         _, numpy_grads = block_np.backward(grad_output, numpy_cache)
 
         _, pytorch_cache = block_pt.forward(torch.from_numpy(x), torch.from_numpy(mask))
-        _, pytorch_grads = block_pt.backward(torch.from_numpy(grad_output), pytorch_cache)
+        _, pytorch_grads = block_pt.backward(
+            torch.from_numpy(grad_output), pytorch_cache
+        )
 
         np.testing.assert_allclose(
             numpy_grads["ln2.gamma"],
             pytorch_grads["ln2.weight"].detach().numpy(),
-            rtol=1e-3, atol=1e-3,
+            rtol=1e-3,
+            atol=1e-3,
         )
 
     def test_backward_ln2_beta_parity(self):
         """Backward w.r.t. ln2 beta should match."""
         np.random.seed(42)
-        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
-        grad_output = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
+        grad_output = np.random.randn(
+            self.batch_size, self.seq_len, self.embed_dim
+        ).astype(np.float64)
         mask = np.tril(np.ones((self.seq_len, self.seq_len))).astype(np.float64)
 
         from model.numpy.transformer import NumPyTransformerBlock
@@ -248,13 +295,17 @@ class TestTransformerBlockParity:
 
         self.mha_np = NumPyMHA(self.embed_dim, self.num_heads)
         self.moe_np = NumPyMoE(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt = PyTorchMultiHeadAttention(self.embed_dim, self.num_heads)
         self.moe_pt = PyTorchMoELayer(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt.double()
         self.moe_pt.double()
@@ -272,7 +323,9 @@ class TestTransformerBlockParity:
                 elif name.startswith("expert."):
                     parts = name.split(".", 2)
                     idx = int(parts[1])
-                    self.moe_pt.experts[idx].set_params({parts[2]: torch.from_numpy(param)})
+                    self.moe_pt.experts[idx].set_params(
+                        {parts[2]: torch.from_numpy(param)}
+                    )
 
         block_np = NumPyTransformerBlock(self.embed_dim, self.mha_np, self.moe_np)
         block_pt = PyTorchTransformerBlock(self.embed_dim, self.mha_pt, self.moe_pt)
@@ -281,19 +334,26 @@ class TestTransformerBlockParity:
         _, numpy_grads = block_np.backward(grad_output, numpy_cache)
 
         _, pytorch_cache = block_pt.forward(torch.from_numpy(x), torch.from_numpy(mask))
-        _, pytorch_grads = block_pt.backward(torch.from_numpy(grad_output), pytorch_cache)
+        _, pytorch_grads = block_pt.backward(
+            torch.from_numpy(grad_output), pytorch_cache
+        )
 
         np.testing.assert_allclose(
             numpy_grads["ln2.beta"],
             pytorch_grads["ln2.bias"].detach().numpy(),
-            rtol=1e-3, atol=1e-3,
+            rtol=1e-3,
+            atol=1e-3,
         )
 
     def test_backward_mha_W_q_parity(self):
         """Backward w.r.t. MHA W_q should match."""
         np.random.seed(42)
-        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
-        grad_output = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
+        grad_output = np.random.randn(
+            self.batch_size, self.seq_len, self.embed_dim
+        ).astype(np.float64)
         mask = np.tril(np.ones((self.seq_len, self.seq_len))).astype(np.float64)
 
         from model.numpy.transformer import NumPyTransformerBlock
@@ -301,13 +361,17 @@ class TestTransformerBlockParity:
 
         self.mha_np = NumPyMHA(self.embed_dim, self.num_heads)
         self.moe_np = NumPyMoE(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt = PyTorchMultiHeadAttention(self.embed_dim, self.num_heads)
         self.moe_pt = PyTorchMoELayer(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt.double()
         self.moe_pt.double()
@@ -325,7 +389,9 @@ class TestTransformerBlockParity:
                 elif name.startswith("expert."):
                     parts = name.split(".", 2)
                     idx = int(parts[1])
-                    self.moe_pt.experts[idx].set_params({parts[2]: torch.from_numpy(param)})
+                    self.moe_pt.experts[idx].set_params(
+                        {parts[2]: torch.from_numpy(param)}
+                    )
 
         block_np = NumPyTransformerBlock(self.embed_dim, self.mha_np, self.moe_np)
         block_pt = PyTorchTransformerBlock(self.embed_dim, self.mha_pt, self.moe_pt)
@@ -334,19 +400,26 @@ class TestTransformerBlockParity:
         _, numpy_grads = block_np.backward(grad_output, numpy_cache)
 
         _, pytorch_cache = block_pt.forward(torch.from_numpy(x), torch.from_numpy(mask))
-        _, pytorch_grads = block_pt.backward(torch.from_numpy(grad_output), pytorch_cache)
+        _, pytorch_grads = block_pt.backward(
+            torch.from_numpy(grad_output), pytorch_cache
+        )
 
         np.testing.assert_allclose(
             numpy_grads["mha.W_q"],
             pytorch_grads["mha.qkv.W_q"].detach().numpy(),
-            rtol=1e-3, atol=1e-3,
+            rtol=1e-3,
+            atol=1e-3,
         )
 
     def test_backward_mha_W_o_parity(self):
         """Backward w.r.t. MHA W_o should match."""
         np.random.seed(42)
-        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
-        grad_output = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
+        grad_output = np.random.randn(
+            self.batch_size, self.seq_len, self.embed_dim
+        ).astype(np.float64)
         mask = np.tril(np.ones((self.seq_len, self.seq_len))).astype(np.float64)
 
         from model.numpy.transformer import NumPyTransformerBlock
@@ -354,13 +427,17 @@ class TestTransformerBlockParity:
 
         self.mha_np = NumPyMHA(self.embed_dim, self.num_heads)
         self.moe_np = NumPyMoE(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt = PyTorchMultiHeadAttention(self.embed_dim, self.num_heads)
         self.moe_pt = PyTorchMoELayer(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt.double()
         self.moe_pt.double()
@@ -378,7 +455,9 @@ class TestTransformerBlockParity:
                 elif name.startswith("expert."):
                     parts = name.split(".", 2)
                     idx = int(parts[1])
-                    self.moe_pt.experts[idx].set_params({parts[2]: torch.from_numpy(param)})
+                    self.moe_pt.experts[idx].set_params(
+                        {parts[2]: torch.from_numpy(param)}
+                    )
 
         block_np = NumPyTransformerBlock(self.embed_dim, self.mha_np, self.moe_np)
         block_pt = PyTorchTransformerBlock(self.embed_dim, self.mha_pt, self.moe_pt)
@@ -387,19 +466,26 @@ class TestTransformerBlockParity:
         _, numpy_grads = block_np.backward(grad_output, numpy_cache)
 
         _, pytorch_cache = block_pt.forward(torch.from_numpy(x), torch.from_numpy(mask))
-        _, pytorch_grads = block_pt.backward(torch.from_numpy(grad_output), pytorch_cache)
+        _, pytorch_grads = block_pt.backward(
+            torch.from_numpy(grad_output), pytorch_cache
+        )
 
         np.testing.assert_allclose(
             numpy_grads["mha.W_o"],
             pytorch_grads["mha.o.W_o"].detach().numpy(),
-            rtol=1e-3, atol=1e-3,
+            rtol=1e-3,
+            atol=1e-3,
         )
 
     def test_backward_moe_router_w_parity(self):
         """Backward w.r.t. MoE router.w should match."""
         np.random.seed(42)
-        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
-        grad_output = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
+        grad_output = np.random.randn(
+            self.batch_size, self.seq_len, self.embed_dim
+        ).astype(np.float64)
         mask = np.tril(np.ones((self.seq_len, self.seq_len))).astype(np.float64)
 
         from model.numpy.transformer import NumPyTransformerBlock
@@ -407,13 +493,17 @@ class TestTransformerBlockParity:
 
         self.mha_np = NumPyMHA(self.embed_dim, self.num_heads)
         self.moe_np = NumPyMoE(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt = PyTorchMultiHeadAttention(self.embed_dim, self.num_heads)
         self.moe_pt = PyTorchMoELayer(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt.double()
         self.moe_pt.double()
@@ -431,7 +521,9 @@ class TestTransformerBlockParity:
                 elif name.startswith("expert."):
                     parts = name.split(".", 2)
                     idx = int(parts[1])
-                    self.moe_pt.experts[idx].set_params({parts[2]: torch.from_numpy(param)})
+                    self.moe_pt.experts[idx].set_params(
+                        {parts[2]: torch.from_numpy(param)}
+                    )
 
         block_np = NumPyTransformerBlock(self.embed_dim, self.mha_np, self.moe_np)
         block_pt = PyTorchTransformerBlock(self.embed_dim, self.mha_pt, self.moe_pt)
@@ -440,19 +532,26 @@ class TestTransformerBlockParity:
         _, numpy_grads = block_np.backward(grad_output, numpy_cache)
 
         _, pytorch_cache = block_pt.forward(torch.from_numpy(x), torch.from_numpy(mask))
-        _, pytorch_grads = block_pt.backward(torch.from_numpy(grad_output), pytorch_cache)
+        _, pytorch_grads = block_pt.backward(
+            torch.from_numpy(grad_output), pytorch_cache
+        )
 
         np.testing.assert_allclose(
             numpy_grads["moe.router.w"],
             pytorch_grads["moe.router.w"].detach().numpy(),
-            rtol=1e-3, atol=1e-3,
+            rtol=1e-3,
+            atol=1e-3,
         )
 
     def test_backward_moe_expert_0_w1_parity(self):
         """Backward w.r.t. expert.0.w1 should match."""
         np.random.seed(42)
-        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
-        grad_output = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
+        grad_output = np.random.randn(
+            self.batch_size, self.seq_len, self.embed_dim
+        ).astype(np.float64)
         mask = np.tril(np.ones((self.seq_len, self.seq_len))).astype(np.float64)
 
         from model.numpy.transformer import NumPyTransformerBlock
@@ -460,13 +559,17 @@ class TestTransformerBlockParity:
 
         self.mha_np = NumPyMHA(self.embed_dim, self.num_heads)
         self.moe_np = NumPyMoE(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt = PyTorchMultiHeadAttention(self.embed_dim, self.num_heads)
         self.moe_pt = PyTorchMoELayer(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt.double()
         self.moe_pt.double()
@@ -484,7 +587,9 @@ class TestTransformerBlockParity:
                 elif name.startswith("expert."):
                     parts = name.split(".", 2)
                     idx = int(parts[1])
-                    self.moe_pt.experts[idx].set_params({parts[2]: torch.from_numpy(param)})
+                    self.moe_pt.experts[idx].set_params(
+                        {parts[2]: torch.from_numpy(param)}
+                    )
 
         block_np = NumPyTransformerBlock(self.embed_dim, self.mha_np, self.moe_np)
         block_pt = PyTorchTransformerBlock(self.embed_dim, self.mha_pt, self.moe_pt)
@@ -493,19 +598,26 @@ class TestTransformerBlockParity:
         _, numpy_grads = block_np.backward(grad_output, numpy_cache)
 
         _, pytorch_cache = block_pt.forward(torch.from_numpy(x), torch.from_numpy(mask))
-        _, pytorch_grads = block_pt.backward(torch.from_numpy(grad_output), pytorch_cache)
+        _, pytorch_grads = block_pt.backward(
+            torch.from_numpy(grad_output), pytorch_cache
+        )
 
         np.testing.assert_allclose(
             numpy_grads["moe.expert.0.w1"],
             pytorch_grads["moe.expert.0.w1"].detach().numpy(),
-            rtol=1e-3, atol=1e-3,
+            rtol=1e-3,
+            atol=1e-3,
         )
 
     def test_backward_input_x_parity(self):
         """Backward w.r.t. input x should match (wider tolerances)."""
         np.random.seed(42)
-        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
-        grad_output = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(np.float64)
+        x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
+            np.float64
+        )
+        grad_output = np.random.randn(
+            self.batch_size, self.seq_len, self.embed_dim
+        ).astype(np.float64)
         mask = np.tril(np.ones((self.seq_len, self.seq_len))).astype(np.float64)
 
         from model.numpy.transformer import NumPyTransformerBlock
@@ -513,13 +625,17 @@ class TestTransformerBlockParity:
 
         self.mha_np = NumPyMHA(self.embed_dim, self.num_heads)
         self.moe_np = NumPyMoE(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt = PyTorchMultiHeadAttention(self.embed_dim, self.num_heads)
         self.moe_pt = PyTorchMoELayer(
-            self.embed_dim, self.num_experts,
-            dim_ff=self.dim_ff, num_experts_per_token=self.num_experts_per_token,
+            self.embed_dim,
+            self.num_experts,
+            dim_ff=self.dim_ff,
+            num_experts_per_token=self.num_experts_per_token,
         )
         self.mha_pt.double()
         self.moe_pt.double()
@@ -537,7 +653,9 @@ class TestTransformerBlockParity:
                 elif name.startswith("expert."):
                     parts = name.split(".", 2)
                     idx = int(parts[1])
-                    self.moe_pt.experts[idx].set_params({parts[2]: torch.from_numpy(param)})
+                    self.moe_pt.experts[idx].set_params(
+                        {parts[2]: torch.from_numpy(param)}
+                    )
 
         block_np = NumPyTransformerBlock(self.embed_dim, self.mha_np, self.moe_np)
         block_pt = PyTorchTransformerBlock(self.embed_dim, self.mha_pt, self.moe_pt)
@@ -551,5 +669,6 @@ class TestTransformerBlockParity:
         np.testing.assert_allclose(
             dx_numpy,
             dx_pytorch.detach().numpy(),
-            rtol=1e-3, atol=1e-3,
+            rtol=1e-3,
+            atol=1e-3,
         )
