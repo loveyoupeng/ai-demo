@@ -52,4 +52,6 @@ See [task_plan.md](task_plan.md) for the current project plan, progress tracking
 
 9. All code need to be using strict type hint to indicate the interfaces.
 
-10. When using `edit`, ensure `oldString` is unique and matches the file content exactly, including whitespace and indentation. If `edit` fails, use `write` to overwrite the file.
+10. All dictionary keys for parameter names (e.g., dict["gamma"], dict["lm_head"]) must use constants from `src/model/parameters.py` — never use raw string literals like `"gamma"`, `"lm_head"`, `"blocks.0.ln1.gamma"`. This prevents typos, ensures consistency across NumPy/PyTorch implementations and tests, and makes refactoring trivial. Common constants: `LayerNorm.NP_GAMMA`, `Transformer.LM_HEAD`, `block_param(0, "ln1", LayerNorm.NP_GAMMA)`, `expert_param(0, 0, Expert.NP_W1)`.
+
+11. When using `edit`, ensure `oldString` is unique and matches the file content exactly, including whitespace and indentation. If `edit` fails, use `write` to overwrite the file.
