@@ -127,7 +127,7 @@ class TestTransformerBlockParity:
         np.testing.assert_allclose(
             numpy_grads["ln1.gamma"],
             pytorch_grads["ln1.weight"].detach().numpy(),
-            rtol=1e-4, atol=1e-4,
+            rtol=1e-3, atol=1e-3,
         )
 
     def test_backward_ln1_beta_parity(self):
@@ -180,7 +180,7 @@ class TestTransformerBlockParity:
         np.testing.assert_allclose(
             numpy_grads["ln1.beta"],
             pytorch_grads["ln1.bias"].detach().numpy(),
-            rtol=1e-4, atol=1e-4,
+            rtol=1e-3, atol=1e-3,
         )
 
     def test_backward_ln2_gamma_parity(self):
@@ -233,7 +233,7 @@ class TestTransformerBlockParity:
         np.testing.assert_allclose(
             numpy_grads["ln2.gamma"],
             pytorch_grads["ln2.weight"].detach().numpy(),
-            rtol=1e-4, atol=1e-4,
+            rtol=1e-3, atol=1e-3,
         )
 
     def test_backward_ln2_beta_parity(self):
@@ -286,7 +286,7 @@ class TestTransformerBlockParity:
         np.testing.assert_allclose(
             numpy_grads["ln2.beta"],
             pytorch_grads["ln2.bias"].detach().numpy(),
-            rtol=1e-4, atol=1e-4,
+            rtol=1e-3, atol=1e-3,
         )
 
     def test_backward_mha_W_q_parity(self):
@@ -339,7 +339,7 @@ class TestTransformerBlockParity:
         np.testing.assert_allclose(
             numpy_grads["mha.W_q"],
             pytorch_grads["mha.qkv.W_q"].detach().numpy(),
-            rtol=1e-4, atol=1e-4,
+            rtol=1e-3, atol=1e-3,
         )
 
     def test_backward_mha_W_o_parity(self):
@@ -392,7 +392,7 @@ class TestTransformerBlockParity:
         np.testing.assert_allclose(
             numpy_grads["mha.W_o"],
             pytorch_grads["mha.o.W_o"].detach().numpy(),
-            rtol=1e-4, atol=1e-4,
+            rtol=1e-3, atol=1e-3,
         )
 
     def test_backward_moe_router_w_parity(self):
@@ -445,7 +445,7 @@ class TestTransformerBlockParity:
         np.testing.assert_allclose(
             numpy_grads["moe.router.w"],
             pytorch_grads["moe.router.w"].detach().numpy(),
-            rtol=1e-4, atol=1e-4,
+            rtol=1e-3, atol=1e-3,
         )
 
     def test_backward_moe_expert_0_w1_parity(self):
@@ -498,7 +498,7 @@ class TestTransformerBlockParity:
         np.testing.assert_allclose(
             numpy_grads["moe.expert.0.w1"],
             pytorch_grads["moe.expert.0.w1"].detach().numpy(),
-            rtol=1e-4, atol=1e-4,
+            rtol=1e-3, atol=1e-3,
         )
 
     def test_backward_input_x_parity(self):

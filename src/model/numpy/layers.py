@@ -98,7 +98,7 @@ class NumPyFeedForward:
             setattr(self, k, v.copy())
 
 class NumPyLayerNorm:
-    def __init__(self, embed_dim: int, eps: float = 1e-5):
+    def __init__(self, embed_dim: int, eps: float = 1e-6):
         self.embed_dim = embed_dim
         self.eps = eps
         self.gamma = np.ones(embed_dim)
@@ -117,19 +117,24 @@ class NumPyLayerNorm:
     def backward(self, grad_output: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         # LayerNorm backward gradients
         # https://arxiv.org/abs/1607.06450
-        N = self.x.shape[-1]
+        # Mean over batch dims (all except feature dim), mean over feature dim for correction
+        N_features = float(self.x.shape[-1])
+        n_batch = int(np.prod(self.x.shape[:-1])) if self.x.ndim > 1 else 1
+        sum_axes = tuple(range(self.x.ndim - 1))  # (0,) for 2D, (0,1) for 3D
+        
         grad_x_norm = grad_output * self.gamma
         
-        sum_grad_x_norm = np.sum(grad_x_norm, axis=-1, keepdims=True)
-        sum_grad_x_norm_x_norm = np.sum(grad_x_norm * self.x_norm, axis=-1, keepdims=True)
+        # Compute means over all dims except the last (features)
+        mean_grad_x_norm = np.mean(grad_x_norm, axis=-1, keepdims=True)
+        mean_grad_x_norm_x_norm = np.mean(grad_x_norm * self.x_norm, axis=-1, keepdims=True)
         
         grad_x = (1.0 / np.sqrt(self.var + self.eps)) * (
-            (N * grad_x_norm - sum_grad_x_norm - self.x_norm * sum_grad_x_norm_x_norm) / N
+            grad_x_norm - mean_grad_x_norm - self.x_norm * mean_grad_x_norm_x_norm
         )
         
         grads = {
-            "gamma": np.sum(grad_output * self.x_norm, axis=0),
-            "beta": np.sum(grad_output, axis=0)
+            "gamma": np.sum(grad_output * self.x_norm, axis=sum_axes, keepdims=True).flatten(),
+            "beta": np.sum(grad_output, axis=sum_axes, keepdims=True).flatten()
         }
         return grad_x, grads
 

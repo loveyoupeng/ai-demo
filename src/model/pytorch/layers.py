@@ -83,8 +83,8 @@ class PyTorchLayerNorm(nn.Module):
         )
 
         grads = {
-            "weight": torch.sum(grad_output * x_norm, dim=(0, 1)),
-            "bias": torch.sum(grad_output, dim=(0, 1)),
+            "weight": torch.sum(grad_output * x_norm, dim=tuple(range(x.ndim - 1))),
+            "bias": torch.sum(grad_output, dim=tuple(range(x.ndim - 1))),
         }
 
         return grad_x, grads

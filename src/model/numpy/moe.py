@@ -365,6 +365,9 @@ class MoELayer:
                 d_x_from_experts += dx_i
                 for name, grad in grads_i.items():
                     grads_experts[f"expert.{i}.{name}"] = grad
+            else:
+                for name in self.experts[i].get_params():
+                    grads_experts[f"expert.{i}.{name}"] = np.zeros_like(self.experts[i].get_params()[name])
 
         # ------------------------------------------------------------------
         # 3. Back-propagate through top-k normalisation
