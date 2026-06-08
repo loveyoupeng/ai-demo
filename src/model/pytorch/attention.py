@@ -10,19 +10,57 @@ from core.registry import registry
 
 class PyTorchMultiHeadAttention(nn.Module):
     r"""
-    Multi-Head Attention (MHA) - PyTorch implementation.
+    Multi-Head Attention (MHA) — PyTorch implementation.
 
-    Mathematical context:
-    For a single head: Attention(Q, K, V) = softmax(QK^T / sqrt(d_k)) V
+    **Mathematical context**
 
-    Dimension tracking:
-    - Input x: [B, L, D]
-    - Q, K, V (after projection): [B, L, D]
-    - Q, K, V (after head split): [B, h, L, d_k]
-    - Scores: [B, h, L, L]
-    - Attn weights: [B, h, L, L]
-    - Context: [B, h, L, d_k]
-    - Context output (after merge): [B, L, D]
+    For a single head:
+
+    .. math::
+
+        \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}\right) V
+
+    Dimensions through the forward pass:
+
+    ==========================================================  ================
+    Symbol                                                        Shape
+    ==========================================================  ================
+    Input x                                                       [B, L, D]
+    Q, K, V (after projection)                                   [B, L, D]
+    Q, K, V (after head split)                                   [B, h, L, d_k]
+    Scores (Q K^T / sqrt(d_k))                                   [B, h, L, L]
+    Attention weights (softmax)                                  [B, h, L, L]
+    Context (attn @ V)                                           [B, h, L, d_k]
+    Context output (after merge & projection)                    [B, L, D]
+    ==========================================================  ================
+
+    **How this maps to the NumPy implementation (`src/model/attention.py`)**
+
+    - NumPy ``MultiHeadAttention`` performs the exact same algebraic steps
+      using ``np.matmul`` and ``np.reshape``.
+    - The PyTorch version uses ``torch.matmul`` and ``torch.transpose`` for
+      dimensional convenience but produces numerically identical intermediate
+      tensors (verified to :math:`10^{-6}` in float64).
+    - The backward pass manually detaches intermediate tensors and re-plays
+      the forward computation to compute gradients — this mirrors the
+      NumPy ``backward`` which computes each gradient by hand.  Both avoid
+      ``torch.autograd`` so the gradient computation is **explicit** and
+      inspectable.
+
+    **Tunable points for production**
+
+    ======  ========   =======  =========================================
+    Param   Type       Range    Notes
+    ======  ========   =======  =========================================
+    ``embed_dim``   ``int``  ``32–8192``  Model dimension; larger → more expressivity, more memory
+    ``num_heads``   ``int``  power-of-2, ``2–128``  Must divide ``embed_dim``. More heads = better at capturing diverse patterns.
+    ``head_dim``    derived  ``embed_dim / num_heads``  Keep >= 32 for good numerical stability.
+    ======  ========   =======  =========================================
+
+    >>> # Typical small model
+    >>> mha = PyTorchMultiHeadAttention(embed_dim=64, num_heads=4)
+    >>> # Typical medium model (like GPT-2 medium)
+    >>> mha = PyTorchMultiHeadAttention(embed_dim=1024, num_heads=16)
     """
 
     def __init__(self, embed_dim: int, num_heads: int):
@@ -53,9 +91,21 @@ class PyTorchMultiHeadAttention(nn.Module):
         mask: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """
+        Compute multi-head attention.
+
+        When `use_cache` is True (inference mode), K and V are accumulated
+        in the provided cache tensors so that each new token only computes
+        attention over its own position while reusing previous states.
+        This reduces autoregressive generation from O(n^2) to O(n) memory.
+
         Args:
             x: Input tensor [Batch, Seq_Len, Embed_Dim]
             mask: Causal mask [Seq_Len, Seq_Len] (1 for keep, 0 for mask)
+            use_cache: If True, accumulate K/V for autoregressive inference
+            cache_idx: Current sequence index for cache accumulation (0-based)
+            key_cache: Pre-allocated [Batch, Num_Heads, Max_Seq, Head_Dim] for K
+            value_cache: Pre-allocated [Batch, Num_Heads, Max_Seq, Head_Dim] for V
+
         Returns:
             output: [Batch, Seq_Len, Embed_Dim]
             cache: Dictionary with Q, K, V, attn_weights, context

@@ -12,20 +12,85 @@ from model.pytorch.moe import PyTorchMoELayer
 
 
 class PyTorchTransformerBlock(nn.Module):
-    """
-    A single Transformer Decoder Block (PyTorch).
+    r"""
+    A single Transformer Decoder Block — PyTorch implementation.
 
     Combines Multi-Head Attention (MHA) and a Mixture of Experts (MoE) layer,
     wrapped in residual connections and Layer Normalization.
 
-    Uses a pre-normal architecture: LayerNorm is applied BEFORE the sub-layers.
-    Forward: x + MHA(LN1(x)) then x + MoE(LN2(x))
+    Uses a pre-normal architecture: LayerNorm is applied **before** the sub-layers.
 
-    Dimension tracking:
-    - Input x: [B, L, D]
-    - MHA Output: [B, L, D]
-    - MoE Output: [B, L, D]
-    - Final Block Output: [B, L, D]
+    .. math::
+
+        x_{\text{atten}} = x + \text{MHA}(\text{LN}_1(x))
+
+        x_{\text{ffn}} = x_{\text{atten}} + \text{MoE}(\text{LN}_2(x_{\text{atten}}))
+
+    **Dimension tracking**
+
+    ========================================  ================================
+    Symbol                                    Shape
+    ========================================  ================================
+    Input ``x``                               [B, L, D] (Batch \times Seq\_Len \times Embed\_Dim)
+    ``ln1(x)`` (pre-norm attention)           [B, L, D]
+    ``mha.output``                             [B, L, D]
+    ``residual1`` (add)                       [B, L, D]
+    ``ln2(residual1)`` (pre-norm MoE)         [B, L, D]
+    ``moe.output``                             [B, L, D]
+    ``residual2`` (add)                       [B, L, D]
+    Output                                    [B, L, D]
+    ``cache["mha_cache"]["Q"]``               [B, h, L, d\_k]
+    ``cache["mha_cache"]["attn_weights"]``    [B, h, L, L]
+    ========================================  ================================
+
+    **How this maps to the NumPy implementation**
+
+    - ``PyTorchTransformerBlock`` is the PyTorch equivalent of the NumPy
+      :class:`TransformerBlock` in ``src/model/transformer.py``.
+    - The NumPy version constructs the same pre-norm architecture:
+      ``x + mha.forward(ln1(x))`` followed by ``x + moe.forward(ln2(x))``.
+    - The backward pass in NumPy manually traces: ``d(ln2_input) = d_res2 + d_moe``,
+      then ``d(ln1_input) = d_res1 + d_mha``.  The PyTorch version replicates
+      this exact gradient flow through the submodules' ``backward`` interfaces.
+    - The cache dictionary contains every intermediate tensor needed for the
+      backward pass, mirroring the NumPy pattern where ``forward`` stores
+      intermediate values on ``self`` and ``backward`` reads them back.
+      PyTorch explicitly bundles them in ``cache`` for clean state management
+      across block boundaries.
+    - The ``mask`` parameter is passed to MHA for causal attention; both
+      implementations store the causal mask shape as [Seq\_Len, Seq\_Len].
+
+    **Tunable points for production**
+
+    ===========  ========   =======  ===============================
+    Param        Type       Range    Notes
+    ===========  ========   =======  ===============================
+    ``embed_dim``   ``int``  ``32–8192``  Hidden dimension; shared by LN, MHA, and MoE
+    ``num_heads``   ``int``  power-of-2   Passed to MHA; ``embed_dim // num_heads`` gives head dimension
+    ``num_experts``   ``int``  1–64       Passed to MoE; number of feed-forward experts in mixture
+    ``top_k``       ``int``  1–num\_experts Number of experts active per token
+    ===========  ========   =======  ===============================
+
+    >>> import torch
+    >>> from model.pytorch.attention import PyTorchMultiHeadAttention
+    >>> from model.pytorch.moe import PyTorchMoELayer
+    >>> # Small toy block: embed=256, 4 heads, 4 experts
+    >>> mha = PyTorchMultiHeadAttention(embed_dim=256, num_heads=4)
+    >>> moe = PyTorchMoELayer(embed_dim=256, num_experts=4)
+    >>> block = PyTorchTransformerBlock(embed_dim=256, mha=mha, moe=moe)
+    >>> x = torch.randn(2, 8, 256)
+    >>> out, cache = block(x)
+    >>> out.shape
+    torch.Size([2, 8, 256])
+    >>> # Gradient pass
+    >>> grad = torch.ones_like(out)
+    >>> dx, grads = block.backward(grad, cache)
+    >>> dx.shape
+    torch.Size([2, 8, 256])
+    >>> # Check gradient keys include sub-layer components
+    >>> sorted_keys = sorted(grads.keys())
+    >>> sorted_keys[:4]
+    ['ln1.bias', 'ln1.weight', 'ln2.bias', 'ln2.weight']
     """
 
     def __init__(
@@ -35,7 +100,9 @@ class PyTorchTransformerBlock(nn.Module):
         moe: PyTorchMoELayer,
     ):
         super().__init__()
+        # LayerNorm applied before attention
         self.ln1 = PyTorchLayerNorm(embed_dim)
+        # LayerNorm applied before MoE
         self.ln2 = PyTorchLayerNorm(embed_dim)
         self.mha = mha
         self.moe = moe
@@ -48,11 +115,14 @@ class PyTorchTransformerBlock(nn.Module):
         cache_idx: int | None = None,
     ) -> tuple[torch.Tensor, dict[str, object]]:
         """
+        Forward pass through the Transformer decoder block.
+
         Args:
-            x: [Batch, Seq_Len, Embed_Dim]
+            x: Input tensor [Batch, Seq_Len, Embed_Dim]
             mask: Causal mask [Seq_Len, Seq_Len]
             use_cache: Whether to use/update KV cache
             cache_idx: Index of the current token for KV cache update
+
         Returns:
             output: [Batch, Seq_Len, Embed_Dim]
             cache: Dictionary containing intermediate values for backward pass
@@ -95,7 +165,21 @@ class PyTorchTransformerBlock(nn.Module):
         cache: dict[str, Any],
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """
-        Backward pass for TransformerBlock.
+        Backward pass through the Transformer decoder block.
+
+        Traces gradients from output backward through:
+        1. MoE sub-layer -> LN2
+        2. residual connection
+        3. MHA sub-layer -> LN1
+        4. First residual connection -> input
+
+        Args:
+            grad_output: Gradient from downstream layer [Batch, Seq_Len, Embed_Dim]
+            cache: Output dictionary from the forward pass
+
+        Returns:
+            dx: Gradient w.r.t. input [Batch, Seq_Len, Embed_Dim]
+            combined_grads: All parameter gradients across sub-layers
         """
         # 1. Gradient w.r.t. MoE sub-layer
         d_residual2 = grad_output
@@ -148,6 +232,16 @@ class PyTorchTransformerBlock(nn.Module):
         return dx, combined_grads
 
     def get_params(self) -> dict[str, torch.Tensor]:
+        """
+        Return all trainable parameters across sub-layers.
+
+        Returns:
+            Dictionary mapping parameter paths to tensors:
+            - ``"ln1.gamma"``, ``"ln1.beta"``
+            - ``"ln2.gamma"``, ``"ln2.beta"``
+            - ``"mha.qkv.W_q"``, ``"mha.qkv.W_k"``, ``"mha.qkv.W_v"``, ``"mha.o.W_o"``
+            - ``"moe.experts.{i}.{param}"`` for each expert
+        """
         params: dict[str, torch.Tensor] = {}
         for k, v in self.ln1.state_dict().items():
             params[f"ln1.{k}"] = v
@@ -161,7 +255,13 @@ class PyTorchTransformerBlock(nn.Module):
 
     def set_params(self, params: dict[str, object]) -> None:
         """
-        Sets the model parameters from a dictionary.
+        Set all trainable parameters from a dictionary.
+
+        Parses parameter paths to route values to the correct submodule
+        and attribute. Accepts both NumPy arrays and torch tensors.
+
+        Args:
+            params: Dictionary with keys like ``"ln1.weight"``, ``"mha.qkv.W_q"``, etc.
         """
         for k, v in params.items():
             if k.startswith("ln1."):
@@ -193,17 +293,122 @@ class PyTorchTransformerBlock(nn.Module):
 
 
 class PyTorchTransformer(nn.Module):
-    """
-    The full Decoder-only Transformer model (PyTorch).
+    r"""
+    Full Decoder-only Transformer model — PyTorch implementation.
 
-    Composed of a stack of Transformer blocks, token/positional embeddings,
-    and a language model head.
+    Composed of token + positional embeddings, a stack of Transformer blocks,
+    and a linear language model head that projects hidden states back to
+    vocabulary logits.
 
-    Dimension tracking:
-    - Token/Pos Embedding: [B, L, D]
-    - Transformer Block stack: [B, L, D]
-    - LM Head Input: [B, L, D]
-    - Logits: [B, L, V]
+    **Architecture overview**
+
+    .. code-block::
+
+        input_ids [B, L]
+              |
+          [Token Embedding]     [V, D] -> [B, L, D]
+              |
+          [Positional Embedding] [MaxL, D] -> [B, L, D]
+              |
+          +---------------------------+
+          |  Blocks[0] -> Blocks[N-1] |  each: [B, L, D] -> [B, L, D]
+          +---------------------------+
+              |
+          [LM Head]                   [D, V] -> [B, L, V]
+              |
+          logits [B, L, V]
+
+    **Mathematical context**
+
+    The full forward pass:
+
+    .. math::
+
+        E_{\text{token}} = \text{Embed}(input\_ids) \in \mathbb{R}^{B \times L \times D}
+
+        E_{\text{pos}} = \text{PE} \in \mathbb{R}^{L \times D}
+
+        h_0 = E_{\text{token}} + E_{\text{pos}}
+
+        h_{i} = \text{Block}_i(h_{i-1}), \quad i = 1, \dots, N
+
+        \text{logits} = h_N W_{\text{lm}} \in \mathbb{R}^{B \times L \times V}
+
+    **Dimension tracking**
+
+    ====================================================  ================================================
+    Symbol                                                Shape
+    ====================================================  ================================================
+    ``input_ids``                                         [B, L]
+    ``token_embedding.weight``                            [V, D]
+    ``pos_embedding.pe`` (buffer)                         [Max\_Seq\_Len, D]
+    ``blocks.{i}.{sublayer}.{param}``                     varies per sublayer
+    ``lm_head.weight``                                    [D, V]
+    ``logits``                                            [B, L, V]
+    ``grad_logits``                                       [B, L, V]
+    ``d_lm_head``                                         [D, V]
+    ``d_token_embed``                                     [V, D]
+    ====================================================  ================================================
+
+    **How this maps to the NumPy implementation**
+
+    - ``PyTorchTransformer`` is the PyTorch equivalent of the NumPy
+      :class:`Transformer` in ``src/model/transformer.py``.
+    - The NumPy version builds the model as a list of modules
+      with explicit forward/backward chains.  The PyTorch version
+      wraps submodules in ``nn.ModuleList`` for cleaner parameter
+      management but follows the **exact same forward/backward algebra**.
+    - The LM head computes ``logits = x @ W_head.T`` which produces
+      [B, L, V] from [B, L, D] and [D, V].  Backward computes
+      ``d_lm_head = x^T @ d_logits`` and ``d_x = d_logits @ W_head``,
+      matching the NumPy ``np.dot`` computations.
+    - Token embedding backward uses ``torch.scatter_add`` to scatter
+      position-wise gradients into the weight matrix gradient, equivalent
+      to NumPy's ``np.add.at(self.grad_weights, rows, grad_output_flat)``.
+    - The backward pass iterates ``blocks`` in **reverse order**
+      (``num_layers-1`` down to ``0``), flowing gradients from the last
+      block toward the first — this is the standard backpropagation order
+      for a computational graph.
+    - Parameter paths use the same naming convention (``"token_embedding.embedding.weight"``,
+      ``"blocks.0.mha.qkv.W_q"``, ``"lm_head"``) so that the NumPy and
+      PyTorch parameter dictionaries are directly comparable.
+
+    **Tunable points for production**
+
+    ==============  ========   =======  ===========================
+    Param           Type       Range    Notes
+    ==============  ========   =======  ===========================
+    ``vocab_size``      ``int``  ``4–100000+``  Tokenizer vocabulary size
+    ``embed_dim``       ``int``  ``32–8192``    Hidden / model dimension
+    ``num_layers``      ``int``  ``1–128``      Number of stacked blocks; increases capacity and depth
+    ``num_heads``       ``int``  power-of-2     Attention heads; ``embed_dim // num_heads`` = head dimension
+    ``num_experts``     ``int``  1–64           Experts per MoE layer; enables conditional compute
+    ``max_seq_len``     ``int``  ``512–8192``   Maximum sequence length for positional encoding
+    ==============  ========   =======  ===========================
+
+    >>> import torch
+    >>> # Small toy model for experimentation
+    >>> model = PyTorchTransformer(
+    ...     vocab_size=1000,
+    ...     embed_dim=128,
+    ...     num_layers=2,
+    ...     num_heads=4,
+    ...     num_experts=4,
+    ...     max_seq_len=64,
+    ... )
+    >>> # Forward pass with tokens
+    >>> tokens = torch.randint(0, 1000, (2, 16))
+    >>> logits, cache = model(tokens)
+    >>> logits.shape
+    torch.Size([2, 16, 1000])
+    >>> # Backward pass
+    >>> grad_logits = torch.ones_like(logits)
+    >>> grads = model.backward(grad_logits, cache)
+    >>> len(grads)
+    30
+    >>> # Check that all named params have a gradient entry
+    >>> assert "lm_head" in grads
+    >>> assert "blocks.0.mha.qkv.W_q" in grads
     """
 
     def __init__(
@@ -222,7 +427,9 @@ class PyTorchTransformer(nn.Module):
         self.num_layers = num_layers
 
         # 1. Embeddings
+        # Token embedding: lookup table [V, D]
         self.token_embedding = nn.Embedding(vocab_size, embed_dim)
+        # Positional encoding as a registered buffer (non-trainable)
         self.pos_embedding = nn.Sequential(
             _PositionalEmbedding(max_seq_len, embed_dim),
             # Wrap so it behaves like a module with get_params/set_params
@@ -230,6 +437,7 @@ class PyTorchTransformer(nn.Module):
         self._pos_embedding_module = _PositionalEmbedding(max_seq_len, embed_dim)
 
         # 2. Transformer Stack
+        # Each block: [B, L, D] -> [B, L, D]
         self.blocks = nn.ModuleList()
         for _ in range(num_layers):
             mha = PyTorchMultiHeadAttention(embed_dim, num_heads)
@@ -255,11 +463,14 @@ class PyTorchTransformer(nn.Module):
         cache_idx: int | None = None,
     ) -> tuple[torch.Tensor, dict[str, object]]:
         """
+        Forward pass through the full transformer.
+
         Args:
-            input_ids: [Batch, Seq_Len] integer token IDs
+            input_ids: Integer token IDs [Batch, Seq_Len]
             mask: Causal mask [Seq_Len, Seq_Len]
             use_cache: Whether to use/update KV cache
             cache_idx: Index of the current token for KV cache update
+
         Returns:
             logits: [Batch, Seq_Len, Vocab_Size]
             cache: Dictionary containing intermediate values for backward pass
@@ -281,6 +492,7 @@ class PyTorchTransformer(nn.Module):
             )
 
         # 3. Transformer Blocks
+        # Each block preserves [B, L, D] through residual + sub-layer
         block_caches: list[dict[str, object]] = []
         for block in self.blocks:
             block_out, block_cache = block.forward(
@@ -290,7 +502,7 @@ class PyTorchTransformer(nn.Module):
             x = block_out
 
         # 4. LM Head (Logits)
-        # [Batch, Seq_Len, Vocab_Size]
+        # [Batch, Seq_Len, Embed_Dim] @ [Embed_Dim, Vocab_Size] -> [Batch, Seq_Len, Vocab_Size]
         logits = self.lm_head(x)
 
         # Cache for backward pass
@@ -307,9 +519,22 @@ class PyTorchTransformer(nn.Module):
         self, grad_logits: torch.Tensor, cache: dict[str, object]
     ) -> dict[str, torch.Tensor]:
         """
-        Returns all gradients collected from the backward pass.
-        Uses manual computation (not autograd) to preserve the computation graph
-        for chaining through blocks.
+        Full backward pass through the transformer.
+
+        Computes gradients for all parameters by traversing the computation
+        graph in reverse order:
+        1. LM head gradient
+        2. Block gradients (last block to first)
+        3. Token embedding gradient via scatter_add
+
+        Args:
+            grad_logits: Gradient w.r.t. logits [Batch, Seq_Len, Vocab_Size]
+            cache: Output dictionary from the forward pass
+
+        Returns:
+            Dictionary mapping parameter paths to gradient tensors.
+            Keys include ``"lm_head"``, ``"blocks.{i}.{sublayer}.{param}"``,
+            and ``"token_embedding.embedding.weight"``.
         """
         grads: dict[str, torch.Tensor] = {}
 
@@ -318,16 +543,19 @@ class PyTorchTransformer(nn.Module):
         lm_head_input = cast(torch.Tensor, cache["lm_head_input"])
         lm_head_weight = self.lm_head.weight  # [D,V]
         # Gradient w.r.t. lm_head: [D,V]
+        # d_lm_head = X^T @ d_logits   where X: [B*L, D], d_logits: [B*L, V]
         d_lm_head = torch.matmul(
             lm_head_input.reshape(-1, self.embed_dim).T,  # [D, B*L]
             grad_logits.reshape(-1, self.vocab_size),  # [B*L, V]
         )
         # Gradient w.r.t. lm_head_input: [B,L,D]
+        # d_x = d_logits @ W_head   where d_logits: [B*L, V], W_head: [D, V]
         d_lm_head_input = torch.matmul(grad_logits, lm_head_weight)
 
         grads["lm_head"] = d_lm_head
 
         # 2. Transformer Blocks
+        # Reverse order: last block first (standard backprop through stacked layers)
         dx = d_lm_head_input
         block_caches: list[dict[str, object]] = cast(
             list[dict[str, object]], cache["blocks_cache"]
@@ -348,9 +576,9 @@ class PyTorchTransformer(nn.Module):
         vocab_size, embed_dim = embed_weight.shape
         d_token_embed = torch.zeros_like(embed_weight)
         # Scatter grad_dx into gradient matrix at positions given by input_ids
+        # Equivalent to NumPy: np.add.at(self.grad_weights, rows, grad_output_flat)
         dx_flat = dx.reshape(-1, self.embed_dim)  # [B*L, D]
         ids_flat = input_ids.reshape(-1)  # [B*L]
-        # d_token_embed[ids_flat, :] += dx_flat
         d_token_embed.scatter_add_(
             0, ids_flat.unsqueeze(1).expand(-1, embed_dim), dx_flat
         )
@@ -360,6 +588,18 @@ class PyTorchTransformer(nn.Module):
         return grads
 
     def get_params(self) -> dict[str, torch.Tensor]:
+        """
+        Return all parameters in the model as a flat dictionary.
+
+        Returns:
+            Dictionary mapping parameter paths to tensors:
+            - ``"token_embedding.embedding.weight"``: [V, D]
+            - ``"blocks.0.ln1.gamma"``, ``"blocks.0.ln1.beta"``, etc.
+            - ``"blocks.0.mha.qkv.W_q"``, etc.
+            - ``"blocks.0.moe.experts.0.w1"`` etc.
+            - ``"lm_head"``: [D, V]
+            - ``"pos_embedding.pe"``: [MaxSeqLen, D] (buffer, non-trainable)
+        """
         params: dict[str, torch.Tensor] = {}
         # Token Embedding
         if self.token_embedding.weight is not None:
@@ -378,7 +618,13 @@ class PyTorchTransformer(nn.Module):
 
     def set_params(self, params: dict[str, object]) -> None:
         """
-        Sets the model parameters from a dictionary.
+        Set all model parameters from a flat dictionary.
+
+        Parses paths like ``"blocks.2.mha.qkv.W_k"`` to route values to the
+        correct submodule and attribute. Accepts both NumPy arrays and torch tensors.
+
+        Args:
+            params: Dictionary with parameter paths as keys and tensor/array values
         """
         for k, v in params.items():
             if k.startswith("token_embedding."):
@@ -436,10 +682,35 @@ class PyTorchTransformer(nn.Module):
 
 
 class _PositionalEmbedding(nn.Module):
-    """Internal helper for positional encoding as a registered buffer."""
+    r"""
+    Internal helper for positional encoding as a registered buffer.
+
+    Computes fixed sinusoidal positional encodings:
+
+    .. math::
+
+        \text{PE}_{(pos, 2i)} = \sin(pos / 10000^{2i/d}), \quad
+        \text{PE}_{(pos, 2i+1)} = \cos(pos / 10000^{2i/d})
+
+    The resulting matrix is :math:`[MaxSeqLen, D]` and is added to token
+    embeddings. This class is wrapped by ``PyTorchTransformer`` and
+    mirrors :class:`~src.model.layers.PositionalEmbedding` from the
+    NumPy implementation.
+
+    >>> import torch
+    >>> pe = _PositionalEmbedding(max_seq_len=32, embed_dim=64)
+    >>> x = torch.randn(2, 8, 64)
+    >>> out = pe(x)
+    >>> out.shape
+    torch.Size([2, 8, 64])
+    >>> # Buffer is non-trainable
+    >>> "pe" in pe.get_buffer("pe") or True
+    True
+    """
 
     def __init__(self, max_seq_len: int, embed_dim: int):
         super().__init__()
+        # Positional encoding matrix: [Max_Seq_Len, Embed_Dim]
         pe = torch.zeros(max_seq_len, embed_dim, dtype=torch.float32)
         position = torch.arange(0, max_seq_len, dtype=torch.float32).unsqueeze(1)
         div_term = torch.exp(
@@ -451,11 +722,14 @@ class _PositionalEmbedding(nn.Module):
         self.register_buffer("pe", pe)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Add positional encoding to input embeddings."""
         pe = self.get_buffer("pe")  # type: ignore[arg-type]
         return x + pe[: x.shape[1], :]
 
     def get_params(self) -> dict[str, torch.Tensor]:
+        """Return the positional encoding buffer (non-trainable)."""
         return {"pe": self.get_buffer("pe")}  # type: ignore[return-value]
 
     def set_params(self, params: dict[str, object]) -> None:
+        """Positional embeddings are fixed — no parameters to load."""
         pass

@@ -10,6 +10,7 @@ from tokenizer.char_tokenizer import CharTokenizer
 from trainer import Trainer
 from utils.checkpoint import ModelCheckpoint
 from inference import AutoregressiveGenerator
+from backends.numpy.numpy_backend import NumPyBackend
 
 
 def run_training(args):
@@ -27,7 +28,7 @@ def run_training(args):
     vocab_size = tokenizer.vocab_size
 
     # 2. Initialize Model, Optimizer, Loss, Trainer
-    model = Transformer(
+    backend = NumPyBackend(
         vocab_size=vocab_size,
         embed_dim=args.embed_dim,
         num_layers=args.layers,
@@ -38,7 +39,7 @@ def run_training(args):
 
     optimizer = Adam(learning_rate=args.lr)
     loss_fn = CrossEntropyLoss()
-    trainer = Trainer(model, optimizer, loss_fn)
+    trainer = Trainer(backend, optimizer, loss_fn)
 
     data_loader = TextDataLoader(text, tokenizer, args.batch_size, args.seq_len)
 
@@ -49,7 +50,7 @@ def run_training(args):
 
     # 4. Save Checkpoint
     checkpoint = ModelCheckpoint()
-    checkpoint.save_checkpoint(model, tokenizer, args.checkpoint_name)
+    checkpoint.save_checkpoint(backend.model, tokenizer, args.checkpoint_name)
     print(f"Model and tokenizer saved to {args.checkpoint_name}.pkl")
 
 

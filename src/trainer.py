@@ -25,10 +25,12 @@ class Trainer:
         backend: BaseTransformerBackend,
         optimizer: Optimizer,
         loss_fn: CrossEntropyLoss,
+        clip_value: float | None = None,
     ):
         self.backend = backend
         self.optimizer = optimizer
         self.loss_fn = loss_fn
+        self.clip_value = clip_value
         self.history: dict[str, list[float]] = {"loss": []}
 
     def train_step(self, input_ids: np.ndarray, target_ids: np.ndarray) -> float:
@@ -45,6 +47,14 @@ class Trainer:
         logits, cache = self.backend.forward(input_ids)
         loss, grad_logits = self.loss_fn.forward(logits, target_ids)
         grads = self.backend.backward(grad_logits, cache)
+
+        # Clip gradients to prevent exploding gradients
+        if self.clip_value is not None:
+            grad_norm = np.sqrt(sum(np.sum(g**2) for g in grads.values()))
+            if grad_norm > self.clip_value:
+                clip_scale = min(self.clip_value / max(1e-8, float(grad_norm)), 1.0)
+                for key in grads:
+                    grads[key] = grads[key] * clip_scale
 
         # Get parameters, train, then push changes back to the backend
         params = self.backend.get_params()

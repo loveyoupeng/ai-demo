@@ -10,15 +10,75 @@ from core.registry import registry
 
 class PyTorchRouter(nn.Module):
     r"""
-    The Routing / Gating network (PyTorch).
+    The Routing / Gating network — PyTorch implementation.
 
-    Computes logits z = X @ W_router and softmax to produce routing
-    probabilities.  Parity-tested against NumPy Router.
+    Computes routing logits :math:`z = X W_{\text{router}}` and applies
+    softmax to produce per-expert routing probabilities.
 
-    Dimensions:
-    - Input :math:`X` — :math:`[B, L, D]`
-    - Weights :math:`W` — :math:`[D, N]`
-    - Routing probabilities — :math:`[B, L, N]`
+    **Mathematical context**
+
+    For an input :math:`X \in \mathbb{R}^{B \times L \times D}` and routing
+    weights :math:`W \in \mathbb{R}^{D \times N}` (where :math:`N` is the
+    number of experts):
+
+    .. math::
+
+        z = X W \quad \Rightarrow \quad z \in \mathbb{R}^{B \times L \times N}
+
+    .. math::
+
+        P_j = \frac{\exp(z_j)}{\sum_{i=1}^{N} \exp(z_i)}, \quad j = 1, \dots, N
+
+    The probability :math:`P \in \mathbb{R}^{B \times L \times N}` tells the
+    MoE layer how much each expert should contribute to every token.
+
+    **Dimension tracking**
+
+    ==============================  ================================================
+    Symbol                          Shape
+    ==============================  ================================================
+    Input ``x``                     [B, L, D]
+    ``w`` (router weight)           [D, N]
+    Logits :math:`z`                [B, L, N]
+    Routing probabilities           [B, L, N]
+    ``grad_output`` (from MoE)      [B, L, N]
+    ``w.grad``                      [D, N]
+    ``dx``                          [B, L, D]
+    ==============================  ================================================
+
+    **How this maps to the NumPy implementation**
+
+    - ``PyTorchRouter`` is the PyTorch equivalent of the NumPy
+      :class:`Router` in ``src/model/moe.py``.
+    - Both compute ``z = X @ W`` followed by softmax; the NumPy version uses
+      ``np.exp`` and ``np.sum`` while PyTorch uses ``torch.exp`` and
+      ``torch.sum``.
+    - The backward pass computes the softmax gradient:
+      :math:`\frac{\partial L}{\partial z_j} = P_j \sum_k \frac{\partial L}{\partial P_k}(1_{j=k} - P_k)`
+      which is encoded as ``w * (d_probs - sum(d_probs * w))`` below.
+    - The router weight gradient is accumulated via
+      ``X^T @ d_logits`` reshaped across batch × sequence dimensions,
+      matching NumPy's ``d_weights = x.T.reshape(...) @ d_logits.reshape(...)``.
+
+    **Tunable points for production**
+
+    ================  ========   =======  ===============================
+    Param             Type       Range    Notes
+    ================  ========   =======  ===============================
+    ``embed_dim``       ``int``  ``32–8192``  Hidden dimension; must match model size
+    ``num_experts``     ``int``  1–64       Number of experts; more → more sparse compute
+    ================  ========   =======  ===============================
+
+    >>> import torch
+    >>> # Typical small model
+    >>> router = PyTorchRouter(embed_dim=256, num_experts=4)
+    >>> x = torch.randn(2, 8, 256)
+    >>> probs = router(x)
+    >>> probs.shape
+    torch.Size([2, 8, 4])
+    >>> # Row sums to 1 (valid probability distribution)
+    >>> torch.allclose(probs.sum(dim=-1), torch.ones(2, 8))
+    True
     """
 
     def __init__(self, embed_dim: int, num_experts: int) -> None:
@@ -84,20 +144,71 @@ class PyTorchRouter(nn.Module):
 
 class PyTorchExpert(nn.Module):
     r"""
-    A single feed-forward expert (PyTorch).
+    A single feed-forward expert — PyTorch implementation.
 
-    Two-layer MLP with ReLU:
+    A two-layer MLP with ReLU activation.  Each expert in the MoE system
+    is an independent MLP that processes selected tokens.
+
+    **Mathematical context**
+
+    For an input :math:`x \in \mathbb{R}^{B \times L \times D}`:
 
     .. math::
-        h = \text{ReLU}(x W_1 + b_1) \\
-        y = h W_2 + b_2
 
-    Parity-tested against NumPy Expert.
+        z_1 = x W_1 + b_1, \quad h = \text{ReLU}(z_1), \quad y = h W_2 + b_2
 
-    Dimensions:
-    - Input :math:`x` — :math:`[B, L, D]`
-    - Hidden — :math:`[B, L, D_{ff}]`
-    - Output — :math:`[B, L, D]`
+    Where :math:`W_1 \in \mathbb{R}^{D \times D_{ff}}`, :math:`b_1 \in \mathbb{R}^{D_{ff}}`,
+    :math:`W_2 \in \mathbb{R}^{D_{ff} \times D}`, :math:`b_2 \in \mathbb{R}^{D}`.
+
+    **Dimension tracking**
+
+    ==============================  ================================================
+    Symbol                          Shape
+    ==============================  ================================================
+    Input ``x``                     [B, L, D]
+    ``z1`` (pre-activation)        [B, L, D\_{ff}]
+    ``h`` (ReLU activation)        [B, L, D\_{ff}]
+    ``w1``                          [D, D\_{ff}]
+    ``b1``                          [D\_{ff}]
+    ``w2``                          [D\_{ff}, D]
+    ``b2``                          [D]
+    Output                          [B, L, D]
+    ``grad_output``                 [B, L, D]
+    ``grad(w1)``                    [D, D\_{ff}]
+    ==============================  ================================================
+
+    **How this maps to the NumPy implementation**
+
+    - ``PyTorchExpert`` is the PyTorch equivalent of the NumPy
+      :class:`Expert` in ``src/model/moe.py``.
+    - Both use the same two-layer MLP: linear → ReLU → linear with matching
+      matrix dimensions and zero-initialised biases.
+    - The NumPy backward manually computes each gradient step by reshaping
+      to 2-D across batch × sequence.  The PyTorch version does the same
+      algebraic operations but with ``torch`` equivalents:
+      ``torch.matmul``, ``torch.sum``.
+    - The flat reshape ``x.reshape(-1, embed_dim)`` produces a
+      ``[B*L, D]`` matrix, matching NumPy's ``x.reshape(-1, embed_dim)``.
+    - The ReLU backward is ``grad_h * (z1 > 0)`` which is equivalent to
+      the NumPy ``grad_h * (z1_flat > 0)`` — zeroing gradients where
+      pre-activation was non-positive.
+
+    **Tunable points for production**
+
+    ================  ========   =======  ===============================
+    Param             Type       Range    Notes
+    ================  ========   =======  ===============================
+    ``embed_dim``       ``int``  ``32–8192``  Hidden dimension; must match model size
+    ``dim_ff``          ``int``  ``embed_dim * 2 .. 4 * embed_dim``  Intermediate width; 4x is standard (GPT-style)
+    ================  ========   =======  ===============================
+
+    >>> import torch
+    >>> # Standard expert (4x intermediate)
+    >>> expert = PyTorchExpert(embed_dim=256, dim_ff=1024)
+    >>> x = torch.randn(2, 8, 256)
+    >>> out = expert(x)
+    >>> out.shape
+    torch.Size([2, 8, 256])
     """
 
     def __init__(self, embed_dim: int, dim_ff: int) -> None:
@@ -188,22 +299,79 @@ class PyTorchExpert(nn.Module):
 
 class PyTorchMoELayer(nn.Module):
     r"""
-    Mixture-of-Experts layer (PyTorch).
+    Mixture-of-Experts layer — PyTorch implementation.
 
     For each token, the router selects the top-k experts and the output is
-    a weighted sum:
+    a weighted sum of their responses.  This enables conditional computation:
+    only a fraction of the model parameters are active per token.
 
-    .. math::
-        y = \sum_{j \in \text{top}_k} \tilde{P}_{j} \cdot \text{Expert}_j(x)
+    **Mathematical context**
 
-    Parity-tested against NumPy MoELayer.
+    For an input :math:`x \in \mathbb{R}^{B \times L \times D}`:
 
-    Dimensions:
-    - Input :math:`x` — :math:`[B, L, D]`
-    - Top-k indices — :math:`[B, L, K]`
-    - Top-k weights — :math:`[B, L, K]` (normalised)
-    - All expert outputs — :math:`[N, B, L, D]`
-    - Combined output — :math:`[B, L, D]`
+    1. **Routing**: :math:`P = \text{softmax}(x W_{\text{router}}) \in \mathbb{R}^{B \times L \times N}`
+    2. **Top-k selection**: :math:`S = \text{top-k}(P, k) \subseteq \{1,\dots,N\}`
+    3. **Top-k weights**: :math:`\tilde{P}_{j} = \frac{P_j}{\sum_{i \in S} P_i}` for :math:`j \in S`
+    4. **Expert outputs**: :math:`y_j = \text{Expert}_j(x)` for each :math:`j \in S`
+    5. **Weighted sum**: :math:`y = \sum_{j \in S} \tilde{P}_j \cdot y_j`
+
+    The final output has the same shape as the input: :math:`y \in \mathbb{R}^{B \times L \times D}`.
+
+    **Dimension tracking**
+
+    ========================================  ================================================
+    Symbol                                    Shape
+    ========================================  ================================================
+    Input ``x``                               [B, L, D]
+    ``routing_weights``                       [B, L, N] (N = num\_experts)
+    ``top_k_indices``                         [B, L, K] (K = num\_experts\_per\_token)
+    ``top_k_weights``                         [B, L, K] (normalised)
+    ``all_expert_outputs``                    [N, B, L, D]
+    ``expert_outputs_for_tokens``             [B, L, K, D]
+    Combined output                           [B, L, D]
+    ``grad_output``                           [B, L, D]
+    ========================================  ================================================
+
+    **How this maps to the NumPy implementation**
+
+    - ``PyTorchMoELayer`` is the PyTorch equivalent of the NumPy
+      :class:`MoELayer` in ``src/model/moe.py``.
+    - Both use the same top-k selection strategy: ``torch.argsort(..., dim=-1)[...,-k:]``
+      is equivalent to NumPy's ``np.argsort(...)[...,-k:]``.
+    - The expert output gating uses fancy indexing: in NumPy it is
+      ``all_expert_outputs[top_k_indices[b,s,k], b, s, :]``, and in
+      PyTorch it is ``all_expert_outputs[top_k_indices, batch_idx, seq_idx]``.
+      Both produce a ``[B, L, K, D]`` tensor.
+    - The backward pass propagates gradients through:
+      1. The weighted sum back to each expert's output (using top-k masks)
+      2. Each expert individually (via ``expert.backward(x, d_all_expert_outputs[i])``)
+      3. The top-k normalisation back to routing probabilities
+      4. The router backward (softmax gradient)
+    - The gradient accumulation into ``d_all_expert_outputs`` uses Python-loop
+      scatter (line-by-line accumulation) which mirrors NumPy's explicit loop.
+      For production, this could be vectorised with ``scatter_add_``.
+
+    **Tunable points for production**
+
+    ========================  ========   =======  ===============================
+    Param                     Type       Range    Notes
+    ========================  ========   =======  ===============================
+    ``embed_dim``               ``int``  ``32–8192``  Hidden dimension; must match model size
+    ``num_experts``             ``int``  1–64       Total experts; more = more capacity at inference cost
+    ``dim_ff``                  ``int``  ``embed_dim * 2 .. 4 * embed_dim``  Expert MLP intermediate width
+    ``num_experts_per_token``   ``int``  1–num\_experts  Active experts per token; 2 is common (sparse)
+    ========================  ========   =======  ===============================
+
+    >>> import torch
+    >>> # Small MoE: 4 experts, 2 per token
+    >>> moe = PyTorchMoELayer(embed_dim=128, num_experts=4, dim_ff=256, num_experts_per_token=2)
+    >>> x = torch.randn(2, 8, 128)
+    >>> out, cache = moe(x)
+    >>> out.shape
+    torch.Size([2, 8, 128])
+    >>> # Check cache contains top-k info
+    >>> list(cache.keys()) # doctest: +SKIP
+    ['x', 'routing_weights', 'top_k_indices', 'top_k_weights', 'top_k_sum', 'all_expert_outputs']
     """
 
     def __init__(

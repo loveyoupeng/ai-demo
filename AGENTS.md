@@ -19,7 +19,39 @@ See [task_plan.md](task_plan.md) for the current project plan, progress tracking
 
 ## Execution
 
-- Main entry point: `python src/main.py` or `uv run src/main.py`
+### CLI Commands
+
+All commands run via `uv run`:
+
+```bash
+# Train model (default: NumPy backend)
+uv run src/train.py train --checkpoint_name my_model
+
+# Advanced training
+uv run src/train.py train \
+    --embed_dim 64 --layers 4 --heads 8 --experts 8 \
+    --max_context 128 --epochs 10 --lr 0.001 \
+    --backend numpy  # or "torch"
+
+# Text generation from trained checkpoint
+uv run src/train.py infer --checkpoint_name my_model --prompt "the"
+
+# E2E cross-backend validation (4 scenarios)
+uv run src/validate_e2e.py
+```
+
+### Testing
+
+```bash
+# All tests
+uv run pytest tests/ -v
+
+# Cross-backend parity tests
+uv run pytest tests/test_cross_backend.py -v
+
+# E2E cross-load validation
+uv run pytest tests/test_e2e_cross_backend.py -v
+```
 
 ## Rules and Principles
 
