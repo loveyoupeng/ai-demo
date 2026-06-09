@@ -221,3 +221,75 @@
 - Phase 9: COMPLETE
 - Phase 10: COMPLETE
 
+---
+
+### 2026-06-10 — Phase 13: TurboQuant KV Cache (13-A, 13-B) — IN PROGRESS
+
+**Goal**: Implement TurboQuant 4-bit compression KV cache for PyTorch decoder, then wire it through attention → transformer → backend → inference pipeline.
+
+#### Completed Tasks
+
+1. **Phase 13-A: Core KV Cache Implementation — COMPLETE**
+   - `src/model/pytorch/attention_kvcache.py` — `PyTorchTurboQuantCache` class with:
+     - `PyQuantize` static utilities (QR rotation, Beta(0.5,0.5) codebook, quantize, dequantize)
+     - Residual window (128 tokens full precision) + compressed older tokens (uint8 indices + float32 norms)
+     - `append()`, `get_kv()`, `reset()` methods
+   - `tests/test_turboquant_cache.py` — 7 unit tests, all passing:
+     - `test_cache_initialization`, `test_cache_append_and_get`, `test_cache_residual_window`
+     - `test_cache_compression_ratio`, `test_cache_quantization_quality`
+     - `test_cache_autoregressive_generation`, `test_quantize_rotate_dequantize_roundtrip`
+
+2. **Phase 13-B: Attention Wiring — COMPLETE**
+   - `src/model/pytorch/attention.py` — `PyTorchMultiHeadAttention.forward()` accepts `kv_cache` parameter
+   - `src/model/pytorch/transformer.py` — block and full transformer pass `kv_cache` through
+   - Dynamic mask expansion for `Q_Len ≠ K_Len` during autoregressive generation
+
+#### Uncommitted Changes (from catch-up)
+
+- `src/backends/pytorch/pytorch_backend.py` (modified) — auto-cache creation with `_embed_dim`/`_num_heads` + `_kv_cache` attribute
+- `src/inference.py` (modified) — Minor doc comment fixes + normalization
+- `src/model/pytorch/attention.py` (modified) — KV cache wiring, dynamic mask expansion
+- `src/model/pytorch/transformer.py` (modified) — `kv_cache` parameter through block + full transformer
+- `src/model/pytorch/attention_kvcache.py` (new) — Full TurboQuant implementation
+- `tests/test_turboquant_cache.py` (new) — 7 tests
+
+#### Current Test Status
+
+- **128 tests collected, 128 passing (100%), 0 failing**
+- 0 pyright errors on `src/`
+- 0 ruff errors on `src/`
+
+#### What's Next
+
+- Phase 13-C: Backend integration → 13-D: Cache parity test → 13-E: Inference pipeline → 13-F: E2E test
+
+---
+
+### 2026-06-10 — Phase 13-C/D: Auto-Clear & Compact (COMPLETE)
+
+**Goal**: Add auto_clear flag and manual compact_cache() method for context compression.
+
+#### Completed Tasks
+
+1. **auto_clear flag** (`attention_kvcache.py`)
+   - `_auto_clear` parameter in `PyTorchTurboQuantCache.__init__` (default `False`)
+   - `auto_clear=False` → cache stays at `max_seq_len`, never auto-compacts
+   - `auto_clear=True` → `append()` triggers `_compact()` when size would exceed `max_seq_len`
+   - `compact_cache()` method — manual cache compaction, shifts oldest tokens out
+
+2. **_compact() method**
+   - Internal shift of cached data in favour of newer tokens
+   - Fixed overlapping tensor `.copy_()` error by cloning before copy
+
+3. **Tests** (3 new tests, all passing)
+   - `test_auto_clear_false` — cache stays at `max_seq_len`
+   - `test_compact_cache_manual` — manual compact works correctly
+   - `test_auto_clear_true` — auto-compaction triggers on overflow
+
+#### Current Test Status
+
+- **131 tests collected, 131 passing (100%), 0 failing**
+- 0 pyright errors on `src/`
+- 0 ruff errors on `src/`
+- Test count went from 128 → 131 (3 new TurboQuant tests)
+

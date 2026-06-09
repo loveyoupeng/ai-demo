@@ -9,6 +9,7 @@
 - Training: `src/trainer.py`, `src/training/app.py`
 - CLI entry: `src/train.py` — train/infer/generate commands
 - E2E validation: `src/validate_e2e.py` — cross-backend 4-way check
+- KV cache: `src/model/pytorch/attention_kvcache.py` — TurboQuant compression
 
 ## Codebase Structure
 
@@ -24,24 +25,58 @@ src/model/numpy/   # Production API implementations
   transformer.py   # NumPyTransformerBlock (175 lines)
 src/model/pytorch/ # PyTorch manual backward versions
   layer.py, attention.py, moe.py, transformer.py
+  attention_kvcache.py  # TurboQuant KV cache (13-A complete)
 src/backends/      # Backend wrapper layer
   numpy/            # NumPyBackend wrapping NumPyTransformer
   pytorch/          # PyTorchBackend wrapping PyTorchTransformer
+  pytorch/          # PyTorchBackend wrapping PyTorchTransformer (with KV cache integration)
 src/training/      # Training orchestration
 src/utils/         # Checkpoint, profiler
 tests/
   parity/          # NumPy ↔ PyTorch parity tests
   model/           # Component tests
+  test_turboquant_cache.py  # KV cache unit tests (7 tests)
 ```
 
 ## Current Discoveries
 
 ### Test Status (2026-06-10)
 
-- **121/121 tests passing (100%)**
+- **128/128 tests passing (100%)**
 - All backward gradient parity tests pass with tiered tolerances
 - 6 cross-backend parity tests all pass
 - E2E validation: 4/4 scenarios pass
+- **TurboQuant KV cache: 7/7 tests pass** (core implementation + attention wiring)
+
+### TurboQuant KV Cache — Complete (Phase 13-A, 13-B)
+
+`src/model/pytorch/attention_kvcache.py` implements TurboQuant compression:
+
+| Component | Description |
+|-----------|-------------|
+| `PyQuantize` | Static utilities: QR rotation, Beta(0.5,0.5) codebook, quantize/dequantize |
+| `PyTorchTurboQuantCache` | Cache manager with residual window (128 tokens full precision) + compressed older tokens |
+
+Storage:
+- **Residual window** (tokens 0–127): full float32 precision at `residual_k[v, pos, head, dim]`
+- **Compressed** (token 128+): uint8 indices + float32 norms at `k_indices[pos, head]` → dequantized on-the-fly in `get_kv()`
+
+Test coverage (`tests/test_turboquant_cache.py`):
+| Test | What It Verifies |
+|------|-----------------|
+| `test_cache_initialization` | Correct shapes, dtypes (uint8 indices, float32 norms) |
+| `test_cache_append_and_get` | Sequential append, correct shape output, batch=0 processing |
+| `test_cache_residual_window` | 30 tokens within residual window stored in full precision |
+| `test_cache_compression_ratio` | 500-token sequence: compressed storage < float32 full precision |
+| `test_cache_quantization_quality` | 200 tokens: no NaN/inf, data preserved after dequantize |
+| `test_cache_autoregressive_generation` | KV cache stores correct `full_seq_len` token count |
+| `test_quantize_rotate_dequantize_roundtrip` | 4-bit relative error < 0.2 |
+
+Attention wiring (`src/model/pytorch/attention.py`):
+- `PyTorchMultiHeadAttention.forward()` accepts optional `kv_cache` parameter
+- When provided, K/V are appended to cache, then `get_kv()` retrieved for full-sequence attention
+- Dynamic mask expansion handles `Q_Len != K_Len` during autoregressive generation
+- Same wiring through `PyTorchTransformerBlock` and `PyTorchTransformer`
 
 ### Phase 8 Complete: E2E Cross-Backend Validation
 
@@ -144,3 +179,33 @@ Each operation introduces ~1e-14–1e-16 relative error in float64. After 100+ o
 | E2E create_texts missing tokenizer arg | ✅ Resolved | Updated to accept CharTokenizer parameter |
 | Pyright MappingProxyType assignment | ✅ Resolved | Used _PtBackendW class instead of dict() assignment |
 | Pyright unbound variable | ✅ Resolved | Initialized loop variables before iteration |
+| PyTorch register_buffer type annotation | ℹ️ Known | pyright can't infer types from nn.Module.register_buffer — not blocking |
+
+### Phase 13-C: Auto-Clear & Compact (COMPLETE)
+
+Added context compression for TurboQuant KV cache:
+
+| Method | Description |
+|--------|-------------|
+| `_auto_clear` flag | `True` = auto-compact on overflow, `False` = manual only |
+| `compact_cache()` | Manual compact — shifts oldest tokens out |
+| `_compact(n)` | Internal shift by `n` positions in favour of newer tokens |
+| `append()` | When `auto_clear=True`, triggers `_compact()` if append exceeds `max_seq_len` |
+
+Storage with auto_clear:
+- Buffer shrinks dynamically when sequence exceeds `max_seq_len`
+- After compaction the full-precision window slides forward
+- Older tokens (beyond residual window) are 4-bit quantized
+
+Test coverage (`tests/test_turboquant_cache.py`):
+| Test | What |
+|------|------|
+| `test_auto_clear_false` | Default mode: cache stays at `max_seq_len`, no auto-compaction |
+| `test_compact_cache_manual` | Manual `compact_cache()` works, auto_clear=True keeps newest tokens |
+| `test_auto_clear_true` | Auto-compact triggers when append would exceed `max_seq_len` |
+
+#### Errors Encountered
+
+| Error | Status | Category |
+|-------|--------|----------|
+| Overlapping tensor `.copy_()` error | Resolved | Cloned source before `.copy_()` in `_compact()` |

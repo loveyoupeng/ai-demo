@@ -14,9 +14,10 @@ Each level must produce identical forward/backward gradients (float64) within ti
 
 ## Current Status
 
-**Tests: 121 collected | 121 passing (100%) | 0 failing**
+**Tests: 131 collected | 131 passing (100%) | 0 failing**
 
 **Pyright: 0 errors** on `src/` (all checks pass)
+**Ruff: 0 errors** on `src/`
 
 ### What's Working ✅
 
@@ -42,6 +43,7 @@ Each level must produce identical forward/backward gradients (float64) within ti
 | Data Loader | ✅ | 3 data loader tests — batch validation, length, batch count |
 | E2E Script | ✅ | `src/train.py` — train/infer/generate with dataset download |
 | Code Quality | ✅ | 0 ruff errors |
+| **TurboQuant KV Cache** | ✅ | Core implementation — 7/7 unit tests pass |
 
 ---
 
@@ -130,7 +132,6 @@ All 11 backward gradient tests now pass with appropriate tiered tolerances.
 - [x] Scenario 3: PT params → NumPy model → forward pass match (max_diff < 0.5e-6)
 - [x] Scenario 4: NumPy params → PT model → forward pass match (max_diff < 0.5e-6)
 - [x] Bidirectional cross-load verified numerically identical
-- [x] 0 ruff errors, 0 pyright errors
 
 ### Phase 9: PyTorch Documentation & Tunable Points ✅ COMPLETE
 
@@ -154,25 +155,77 @@ All 11 backward gradient tests now pass with appropriate tiered tolerances.
 - [x] README updated: title, features, usage, cross-backend, tests, project structure
 - [x] AGENTS.md updated: full CLI command blocks for all operations
 
-### Phase 11: Triton/CUDA Backends
+---
 
-**Goal**: Custom kernels that match NumPy/PyTorch.
+## NEW: Phase 13: TurboQuant KV Cache for PyTorch ⬜ IN PROGRESS
 
-- [ ] LayerNorm kernel (Triton)
-- [ ] Attention kernel (Triton)
-- [ ] MoE routing kernel (Triton)
-- [ ] Compare performance: NumPy vs PyTorch vs Custom kernels
+**Goal**: Implement TurboQuant compression-based KV cache for PyTorch transformer decoder, showing how 4-bit quantization reduces KV cache memory (~4x) while maintaining attention quality.
 
-### Phase 12: Educational Synthesis
+**Algorithm** (Google TurboQuant paper):
+1. Random orthogonal rotation via QR decomposition of Gaussian matrix (one-time at init)
+2. Beta(0.5, 0.5) arcsine-distributed codebook (16 levels for 4-bit) — optimal for heavy-tailed K/V activations
+3. Per-channel L2 norm scaling, then element-wise quantization to nearest codebook level
+4. Residual window: recent tokens stored in full precision (128 tokens), older tokens compressed
 
-- [ ] Add `docs/` with architecture diagram
-- [ ] Layer-by-layer explanation comments
-- [ ] "How to read this code" guide for learners
-- [ ] Compare results table across backends
+### Tasks
+
+#### 13-A: Core KV Cache Implementation ✅ DONE
+
+- [x] `src/model/pytorch/attention_kvcache.py` — `PyTorchTurboQuantCache` class
+  - [x] `PyQuantize` static utilities (rotation, codebook, quantize, dequantize)
+  - [x] Residual window for recent tokens (full precision)
+  - [x] Compressed storage for older tokens (uint8 indices + float32 norms)
+  - [x] `append()` — store new K/V tokens
+  - [x] `get_kv()` — retrieve full K/V (dequantizing compressed on-the-fly)
+  - [x] `reset()` — clear cache state
+
+- [x] `tests/test_turboquant_cache.py` — 7 unit tests
+  - [x] `test_cache_initialization` — correct shapes and parameters
+  - [x] `test_cache_append_and_get` — append one token at a time, retrieve sequence
+  - [x] `test_cache_residual_window` — recent tokens NOT quantized
+  - [x] `test_cache_compression_ratio` — stored memory < float32 full precision
+  - [x] `test_cache_quantization_quality` — dequantized output has no NaN/inf, data preserved
+  - [x] `test_cache_autoregressive_generation` — KV cache stores correct token count
+
+#### 13-B: Wire Cache Into Attention Module ✅ DONE
+
+- [x] `src/model/pytorch/attention.py` — `PyTorchMultiHeadAttention.forward()` accepts `kv_cache` parameter
+- [x] `src/model/pytorch/transformer.py` — `PyTorchTransformerBlock` and `PyTorchTransformer` pass `kv_cache` through
+- [x] Dynamic mask expansion for autoregressive generation (Q_Len != K_Len)
+
+#### 13-C: Wire Cache Into Backend Abstraction ✅ DONE
+
+- [x] `src/backends/pytorch/pytorch_backend.py` — auto-create `PyTorchTurboQuantCache` when `use_cache=True`, auto-reset between prompts, expose cache in forward return for inference loop
+
+#### 13-D: Auto-Clear & Compact Cache ✅ DONE
+
+- [x] `_auto_clear` flag in `PyTorchTurboQuantCache.__init__` (default `False`)
+- [x] `compact_cache()` method — manual cache compaction, shifts oldest tokens out
+- [x] `_compact(num_to_remove)` — internal shift of cached data in favour of newer tokens
+- [x] `append()` triggers `_compact()` when `auto_clear=True` and append would exceed `max_seq_len`
+- [x] Fixed overlapping tensor `.copy_()` error in `_compact()` by cloning before copy
+
+- [x] `tests/test_turboquant_cache.py` — 10 total unit tests:
+  - [x] `test_auto_clear_false` — cache stays at `max_seq_len`, no automatic compaction
+  - [x] `test_compact_cache_manual` — `compact_cache()` works, `auto_clear=True` keeps only newest tokens
+  - [x] `test_auto_clear_true` — append beyond `max_seq_len` triggers automatic compaction
+
+#### 13-E: Add Cache Parity Test (NEXT)
+
+- [ ] `tests/test_turboquant_cache.py` or new file — KV cache autoregressive output closely matches full-sequence output (tier-2 tolerance rtol=1e-2)
+
+#### 13-F: Add Cache to Inference Pipeline (NEXT)
+
+- [ ] `src/inference.py` — use KV cache in `AutoregressiveGenerator` for memory-efficient generation
+
+#### 13-G: End-to-End Cache Integration Test (NEXT)
+
+- [ ] Training + inference with KV cache enabled — verify generation quality not degraded
+- [ ] Measure memory reduction claim (cache size comparison)
 
 ---
 
-## Current Test Inventory (121 tests)
+## Current Test Inventory (128 tests)
 
 | Category | File | Tests | Parity / Status |
 |----------|------|-------|-----------------|
@@ -204,8 +257,9 @@ All 11 backward gradient tests now pass with appropriate tiered tolerances.
 | Inference | `test_generator.py` | 2 | ✅ |
 | Training | `test_train_loop.py` | 3 | ✅ (loss reduction, gradient clipping, no-clipping) |
 | Training | `test_data_loader.py` | 3 | ✅ (batch validation, length, batch count) |
+| **TurboQuant** | `test_turboquant_cache.py` | 10 | ✅ (core + auto_clear + compact) |
 
-**Total: 121 tests — 100% passing**
+**Total: 131 tests — 100% passing**
 
 ---
 
@@ -219,6 +273,7 @@ All 11 backward gradient tests now pass with appropriate tiered tolerances.
 6. **Two NumPy implementations** — `src/model/` (pedagogical) and `src/model/numpy/` (production API) — this is intentional for comparison learning
 7. **Parameter constants** — All dictionary keys use constants from `src/model/parameters.py` (no magic strings)
 8. **Code quality** — All Python code passes ruff linting and formatting
+9. **TurboQuant KV cache** — Inference-only feature. Residual window (128 tokens) in full precision + compressed (4-bit) for older tokens. Beta(0.5, 0.5) codebook. Learning/reference implementation.
 
 ### Tiered Tolerances (AGENTS.md Rule #2)
 
@@ -246,6 +301,6 @@ All 11 backward gradient tests now pass with appropriate tiered tolerances.
 
 ## What's Next
 
-**Phase 8: Triton/CUDA Backends** is the next milestone. The core transformer, training loop, data loading, and E2E script are all complete (121/121 tests, 0 ruff errors). The next logical step is adding custom Triton kernels for LayerNorm, Attention, and MoE routing layers.
+**Phase 13: TurboQuant KV Cache** — 13-A, 13-B, 13-C, and 13-D are complete (core + backend + auto_clear). Next: 13-E (cache parity test), 13-F (inference pipeline), 13-G (E2E test).
 
-Alternatively, **Phase 9: Educational Synthesis** — add documentation, architecture diagrams, and "How to read this code" guide for learners.
+The uncommitted changes (modified planning files) reflect the completed 13-C, 13-D phase.
