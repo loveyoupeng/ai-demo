@@ -63,7 +63,7 @@ class AutoregressiveGenerator:
             # Sample one index based on probabilities
             probs_1d = probs.flatten()
 
-            # Handle potential edge case where probs might not sum to exactly 1 due to precision
+            # Normalize to sum to 1, handle numerical edge case
             probs_1d = probs_1d / (np.sum(probs_1d) + 1e-12)
 
             # Use the dimension of the logits (which is model's vocab_size)
@@ -75,8 +75,9 @@ class AutoregressiveGenerator:
             next_token_id_array = np.array([[next_token_id]], dtype=np.int32)
             current_ids = np.concatenate([current_ids, next_token_id_array], axis=1)
 
-        # Return ONLY the newly generated tokens.
-        # If prompt was empty, we added a dummy [0] at index 0, so return from index 1 onwards.
+        # Return only the newly generated tokens.
+        # For empty prompts, we injected a dummy [0] at index 0
+        # so skip it; otherwise skip the prompt prefix.
         if is_empty_prompt:
             return current_ids[0, 1:]
         else:

@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from core.registry import registry
+from model.pytorch.attention_kvcache import PyTorchTurboQuantCache
 
 
 class PyTorchMultiHeadAttention(nn.Module):
@@ -89,26 +90,25 @@ class PyTorchMultiHeadAttention(nn.Module):
         self,
         x: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
+        kv_cache: Optional[PyTorchTurboQuantCache] = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """
         Compute multi-head attention.
 
-        When `use_cache` is True (inference mode), K and V are accumulated
-        in the provided cache tensors so that each new token only computes
-        attention over its own position while reusing previous states.
-        This reduces autoregressive generation from O(n^2) to O(n) memory.
+        When a ``cache`` is provided, K and V values are appended to the cache
+        and the full K/V sequence is retrieved for attention computation.  This
+        supports autoregressive generation where only the current token's K/V
+        is appended but all history is attended over.
 
         Args:
             x: Input tensor [Batch, Seq_Len, Embed_Dim]
             mask: Causal mask [Seq_Len, Seq_Len] (1 for keep, 0 for mask)
-            use_cache: If True, accumulate K/V for autoregressive inference
-            cache_idx: Current sequence index for cache accumulation (0-based)
-            key_cache: Pre-allocated [Batch, Num_Heads, Max_Seq, Head_Dim] for K
-            value_cache: Pre-allocated [Batch, Num_Heads, Max_Seq, Head_Dim] for V
+            cache: Optional TurboQuant KV cache; if provided, K/V are stored and
+                retrieved through it.
 
         Returns:
             output: [Batch, Seq_Len, Embed_Dim]
-            cache: Dictionary with Q, K, V, attn_weights, context
+            cache_dict: Dictionary with Q, K, V, attn_weights, context
         """
         batch_size, seq_len, _ = x.shape
 
@@ -128,11 +128,34 @@ class PyTorchMultiHeadAttention(nn.Module):
             1, 2
         )
 
+        # 3. KV cache integration — store new K/V, retrieve full history.
+        if kv_cache is not None:
+            kv_cache.append(K, V)
+            K, V = kv_cache.get_kv()
+
         # 3. Scaled dot-product attention: [Batch, Num_Heads, Q_Len, K_Len]
         scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.head_dim)
 
         # 4. Apply causal mask
         if mask is not None:
+            # When using KV cache, Q_Len may differ from K_Len (autoregressive
+            # generation: Q has only the current token, K has full history).
+            # Broadcast the mask appropriately: if mask is smaller, expand it
+            # to cover the full Q_Len × K_Len range using the causal structure.
+            q_len, k_len = scores.shape[-2], scores.shape[-1]
+            if mask.shape[-2] != q_len or mask.shape[-1] != k_len:
+                # Build a causal mask: each query position can attend to
+                # all key positions up to itself (or all past keys if beyond
+                # the original sequence length).
+                causal_mask = torch.ones(
+                    (q_len, k_len), dtype=mask.dtype, device=mask.device
+                )
+                causal_mask = torch.tril(causal_mask)
+                # The last `k_len` rows of the original mask define the causal structure
+                orig_rows = min(q_len, mask.shape[-2])
+                if orig_rows > 0:
+                    causal_mask[:orig_rows, : mask.shape[-1]] = mask[:orig_rows]
+                mask = causal_mask
             scores = scores.masked_fill(mask == 0, float("-1e9"))
 
         # 5. Softmax: [Batch, Num_Heads, Q_Len, K_Len]
@@ -149,7 +172,7 @@ class PyTorchMultiHeadAttention(nn.Module):
         # 8. Final output projection: [Batch, Seq_Len, Embed_Dim]
         output = torch.matmul(context_out, self.W_o)
 
-        cache = {
+        attn_cache = {
             "Q": Q,
             "K": K,
             "V": V,
@@ -162,7 +185,7 @@ class PyTorchMultiHeadAttention(nn.Module):
         # Save for backward
         self._save_cache_for_backward(Q, K, V, attn_weights, context_out, x)
 
-        return output, cache
+        return output, attn_cache
 
     def _softmax(self, x: torch.Tensor, dim: int) -> torch.Tensor:
         """Numerically stable softmax."""

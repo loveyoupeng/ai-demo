@@ -7,6 +7,7 @@ import torch.nn as nn
 import numpy as np
 from core.registry import registry
 from model.pytorch.attention import PyTorchMultiHeadAttention
+from model.pytorch.attention_kvcache import PyTorchTurboQuantCache
 from model.pytorch.layers import PyTorchLayerNorm
 from model.pytorch.moe import PyTorchMoELayer
 
@@ -111,8 +112,7 @@ class PyTorchTransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-        use_cache: bool = False,
-        cache_idx: int | None = None,
+        kv_cache: Optional[PyTorchTurboQuantCache] = None,
     ) -> tuple[torch.Tensor, dict[str, object]]:
         """
         Forward pass through the Transformer decoder block.
@@ -120,8 +120,9 @@ class PyTorchTransformerBlock(nn.Module):
         Args:
             x: Input tensor [Batch, Seq_Len, Embed_Dim]
             mask: Causal mask [Seq_Len, Seq_Len]
-            use_cache: Whether to use/update KV cache
-            cache_idx: Index of the current token for KV cache update
+            kv_cache: Optional TurboQuant KV cache for storing K/V tokens during
+                autoregressive generation. If provided, only the current
+                position's K/V is appended and the full sequence is retrieved.
 
         Returns:
             output: [Batch, Seq_Len, Embed_Dim]
@@ -133,7 +134,7 @@ class PyTorchTransformerBlock(nn.Module):
         # x = x + MHA(LN(x))
         residual1 = x
         ln1_x = self.ln1(x)
-        mha_out, mha_cache = self.mha.forward(ln1_x, mask=mask)
+        mha_out, mha_cache = self.mha.forward(ln1_x, mask=mask, kv_cache=kv_cache)
         x_after_mha = residual1 + mha_out
 
         # 2. Feed-Forward / MoE Sub-layer (Pre-Norm)
@@ -459,8 +460,7 @@ class PyTorchTransformer(nn.Module):
         self,
         input_ids: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-        use_cache: bool = False,
-        cache_idx: int | None = None,
+        kv_cache: Optional[PyTorchTurboQuantCache] = None,
     ) -> tuple[torch.Tensor, dict[str, object]]:
         """
         Forward pass through the full transformer.
@@ -468,8 +468,7 @@ class PyTorchTransformer(nn.Module):
         Args:
             input_ids: Integer token IDs [Batch, Seq_Len]
             mask: Causal mask [Seq_Len, Seq_Len]
-            use_cache: Whether to use/update KV cache
-            cache_idx: Index of the current token for KV cache update
+            kv_cache: Optional TurboQuant KV cache for autoregressive generation.
 
         Returns:
             logits: [Batch, Seq_Len, Vocab_Size]
@@ -495,9 +494,7 @@ class PyTorchTransformer(nn.Module):
         # Each block preserves [B, L, D] through residual + sub-layer
         block_caches: list[dict[str, object]] = []
         for block in self.blocks:
-            block_out, block_cache = block.forward(
-                x, mask=mask, use_cache=use_cache, cache_idx=cache_idx
-            )
+            block_out, block_cache = block.forward(x, mask=mask, kv_cache=kv_cache)
             block_caches.append(block_cache)
             x = block_out
 

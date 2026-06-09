@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 from core.base_backend import BaseTransformerBackend
+from model.pytorch.attention_kvcache import PyTorchTurboQuantCache
 from model.pytorch.transformer import PyTorchTransformer
 
 # Canonical (NumPy style) -> PyTorch internal name
@@ -55,6 +56,8 @@ class PyTorchBackend(BaseTransformerBackend):
         num_experts: int,
         max_seq_len: int = 512,
     ):
+        self._embed_dim = embed_dim
+        self._num_heads = num_heads
         self.model = PyTorchTransformer(
             vocab_size=vocab_size,
             embed_dim=embed_dim,
@@ -110,15 +113,29 @@ class PyTorchBackend(BaseTransformerBackend):
         mask: np.ndarray | None = None,
         use_cache: bool = False,
         cache_idx: int | None = None,
+        kv_cache: PyTorchTurboQuantCache | None = None,
     ) -> tuple[np.ndarray, dict[str, object]]:
         tensor_input = torch.from_numpy(input_ids).to(torch.int64)
         tensor_mask = torch.from_numpy(mask) if mask is not None else None
 
+        # Auto-create cache when use_cache=True and no explicit cache provided.
+        if use_cache and not kv_cache and not hasattr(self, "_kv_cache"):
+            self.model.eval()
+            embed_dim = self._embed_dim
+            num_heads = self._num_heads
+            head_dim = embed_dim // num_heads
+            self._kv_cache = PyTorchTurboQuantCache(
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                max_seq_len=512,
+                head_dim=head_dim,
+            )
+            kv_cache = self._kv_cache
+
         logits_tensor, cache = self.model.forward(
             tensor_input,
             mask=tensor_mask,
-            use_cache=use_cache,
-            cache_idx=cache_idx,
+            kv_cache=kv_cache,
         )
 
         logits = self._to_np_float64(logits_tensor)
