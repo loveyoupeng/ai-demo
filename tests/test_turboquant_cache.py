@@ -50,7 +50,7 @@ def test_cache_append_and_get():
         num_heads=num_heads,
         max_seq_len=64,
         head_dim=embed_dim // num_heads,
-        batch_size=1,
+        batch_size=batch_in,
     )
 
     # Build the sequence by appending one token at a time
@@ -223,13 +223,10 @@ def test_cache_autoregressive_generation():
     prompt_len = 5
     num_gen = 5
 
-    import random
-
     import torch
     from src.model.pytorch.attention_kvcache import PyTorchTurboQuantCache
     from src.model.pytorch.transformer import PyTorchTransformer
 
-    prompt = torch.randint(0, vocab_size, (1, prompt_len))
     full_seq_len = prompt_len + num_gen
     full_seq = torch.randint(0, vocab_size, (1, full_seq_len))
 
@@ -316,3 +313,110 @@ def test_quantize_rotate_dequantize_roundtrip():
     assert relative_error < 0.2, (
         f"Relative error {relative_error:.4f} too large for 4-bit quant"
     )
+
+
+# ---------------------------------------------------------------------------
+# test_auto_clear_false — default should NOT auto-clear
+# ---------------------------------------------------------------------------
+def test_auto_clear_false():
+    """auto_clear=False (default) should NOT auto-compact when size > max_seq_len."""
+    embed_dim = 64
+    num_heads = 4
+
+    cache = PyTorchTurboQuantCache(
+        embed_dim=embed_dim,
+        num_heads=num_heads,
+        max_seq_len=6,
+        head_dim=embed_dim // num_heads,
+        batch_size=1,
+        auto_clear=False,
+    )
+
+    # Append more tokens than max_seq_len
+    for _ in range(10):
+        k = torch.randn(2, num_heads, 1, embed_dim // num_heads)
+        v = torch.randn(2, num_heads, 1, embed_dim // num_heads)
+        cache.append(k, v)
+
+    # Should stop at max_seq_len, not compact
+    assert cache.size == 6
+
+
+# ---------------------------------------------------------------------------
+# test_compact_cache_manual
+# ---------------------------------------------------------------------------
+def test_compact_cache_manual():
+    """Manual compact_cache() should shift oldest tokens out."""
+    embed_dim = 64
+    num_heads = 4
+
+    cache = PyTorchTurboQuantCache(
+        embed_dim=embed_dim,
+        num_heads=num_heads,
+        max_seq_len=6,
+        head_dim=embed_dim // num_heads,
+        batch_size=1,
+        auto_clear=False,
+    )
+
+    # Fill beyond max_seq_len
+    tokens_k = []
+    tokens_v = []
+    for _ in range(10):
+        k = torch.randn(2, num_heads, 1, embed_dim // num_heads)
+        v = torch.randn(2, num_heads, 1, embed_dim // num_heads)
+        cache.append(k, v)
+        tokens_k.append(k[0, :, 0, :])
+        tokens_v.append(v[0, :, 0, :])
+
+    # Cache should still be at max_seq_len (6)
+    assert cache.size == 6
+
+    # compact_cache() should not change anything (already at limit)
+    cache.compact_cache()
+    assert cache.size == 6
+
+    # Now test with auto_clear=True
+    cache2 = PyTorchTurboQuantCache(
+        embed_dim=embed_dim,
+        num_heads=num_heads,
+        max_seq_len=6,
+        head_dim=embed_dim // num_heads,
+        batch_size=1,
+        auto_clear=True,
+    )
+
+    for i in range(10):
+        k = torch.randn(2, num_heads, 1, embed_dim // num_heads)
+        v = torch.randn(2, num_heads, 1, embed_dim // num_heads)
+        cache2.append(k, v)
+
+    # auto_clear should keep only the newest 6 tokens
+    assert cache2.size == 6
+
+
+# ---------------------------------------------------------------------------
+# test_auto_clear_true
+# ---------------------------------------------------------------------------
+def test_auto_clear_true():
+    """auto_clear=True should compact when append would exceed max_seq_len."""
+    embed_dim = 64
+    num_heads = 4
+
+    cache = PyTorchTurboQuantCache(
+        embed_dim=embed_dim,
+        num_heads=num_heads,
+        max_seq_len=6,
+        head_dim=embed_dim // num_heads,
+        batch_size=1,
+        auto_clear=True,
+    )
+
+    # Append more tokens than max_seq_len
+    for _ in range(10):
+        k = torch.randn(2, num_heads, 1, embed_dim // num_heads)
+        v = torch.randn(2, num_heads, 1, embed_dim // num_heads)
+        cache.append(k, v)
+
+    # Should always stay at max_seq_len
+    assert cache.size == 6

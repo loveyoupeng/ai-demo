@@ -55,9 +55,14 @@ class PyTorchBackend(BaseTransformerBackend):
         num_heads: int,
         num_experts: int,
         max_seq_len: int = 512,
+        auto_clear: bool = False,
     ):
         self._embed_dim = embed_dim
         self._num_heads = num_heads
+        self._max_seq_len = max_seq_len
+        self._auto_clear = auto_clear
+        self._kv_cache: PyTorchTurboQuantCache | None = None
+        self._kv_cache_seq_len = 0
         self.model = PyTorchTransformer(
             vocab_size=vocab_size,
             embed_dim=embed_dim,
@@ -117,19 +122,26 @@ class PyTorchBackend(BaseTransformerBackend):
     ) -> tuple[np.ndarray, dict[str, object]]:
         tensor_input = torch.from_numpy(input_ids).to(torch.int64)
         tensor_mask = torch.from_numpy(mask) if mask is not None else None
+        batch_size = input_ids.shape[0]
+        seq_len = input_ids.shape[1]
+
+        # Reset cache when input sequence length changes (new prompt).
+        if use_cache and self._kv_cache is not None and self._kv_cache_seq_len != seq_len:
+            self.model.eval()
+            self._kv_cache_seq_len = 0
+            self._kv_cache.reset()
+            self._kv_cache_seq_len = seq_len
 
         # Auto-create cache when use_cache=True and no explicit cache provided.
-        if use_cache and not kv_cache and not hasattr(self, "_kv_cache"):
-            self.model.eval()
-            embed_dim = self._embed_dim
-            num_heads = self._num_heads
-            head_dim = embed_dim // num_heads
+        if use_cache and not kv_cache and self._kv_cache is None:
             self._kv_cache = PyTorchTurboQuantCache(
-                embed_dim=embed_dim,
-                num_heads=num_heads,
-                max_seq_len=512,
-                head_dim=head_dim,
+                embed_dim=self._embed_dim,
+                num_heads=self._num_heads,
+                max_seq_len=self._max_seq_len,
+                head_dim=self._embed_dim // self._num_heads,
+                batch_size=batch_size,
             )
+            self._kv_cache_seq_len = seq_len
             kv_cache = self._kv_cache
 
         logits_tensor, cache = self.model.forward(
@@ -139,6 +151,8 @@ class PyTorchBackend(BaseTransformerBackend):
         )
 
         logits = self._to_np_float64(logits_tensor)
+        if use_cache and self._kv_cache is not None:
+            cache["kv_cache"] = self._kv_cache
         return logits, cache
 
     def backward(

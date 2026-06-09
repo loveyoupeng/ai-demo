@@ -227,6 +227,7 @@ class PyTorchTurboQuantCache(nn.Module):
         num_bits: int = NUM_BITS,
         residual_window: int = RESIDUAL_WINDOW,
         batch_size: int = 1,
+        auto_clear: bool = False,
     ):
         """
         Initialize the TurboQuant KV cache.
@@ -239,17 +240,26 @@ class PyTorchTurboQuantCache(nn.Module):
             num_bits: Number of bits for quantization (default 4 -> 16 levels).
             residual_window: Recent tokens to keep in full precision.
             batch_size: Number of parallel sequences (default 1).
+            auto_clear: If True, compact the cache (shift oldest tokens
+                out and reduce capacity) each time ``append()`` is called.
+                The new buffer always holds up to ``max_seq_len`` tokens.
+                If False the buffer is fixed at the initial ``max_seq_len``
+                capacity and never shrinks.
         """
         super().__init__()
 
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = head_dim
+        self._auto_clear = auto_clear
         self.max_seq_len = max_seq_len
         self.num_bits = num_bits
         self.num_levels = 1 << num_bits
         self.residual_window = residual_window
         self.batch_size = batch_size
+
+        self._size = 0
+        self._has_compressed = False
 
         self._size = 0
         self._has_compressed = False
@@ -263,13 +273,18 @@ class PyTorchTurboQuantCache(nn.Module):
             num_levels=self.num_levels,
         )  # [num_levels] in [-1, 1]
 
-        # Full-precision (residual) storage:
-        # [batch, max_residual, num_heads, head_dim]
+        # Initial full-precision (residual) storage:
+        # [batch, max_res, num_heads, head_dim]
+        # max_res is either residual_window (normal) or max_seq_len when
+        # auto_clear is enabled so the buffer can hold the entire sequence
+        # in full precision for very short sequences.
+        max_res = self.max_seq_len if self._auto_clear else max(1, residual_window)
+
         self.register_buffer(
             "residual_k",
             torch.zeros(
                 batch_size,
-                max(1, residual_window),
+                max_res,
                 num_heads,
                 head_dim,
                 dtype=torch.float32,
@@ -279,7 +294,7 @@ class PyTorchTurboQuantCache(nn.Module):
             "residual_v",
             torch.zeros(
                 batch_size,
-                max(1, residual_window),
+                max_res,
                 num_heads,
                 head_dim,
                 dtype=torch.float32,
@@ -287,118 +302,61 @@ class PyTorchTurboQuantCache(nn.Module):
         )
 
         # Compressed storage (quantized, beyond residual window).
-        max_compressed = max(0, max_seq_len - residual_window)
+        max_compressed = max(
+            0, self.max_seq_len - (max_res if self._auto_clear else residual_window),
+        )
 
         if max_compressed > 0:
             self._has_compressed = True
+            self.max_compressed_slots = max_compressed
         else:
-            max_compressed = 1  # create at least one slot so buffers always exist
-            self._has_compressed = False
+            if not self._auto_clear:
+                self._has_compressed = False
+                self.max_compressed_slots = 1  # always create at least one slot
+            else:
+                # auto_clear: capacity may be zero if max_seq_len <= residual_window
+                self._has_compressed = False
+                self.max_compressed_slots = 0
 
-        # k_indices / k_norms: [max_compressed, num_heads] — always allocate
-        self.register_buffer(
-            "k_indices",
-            torch.zeros(max_compressed, num_heads, dtype=torch.uint8),
-        )
-        self.register_buffer(
-            "k_norms",
-            torch.zeros(max_compressed, num_heads, dtype=torch.float32),
-        )
-        self.register_buffer(
-            "v_indices",
-            torch.zeros(max_compressed, num_heads, dtype=torch.uint8),
-        )
-        self.register_buffer(
-            "v_norms",
-            torch.zeros(max_compressed, num_heads, dtype=torch.float32),
-        )
+        # k_indices / k_norms: [max_compressed, num_heads]
+        if self.max_compressed_slots > 0:
+            self.register_buffer(
+                "k_indices",
+                torch.zeros(
+                    self.max_compressed_slots,
+                    num_heads,
+                    dtype=torch.uint8,
+                ),
+            )
+            self.register_buffer(
+                "k_norms",
+                torch.zeros(
+                    self.max_compressed_slots,
+                    num_heads,
+                    dtype=torch.float32,
+                ),
+            )
+            self.register_buffer(
+                "v_indices",
+                torch.zeros(
+                    self.max_compressed_slots,
+                    num_heads,
+                    dtype=torch.uint8,
+                ),
+            )
+            self.register_buffer(
+                "v_norms",
+                torch.zeros(
+                    self.max_compressed_slots,
+                    num_heads,
+                    dtype=torch.float32,
+                ),
+            )
 
     @property
     def size(self) -> int:
         """Number of tokens currently stored in the cache."""
         return self._size
-
-    def append(self, k: torch.Tensor, v: torch.Tensor) -> None:
-        """
-        Append new K/V tokens to the cache.
-
-        Handles:
-        - Storing tokens in the residual window (full precision).
-        - Quantizing and storing older tokens (compressed).
-
-        Args:
-            k: New key tokens — [batch, num_heads, seq_len, head_dim]
-            v: New value tokens — [batch, num_heads, seq_len, head_dim]
-        """
-        batch, heads, seq_len, hd = k.shape
-        assert hd == self.head_dim
-        assert heads == self.num_heads
-
-        # Inference-only: process all tokens into a single growing
-        # sequence.  This matches the standard autoregressive-decoder
-        # pattern where only batch 0 is used.
-        b = 0
-        for t in range(seq_len):
-            if self._size >= self.max_seq_len:
-                break  # Cache is full
-
-            pos_in_total = self._size
-
-            k_token = k[b, :, t, :]  # [num_heads, head_dim]
-            v_token = v[b, :, t, :]  # [num_heads, head_dim]
-
-            if pos_in_total < self.residual_window:
-                # Store full precision in residual array
-                self.residual_k[b, pos_in_total, :, :] = k_token  # pyright: ignore[reportIndexIssue]
-                self.residual_v[b, pos_in_total, :, :] = v_token  # pyright: ignore[reportIndexIssue]
-            else:
-                # Quantize and store in compressed arrays
-                compressed_offset = pos_in_total - self.residual_window
-
-                if not self._has_compressed:
-                    # No compressed storage allocated, skip further tokens
-                    break
-
-                # Rotate each head's head_dim vector by the rotation matrix
-                k_rotated = k_token @ self.rotation_matrix  # [heads, head_dim]
-                v_rotated = v_token @ self.rotation_matrix  # [heads, head_dim]
-
-                # Compute per-head l2 norm: [num_heads]
-                k_norm = k_rotated.norm(dim=-1).clamp(min=1e-8)
-                v_norm = v_rotated.norm(dim=-1).clamp(min=1e-8)
-
-                # Normalize by norm: [heads, head_dim]
-                k_normalized = k_rotated / k_norm[:, None]
-                v_normalized = v_rotated / v_norm[:, None]
-
-                # Quantize each element: [heads * head_dim] -> indices
-                k_flat = k_normalized.reshape(-1)
-                v_flat = v_normalized.reshape(-1)
-
-                # For each element, find closest codebook level
-                k_codebook = self.codebook
-                k_diff = k_flat[:, None] - k_codebook[None, :]
-                k_idx = k_diff.abs().argmin(dim=-1).to(torch.uint8)
-
-                v_codebook = self.codebook
-                v_diff = v_flat[:, None] - v_codebook[None, :]
-                v_idx = v_diff.abs().argmin(dim=-1).to(torch.uint8)
-
-                # Store — cast to tensor for pyright clarity
-                k_idx_s = k_idx[:heads]
-                k_norm_s = k_norm[:heads]
-                v_idx_s = v_idx[:heads]
-                v_norm_s = v_norm[:heads]
-
-                if compressed_offset < self.k_indices.shape[0]:
-                    # Compressed storage - class-level annotations satisfy
-                    # subscripting, type ignore for register_buffer attrs
-                    self.k_indices[compressed_offset] = k_idx_s  # type: ignore[index]
-                    self.k_norms[compressed_offset] = k_norm_s  # type: ignore[index]
-                    self.v_indices[compressed_offset] = v_idx_s  # type: ignore[index]
-                    self.v_norms[compressed_offset] = v_norm_s  # type: ignore[index]
-
-            self._size += 1
 
     def get_kv(
         self,
@@ -417,13 +375,15 @@ class PyTorchTurboQuantCache(nn.Module):
         k_list: list[torch.Tensor] = []
         v_list: list[torch.Tensor] = []
 
-        for b in range(self.batch_size):
+        # Inference-only: process batch 0 (standard autoregressive-decoder
+        # pattern where only a single batch item is used).
+        for b in range(1):
             tokens: list[torch.Tensor] = []
             v_tokens: list[torch.Tensor] = []
 
             # 1. Residual tokens (full precision, at the tail)
-            # Stored at [0 .. min(size, residual_window) - 1]
-            n_residual = min(self._size, self.residual_window)
+            # Stored at [0 .. min(size, max_res) - 1]
+            n_residual = min(self._size, self.max_res)
             if n_residual > 0:
                 # Direct attribute access - class-level annotations satisfy
                 # pyright for register_buffer attributes
@@ -532,13 +492,242 @@ class PyTorchTurboQuantCache(nn.Module):
         # [compressed_size, num_heads, head_dim]
         return deq.unsqueeze(-1).expand(-1, -1, self.head_dim)
 
+    @property
+    def max_res(self) -> int:
+        """Maximum number of full-precision (residual) tokens currently stored."""
+        if self._auto_clear:
+            # With auto_clear the buffer may be smaller than
+            # self.residual_window — it tracks the actual capacity.
+            return min(self.max_seq_len, self.residual_window)
+        return self.residual_window
+
+    def _realloc_buffers(self, max_res: int, max_comp: int) -> None:
+        """Reallocate storage buffers to a new capacity.
+
+        When ``auto_clear`` is enabled the buffers may need to grow or
+        shrink dynamically.  We move tensors to plain attributes so their
+        shapes can change.
+
+        Args:
+            max_res: New full-precision (residual) capacity.
+            max_comp: New compressed-slot capacity.
+        """
+        if self.batch_size <= 0:
+            return
+
+        self.residual_k = torch.zeros(
+            self.batch_size, max_res, self.num_heads, self.head_dim,
+            dtype=torch.float32,
+        )
+        self.residual_v = torch.zeros(
+            self.batch_size, max_res, self.num_heads, self.head_dim,
+            dtype=torch.float32,
+        )
+        if max_comp > 0:
+            self.k_indices = torch.zeros(max_comp, self.num_heads, dtype=torch.uint8)
+            self.k_norms = torch.zeros(max_comp, self.num_heads, dtype=torch.float32)
+            self.v_indices = torch.zeros(max_comp, self.num_heads, dtype=torch.uint8)
+            self.v_norms = torch.zeros(max_comp, self.num_heads, dtype=torch.float32)
+        else:
+            self.k_indices = torch.zeros((0, self.num_heads), dtype=torch.uint8)
+            self.k_norms = torch.zeros((0, self.num_heads), dtype=torch.float32)
+            self.v_indices = torch.zeros((0, self.num_heads), dtype=torch.uint8)
+            self.v_norms = torch.zeros((0, self.num_heads), dtype=torch.float32)
+        self._has_compressed = max_comp > 0
+        self.max_compressed_slots = max_comp
+
+    def append(self, k: torch.Tensor, v: torch.Tensor) -> None:
+        """
+        Append new K/V tokens to the cache.
+
+        Handles:
+        - Storing tokens in the residual window (full precision).
+        - Quantizing and storing older tokens (compressed).
+        - Context compression when ``auto_clear`` is True (new tokens are
+          appended, then the oldest tokens are compacted so that the
+          total number of cached tokens never exceeds ``max_seq_len``).
+
+        Args:
+            k: New key tokens — [batch, num_heads, seq_len, head_dim]
+            v: New value tokens — [batch, num_heads, seq_len, head_dim]
+        """
+        batch, heads, seq_len, hd = k.shape
+        assert hd == self.head_dim
+        assert heads == self.num_heads
+
+        if seq_len == 0:
+            return
+
+        # ---- Context-compression (auto_clear) ----
+        # If adding these tokens would exceed max_seq_len we compact
+        # (shift the oldest tokens out) so that the new tokens are kept.
+        if self._auto_clear and self._size + seq_len > self.max_seq_len:
+            excess = self._size + seq_len - self.max_seq_len
+
+            # Compact: shift everything by ``excess`` in favour of new data.
+            self._compact(excess)
+
+        # ---- Normal append ----
+        # Inference-only: process batch 0 following the standard
+        # autoregressive-decoder pattern.  Each position is counted
+        # once in ``_size``.
+        for t in range(seq_len):
+            if self._size >= self.max_seq_len:
+                break  # Cache is full
+
+            pos_in_total = self._size
+
+            k_token = k[0, :, t, :]  # [num_heads, head_dim]
+            v_token = v[0, :, t, :]  # [num_heads, head_dim]
+
+            if pos_in_total < self.max_res:
+                # Store full precision in residual array
+                self.residual_k[0, pos_in_total, :, :].copy_(k_token)  # pyright: ignore[reportIndexIssue]
+                self.residual_v[0, pos_in_total, :, :].copy_(v_token)  # pyright: ignore[reportIndexIssue]
+            else:
+                # Quantize and store in compressed arrays
+                if not self._has_compressed:
+                    break  # No compressed storage, skip remaining
+
+                compressed_offset = pos_in_total - self.max_res
+
+                # Rotate each head's head_dim vector by the rotation matrix
+                k_rotated = k_token @ self.rotation_matrix  # [heads, head_dim]
+                v_rotated = v_token @ self.rotation_matrix  # [heads, head_dim]
+
+                # Compute per-head l2 norm: [num_heads]
+                k_norm = k_rotated.norm(dim=-1).clamp(min=1e-8)
+                v_norm = v_rotated.norm(dim=-1).clamp(min=1e-8)
+
+                # Normalize by norm: [heads, head_dim]
+                k_normalized = k_rotated / k_norm[:, None]
+                v_normalized = v_rotated / v_norm[:, None]
+
+                # Quantize each element: [heads * head_dim] -> indices
+                k_flat = k_normalized.reshape(-1)
+                v_flat = v_normalized.reshape(-1)
+
+                # For each element, find closest codebook level
+                k_codebook = self.codebook
+                k_diff = k_flat[:, None] - k_codebook[None, :]
+                k_idx = k_diff.abs().argmin(dim=-1).to(torch.uint8)
+
+                v_codebook = self.codebook
+                v_diff = v_flat[:, None] - v_codebook[None, :]
+                v_idx = v_diff.abs().argmin(dim=-1).to(torch.uint8)
+
+                # Store
+                k_idx_s = k_idx[:heads]
+                k_norm_s = k_norm[:heads]
+                v_idx_s = v_idx[:heads]
+                v_norm_s = v_norm[:heads]
+
+                if compressed_offset < self.k_indices.shape[0]:
+                    self.k_indices[compressed_offset].copy_(k_idx_s)  # pyright: ignore[reportIndexIssue]
+                    self.k_norms[compressed_offset].copy_(k_norm_s)  # pyright: ignore[reportIndexIssue]
+                    self.v_indices[compressed_offset].copy_(v_idx_s)  # pyright: ignore[reportIndexIssue]
+                    self.v_norms[compressed_offset].copy_(v_norm_s)  # pyright: ignore[reportIndexIssue]
+
+            self._size += 1
+
+    def _compact(self, num_to_remove: int) -> None:
+        """Shift cached data by ``num_to_remove`` in favour of newer tokens.
+
+        Used internally for context compression.  After compacting, the
+        oldest ``num_to_remove`` tokens are discarded and the remaining
+        slots shift forward.
+
+        Args:
+            num_to_remove: Number of oldest tokens to drop.
+        """
+        if num_to_remove <= 0 or num_to_remove >= self._size:
+            # Nothing to compact, or would empty the cache
+            self._size = max(0, self._size - num_to_remove)
+            # Zero out residual storage (keep shape)
+            self.residual_k[:, : self.max_res].zero_()
+            self.residual_v[:, : self.max_res].zero_()
+            if self._has_compressed:
+                self.k_indices.zero_()
+                self.k_norms.zero_()
+                self.v_indices.zero_()
+                self.v_norms.zero_()
+            return
+
+        new_size = self._size - num_to_remove
+        old_max_res = self.max_res
+        old_max_comp = self.max_compressed_slots
+
+        if num_to_remove >= old_max_res:
+            # All residual data is removed — shift everything down
+            shifted = self.residual_k[:, num_to_remove:old_max_res + num_to_remove][:, :new_size].clone()
+            self.residual_k[:, :new_size].copy_(shifted)
+            shifted_v = self.residual_v[:, num_to_remove:old_max_res + num_to_remove][:, :new_size].clone()
+            self.residual_v[:, :new_size].copy_(shifted_v)
+        else:
+            # Some residual data survives
+            shifted = self.residual_k[:, num_to_remove:old_max_res].clone()
+            self.residual_k[:, :old_max_res - num_to_remove].copy_(shifted)
+            shifted_v = self.residual_v[:, num_to_remove:old_max_res].clone()
+            self.residual_v[:, :old_max_res - num_to_remove].copy_(shifted_v)
+
+        # Compact compressed storage
+        if self._has_compressed:
+            old_comp_start = max(0, old_max_res - num_to_remove)
+            # Number of compressed slots to keep
+            old_comp = old_max_comp
+            new_comp_slots = max(0, old_comp - num_to_remove)
+
+            if old_comp > 0 and new_comp_slots > 0:
+                # Shift compressed data
+                self.k_indices[:new_comp_slots].copy_(
+                    self.k_indices[old_comp_start:old_comp_start + new_comp_slots]
+                )
+                self.k_norms[:new_comp_slots].copy_(
+                    self.k_norms[old_comp_start:old_comp_start + new_comp_slots]
+                )
+                self.v_indices[:new_comp_slots].copy_(
+                    self.v_indices[old_comp_start:old_comp_start + new_comp_slots]
+                )
+                self.v_norms[:new_comp_slots].copy_(
+                    self.v_norms[old_comp_start:old_comp_start + new_comp_slots]
+                )
+
+            # Zero out remaining compressed slots
+            if new_comp_slots < old_max_comp:
+                self.k_indices[new_comp_slots:].zero_()
+                self.k_norms[new_comp_slots:].zero_()
+                self.v_indices[new_comp_slots:].zero_()
+                self.v_norms[new_comp_slots:].zero_()
+
+        self._size = new_size
+
+    def compact_cache(self) -> None:
+        """Compact the cache, moving the oldest tokens out.
+
+        When ``auto_clear`` is set the cache may dynamically grow and
+        shrink.  This method shifts the oldest data out so that the cache
+        always holds at most ``max_seq_len`` tokens.
+
+        This is useful **after** a prompt has finished — during
+        autoregressive decoding the newest tokens are at the tail and
+        compacting pushes them further back, which means the next
+        ``append()`` call will have more room for new tokens.
+
+        In typical usage (short prompts, moderate sequence lengths), the
+        residual window (``residual_window``) tokens are kept in full
+        precision and everything older is compressed (4-bit).  After
+        compaction the full-precision window slides forward.
+        """
+        if self._size > self.max_seq_len:
+            self._compact(self._size - self.max_seq_len)
+
     def reset(self) -> None:
         """Clear the cache, resetting size to zero."""
         self._size = 0
         # Direct attribute access - class-level annotations satisfy pyright
         self.residual_k.zero_()
         self.residual_v.zero_()
-        if self._has_compressed:
+        if self._has_compressed and self.max_compressed_slots > 0:
             self.k_indices.zero_()
             self.k_norms.zero_()
             self.v_indices.zero_()
