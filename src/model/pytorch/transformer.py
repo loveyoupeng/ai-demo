@@ -498,7 +498,13 @@ class PyTorchTransformer(nn.Module):
 
         # Positional embedding from buffer
         pe = self._pos_embedding_module.get_buffer("pe")  # type: ignore[return-value]
-        x = x + pe[:seq_len, :].unsqueeze(0)  # [1, Seq_Len, Embed_Dim]
+        if kv_caches is not None and len(kv_caches) > 0 and seq_len == 1:
+            # Single-token AR step: PE for this token should be at the next
+            # free position (i.e. the size of the first layer's cache).
+            offset = kv_caches[0]._size
+            x = x + pe[offset : offset + 1, :].unsqueeze(0)
+        else:
+            x = x + pe[:seq_len, :].unsqueeze(0)  # [1, Seq_Len, Embed_Dim]
 
         # 2. Causal Mask
         if mask is None:

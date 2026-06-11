@@ -144,17 +144,21 @@ class PyTorchMultiHeadAttention(nn.Module):
             # to cover the full Q_Len × K_Len range using the causal structure.
             q_len, k_len = scores.shape[-2], scores.shape[-1]
             if mask.shape[-2] != q_len or mask.shape[-1] != k_len:
-                # Build a causal mask: each query position can attend to
-                # all key positions up to itself (or all past keys if beyond
-                # the original sequence length).
-                causal_mask = torch.ones(
+                # When using KV cache, the query may correspond to only the
+                # newest positions of the original sequence.  The most natural
+                # mapping is positional alignment: the last q_len rows of the
+                # expanded (q_len × k_len) causal mask should inherit the
+                # last q_len rows of the original mask, then the result is
+                # clamped to lower-triangular so every query can see at most
+                # all past keys.
+                # The last `orig_rows` rows of the original causal mask define
+                # which key positions each query position may attend to.
+                causal_mask: torch.Tensor = torch.zeros(
                     (q_len, k_len), dtype=mask.dtype, device=mask.device
                 )
-                causal_mask = torch.tril(causal_mask)
-                # The last `k_len` rows of the original mask define the causal structure
                 orig_rows = min(q_len, mask.shape[-2])
                 if orig_rows > 0:
-                    causal_mask[:orig_rows, : mask.shape[-1]] = mask[:orig_rows]
+                    causal_mask[-orig_rows:, : mask.shape[-1]] = mask[-orig_rows:]
                 mask = causal_mask
             scores = scores.masked_fill(mask == 0, float("-1e9"))
 
