@@ -249,13 +249,14 @@ def test_cache_autoregressive_generation():
         head_dim=embed_dim // num_heads,
         batch_size=1,
     )
+    kv_caches = [cache] * num_layers  # one cache per layer
 
     current = full_seq[:, :1].clone()
     for i in range(1, full_seq_len):
         cur_len = current.shape[1]
         mask = torch.tril(torch.ones((cur_len, cur_len), dtype=torch.float32))
         mask = (mask == 0).float() * -1e9
-        logits, _ = model(current, mask=mask, kv_cache=cache)
+        logits, _ = model(current, mask=mask, kv_caches=kv_caches)
         current = torch.cat([current, full_seq[:, i : i + 1]], dim=1)
 
     # --- Run without KV cache (feed full sequence at once) ---

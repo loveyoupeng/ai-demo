@@ -61,7 +61,7 @@ class PyTorchBackend(BaseTransformerBackend):
         self._num_heads = num_heads
         self._max_seq_len = max_seq_len
         self._auto_clear = auto_clear
-        self._kv_cache: PyTorchTurboQuantCache | None = None
+        self._kv_caches: list[PyTorchTurboQuantCache | None] = [None] * num_layers
         self._kv_cache_seq_len = 0
         self.model = PyTorchTransformer(
             vocab_size=vocab_size,
@@ -123,36 +123,47 @@ class PyTorchBackend(BaseTransformerBackend):
         tensor_input = torch.from_numpy(input_ids).to(torch.int64)
         tensor_mask = torch.from_numpy(mask) if mask is not None else None
         batch_size = input_ids.shape[0]
-        seq_len = input_ids.shape[1]
 
-        # Reset cache when input sequence length changes (new prompt).
-        if use_cache and self._kv_cache is not None and self._kv_cache_seq_len != seq_len:
-            self.model.eval()
+        # Build per-layer kv_caches list for model.forward()
+        if use_cache:
+            # Auto-create per-layer caches on first call
+            if all(c is None for c in self._kv_caches):
+                for i in range(self.model.num_layers):
+                    self._kv_caches[i] = PyTorchTurboQuantCache(
+                        embed_dim=self._embed_dim,
+                        num_heads=self._num_heads,
+                        max_seq_len=self._max_seq_len,
+                        head_dim=self._embed_dim // self._num_heads,
+                        batch_size=batch_size,
+                    )
+        else:
+            # Reset all caches when switching from cache to non-cache mode
+            for cache in self._kv_caches:
+                if cache is not None:
+                    cache.reset()
+                    cache._size = 0
             self._kv_cache_seq_len = 0
-            self._kv_cache.reset()
-            self._kv_cache_seq_len = seq_len
+            if kv_cache is not None:
+                kv_cache.reset()
 
-        # Auto-create cache when use_cache=True and no explicit cache provided.
-        if use_cache and not kv_cache and self._kv_cache is None:
-            self._kv_cache = PyTorchTurboQuantCache(
-                embed_dim=self._embed_dim,
-                num_heads=self._num_heads,
-                max_seq_len=self._max_seq_len,
-                head_dim=self._embed_dim // self._num_heads,
-                batch_size=batch_size,
+        # Forward with per-layer caches or None
+        if use_cache and kv_cache is None:
+            kv_caches = self._kv_caches if all(c is not None
+                                               for c in self._kv_caches) else None
+            logits_tensor, cache = self.model.forward(
+                tensor_input, mask=tensor_mask, kv_caches=kv_caches
             )
-            self._kv_cache_seq_len = seq_len
-            kv_cache = self._kv_cache
-
-        logits_tensor, cache = self.model.forward(
-            tensor_input,
-            mask=tensor_mask,
-            kv_cache=kv_cache,
-        )
+        else:
+            # Legacy: single kv_cache passed from outside
+            single_cache = kv_cache
+            per_layer = [single_cache] * self.model.num_layers if single_cache else None
+            logits_tensor, cache = self.model.forward(
+                tensor_input, mask=tensor_mask, kv_caches=per_layer
+            )
 
         logits = self._to_np_float64(logits_tensor)
-        if use_cache and self._kv_cache is not None:
-            cache["kv_cache"] = self._kv_cache
+        if use_cache and self._kv_caches[0] is not None:
+            cache["kv_caches"] = self._kv_caches
         return logits, cache
 
     def backward(

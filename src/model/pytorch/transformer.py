@@ -439,11 +439,24 @@ class PyTorchTransformer(nn.Module):
 
         # 2. Transformer Stack
         # Each block: [B, L, D] -> [B, L, D]
+        # Per-layer KV caches for autoregressive generation.
+        # Each layer has its own cache so that one forward pass only appends
+        # once per layer to one cache (not N times to a shared cache).
+        head_dim = embed_dim // num_heads
         self.blocks = nn.ModuleList()
+        self._kv_caches: list[PyTorchTurboQuantCache] = []
         for _ in range(num_layers):
             mha = PyTorchMultiHeadAttention(embed_dim, num_heads)
             moe = PyTorchMoELayer(embed_dim, num_experts)
             self.blocks.append(PyTorchTransformerBlock(embed_dim, mha, moe))
+            self._kv_caches.append(
+                PyTorchTurboQuantCache(
+                    embed_dim=embed_dim,
+                    num_heads=num_heads,
+                    max_seq_len=max_seq_len,
+                    head_dim=head_dim,
+                )
+            )
 
         # 3. Language Model Head (Linear projection to vocab)
         # [Embed_Dim, Vocab_Size]
@@ -460,7 +473,7 @@ class PyTorchTransformer(nn.Module):
         self,
         input_ids: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-        kv_cache: Optional[PyTorchTurboQuantCache] = None,
+        kv_caches: Optional[list[PyTorchTurboQuantCache]] = None,
     ) -> tuple[torch.Tensor, dict[str, object]]:
         """
         Forward pass through the full transformer.
@@ -468,7 +481,10 @@ class PyTorchTransformer(nn.Module):
         Args:
             input_ids: Integer token IDs [Batch, Seq_Len]
             mask: Causal mask [Seq_Len, Seq_Len]
-            kv_cache: Optional TurboQuant KV cache for autoregressive generation.
+            kv_caches: Optional list of N caches, one per layer, for
+                autoregressive generation.  If ``kv_caches[i]`` is passed,
+                block ``i`` appends its K/V to that cache.  When
+                ``kv_caches is None`` no caching is used (training mode).
 
         Returns:
             logits: [Batch, Seq_Len, Vocab_Size]
@@ -492,9 +508,11 @@ class PyTorchTransformer(nn.Module):
 
         # 3. Transformer Blocks
         # Each block preserves [B, L, D] through residual + sub-layer
+        # Per-layer kv_caches: each block appends to its own cache, not a shared one.
         block_caches: list[dict[str, object]] = []
-        for block in self.blocks:
-            block_out, block_cache = block.forward(x, mask=mask, kv_cache=kv_cache)
+        for i, block in enumerate(self.blocks):
+            layer_cache = kv_caches[i] if kv_caches is not None else None
+            block_out, block_cache = block.forward(x, mask=mask, kv_cache=layer_cache)
             block_caches.append(block_cache)
             x = block_out
 
