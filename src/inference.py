@@ -12,19 +12,21 @@ class AutoregressiveGenerator:
     """
 
     def __init__(
-        self, model: Transformer, tokenizer: CharTokenizer, temperature: float = 1.0
+        self, model: Transformer, tokenizer: CharTokenizer, temperature: float = 1.0, use_cache: bool = True
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.temperature = temperature
+        self.use_cache = use_cache
 
-    def generate(self, prompt: str, num_new_tokens: int) -> np.ndarray:
+    def generate(self, prompt: str, num_new_tokens: int, use_cache: bool | None = None) -> np.ndarray:
         """
         Generates new tokens given a prompt.
 
         Args:
             prompt: The starting text.
             num_new_tokens: How many tokens to generate.
+            use_cache: Whether to use KV cache. Defaults to ``self.use_cache``.
 
         Returns:
             A numpy array of all token IDs (prompt + generated).
@@ -43,10 +45,11 @@ class AutoregressiveGenerator:
         if is_empty_prompt:
             current_ids = np.array([[0]], dtype=np.int32)
 
-        for _ in range(num_new_tokens):
-            # 2. Get logits from the model
+        for step in range(num_new_tokens):
+            # 2. Get logits from the model with KV cache enabled
             # [1, current_len, vocab_size]
-            logits, _ = self.model.forward(current_ids)
+            use_kv = self.use_cache if use_cache is None else use_cache
+            logits, _ = self.model.forward(current_ids, use_cache=use_kv, cache_idx=step + prompt_len)
 
             # 3. Focus on the LAST predicted token
             # [1, vocab_size]

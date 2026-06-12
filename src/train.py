@@ -15,9 +15,12 @@ import argparse
 import os
 import urllib.request
 from pathlib import Path
-from typing import cast
+
+import numpy as np
+import torch
 
 from model.transformer import Transformer
+from model.pytorch.transformer import PyTorchTransformer
 from loss import CrossEntropyLoss
 from optimizer import Adam
 from training.data_loader import TextDataLoader
@@ -167,22 +170,129 @@ def run_train(args: argparse.Namespace) -> None:
     print(f"{'=' * 60}")
 
 
+def _generate_numpy(
+    model: Transformer,
+    tokenizer: CharTokenizer,
+    prompt: str,
+    num_new_tokens: int,
+    temperature: float,
+) -> np.ndarray:
+    """Generate tokens using NumPy model with autoregressive generation."""
+    generator = AutoregressiveGenerator(model, tokenizer, temperature=temperature)
+    return generator.generate(prompt, num_new_tokens=num_new_tokens)
+
+
+def _generate_torch(
+    model: PyTorchTransformer,
+    tokenizer: CharTokenizer,
+    prompt: str,
+    num_new_tokens: int,
+    temperature: float,
+) -> np.ndarray:
+    """Generate tokens using PyTorch model with autoregressive generation and KV cache."""
+    from model.pytorch.attention_kvcache import PyTorchTurboQuantCache
+
+    current_ids = tokenizer.encode(prompt).reshape(1, -1)
+    prompt_len = current_ids.shape[1]
+    is_empty_prompt = prompt_len == 0
+    if is_empty_prompt:
+        current_ids = np.array([[0]], dtype=np.int32)
+
+    # Access num_heads from first block's MHA to construct KV caches
+    num_heads: int = model.blocks[0].mha.num_heads  # type: ignore[no-any-return]
+    embed_dim: int = model.embed_dim
+    num_layers: int = model.num_layers
+    kv_caches = [
+        PyTorchTurboQuantCache(
+            embed_dim=embed_dim, num_heads=num_heads,
+            max_seq_len=64, head_dim=embed_dim // num_heads,
+        )
+        for _ in range(num_layers)
+    ]
+
+    generated_ids: list[int] = []
+    for step in range(num_new_tokens):
+        input_tensor = torch.from_numpy(current_ids).to(torch.int64)
+        logits_tensor, _ = model.forward(input_tensor, kv_caches=kv_caches)
+        logits_np = logits_tensor.detach().float().cpu().numpy().astype(np.float64)
+
+        next_token_logits = logits_np[0, -1, :] / max(temperature, 1e-8)
+        max_val = np.max(next_token_logits)
+        exp_logits = np.exp(next_token_logits - max_val)
+        probs = exp_logits / (np.sum(exp_logits) + 1e-12)
+
+        next_token_id = int(np.random.choice(len(probs), p=probs))
+        next_token_id_arr = np.array([[next_token_id]], dtype=np.int32)
+        current_ids = np.concatenate([current_ids, next_token_id_arr], axis=1)
+        generated_ids.append(next_token_id)
+
+    if is_empty_prompt:
+        return np.array(generated_ids, dtype=np.int32)
+    return np.array(generated_ids, dtype=np.int32)
+
+
 def run_infer(args: argparse.Namespace) -> None:
     """Run inference on a trained model."""
-    from model.transformer import Transformer
+    import pickle
+    import numpy as np
 
-    checkpoint = ModelCheckpoint()
-    loaded = checkpoint.load_checkpoint(
-        args.checkpoint_name, Transformer, CharTokenizer
+    backend_name = args.backend
+
+    with open(os.path.join("checkpoints", f"{args.checkpoint_name}.pkl"), "rb") as f:
+        data = pickle.load(f)
+
+    params = data["model_params"]
+
+    import torch
+
+    # Detect source format from value types in params dict
+    source_is_torch = any(isinstance(v, torch.Tensor) for v in params.values() if v is not None)
+    source_is_numpy = any(isinstance(v, np.ndarray) for v in params.values() if v is not None)
+
+    if source_is_torch and backend_name == "numpy":
+        # PT→NP: transpose lm_head [vocab, embed_dim] → [embed_dim, vocab]
+        # then convert tensors to numpy arrays
+        if "lm_head" in params and isinstance(params["lm_head"], torch.Tensor):
+            params["lm_head"] = params["lm_head"].T
+        for k, v in params.items():
+            if isinstance(v, torch.Tensor):
+                params[k] = v.detach().float().numpy()
+    elif source_is_numpy and backend_name == "torch":
+        # NP→PT: transpose lm_head [embed_dim, vocab] → [vocab, embed_dim]
+        # and convert numpy arrays to torch tensors
+        if "lm_head" in params and isinstance(params["lm_head"], np.ndarray):
+            params["lm_head"] = torch.tensor(params["lm_head"]).T.contiguous()
+        for k, v in params.items():
+            if isinstance(v, np.ndarray):
+                params[k] = torch.tensor(v)
+
+    tokenizer = CharTokenizer()
+    tokenizer.chars = data["tokenizer"].chars
+    tokenizer.vocab_size = data["tokenizer"].vocab_size
+    tokenizer.char_to_int = data["tokenizer"].char_to_int
+    tokenizer.int_to_char = data["tokenizer"].int_to_char
+
+    backend_map = {
+        "numpy": ("Transformer", Transformer, _generate_numpy),
+        "torch": ("PyTorch", PyTorchTransformer, _generate_torch),
+    }
+    name, cls, gen_fn = backend_map[backend_name]
+
+    model = cls(
+        vocab_size=data["vocab_size"],
+        embed_dim=data["embed_dim"],
+        num_layers=data["num_layers"],
+        num_heads=data["num_heads"],
+        num_experts=data["num_experts"],
+        max_seq_len=data["max_seq_len"],
     )
-    model: Transformer = cast(Transformer, loaded[0])
-    tokenizer: CharTokenizer = cast(CharTokenizer, loaded[1])
+    model.set_params(params)
 
-    generator = AutoregressiveGenerator(model, tokenizer, temperature=args.temp)
     prompt = args.prompt or "the"
+    print(f"Running inference with backend: {backend_name}")
     print(f"Prompt: '{prompt}'")
 
-    generated_ids = generator.generate(prompt, num_new_tokens=args.gen_len)
+    generated_ids = gen_fn(model, tokenizer, prompt, args.gen_len, args.temp)
     generated_text = tokenizer.decode(generated_ids)
     print(f"Generated: {generated_text}")
 
@@ -259,6 +369,12 @@ def main() -> None:
         default="numpy",
         choices=["numpy", "torch"],
         help="Backend to use for inference (numpy or torch)",
+    )
+    infer_parser.add_argument(
+        "--num_new_tokens", type=int, default=50, help="Number of tokens to generate (alias for --gen_len)"
+    )
+    infer_parser.add_argument(
+        "--temperature", type=float, default=1.0, help="Sampling temperature (alias for --temp)"
     )
 
     # Generate subcommand

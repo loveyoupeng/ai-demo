@@ -426,6 +426,7 @@ class PyTorchTransformer(nn.Module):
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
         self.num_layers = num_layers
+        self._max_seq_len = max_seq_len
 
         # 1. Embeddings
         # Token embedding: lookup table [V, D]
@@ -468,6 +469,11 @@ class PyTorchTransformer(nn.Module):
         )
         registry.register("pytorch", "pos_embedding.pe", "pos_embedding.pe")
         registry.register("pytorch", "lm_head.weight", "lm_head.weight")
+
+    @property
+    def max_seq_len(self) -> int:
+        """Return the maximum sequence length."""
+        return self._max_seq_len
 
     def forward(
         self,

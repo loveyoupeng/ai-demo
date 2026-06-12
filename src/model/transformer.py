@@ -200,6 +200,7 @@ class Transformer:
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
         self.num_layers = num_layers
+        self.max_seq_len = max_seq_len
 
         # 1. Embeddings
         self.token_embedding = TokenEmbedding(vocab_size, embed_dim)
