@@ -26,6 +26,41 @@ from trainer import Trainer
 from utils.checkpoint import ModelCheckpoint
 from inference import AutoregressiveGenerator
 from backends.numpy.numpy_backend import NumPyBackend
+from backends.pytorch.pytorch_backend import PyTorchBackend
+
+
+def get_backend(
+    backend_name: str,
+    vocab_size: int,
+    embed_dim: int,
+    num_layers: int,
+    num_heads: int,
+    num_experts: int,
+    max_seq_len: int,
+):
+    """Create a backend instance based on the specified backend name."""
+    if backend_name == "numpy":
+        return NumPyBackend(
+            vocab_size=vocab_size,
+            embed_dim=embed_dim,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            num_experts=num_experts,
+            max_seq_len=max_seq_len,
+        )
+    elif backend_name == "torch":
+        return PyTorchBackend(
+            vocab_size=vocab_size,
+            embed_dim=embed_dim,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            num_experts=num_experts,
+            max_seq_len=max_seq_len,
+        )
+    else:
+        raise ValueError(
+            f"Unsupported backend: {backend_name}. Use 'numpy' or 'torch'."
+        )
 
 
 DATASETS_DIR = Path(__file__).parent.parent / "datasets"
@@ -68,7 +103,8 @@ def run_train(args: argparse.Namespace) -> None:
     print(f"Vocabulary size: {vocab_size}")
 
     # 3. Build model
-    backend = NumPyBackend(
+    backend = get_backend(
+        args.backend,
         vocab_size=vocab_size,
         embed_dim=args.embed_dim,
         num_layers=args.layers,
@@ -197,6 +233,13 @@ def main() -> None:
     train_parser.add_argument(
         "--data", type=str, default=None, help="Path to training data text file"
     )
+    train_parser.add_argument(
+        "--backend",
+        type=str,
+        default="numpy",
+        choices=["numpy", "torch"],
+        help="Backend to use for training (numpy or torch)",
+    )
 
     # Inference subcommand
     infer_parser = subparsers.add_parser("infer", help="Run inference on trained model")
@@ -209,6 +252,13 @@ def main() -> None:
     )
     infer_parser.add_argument(
         "--temp", type=float, default=1.0, help="Sampling temperature"
+    )
+    infer_parser.add_argument(
+        "--backend",
+        type=str,
+        default="numpy",
+        choices=["numpy", "torch"],
+        help="Backend to use for inference (numpy or torch)",
     )
 
     # Generate subcommand
