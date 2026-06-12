@@ -55,8 +55,8 @@ uv run src/train.py infer --checkpoint_name my_model --prompt "the"
 uv run src/train.py infer \
     --checkpoint_name my_model \
     --prompt "Once upon a" \
-    --gen_len 50 \
-    --temp 0.8
+    --num_new_tokens 50 \
+    --temperature 0.8
 ```
 
 ## Cross-Backend Validation
