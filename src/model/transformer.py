@@ -240,15 +240,34 @@ class Transformer:
         # [Batch, Seq_Len, Embed_Dim]
         x = self.token_embedding.forward(input_ids)
         pos_pe = self.pos_embedding.forward()  # [Max_Seq_Len, Embed_Dim]
-        # Add positional embedding with broadcasting
-        # x: [Batch, Seq_Len, Embed_Dim]
-        # pos_pe[:seq_len, :]: [Seq_Len, Embed_Dim]
-        # We add [None, :seq_len, :] to broadcasting
-        x = x + pos_pe[:seq_len, :][None, :, :]
+        
+        # When using KV cache, the new token's PE should be at its absolute
+        # position (cache_idx), not at position 0. This matches the PyTorch
+        # implementation which adds pe[offset:offset+seq_len] in cache mode.
+        if use_cache and cache_idx is not None and seq_len == 1:
+            # Add positional embedding only when processing a single token
+            # in cache mode (autoregressive step). For multi-token inputs
+            # with cache enabled, use positions [0:seq_len] to match
+            # non-cache behavior (cache mode affects attention mask + KV
+            # accumulation, not PE offset).
+            x = x + pos_pe[cache_idx:cache_idx + seq_len][None, :, :]
+        else:
+            # Add positional embedding with broadcasting
+            # x: [Batch, Seq_Len, Embed_Dim]
+            # pos_pe[:seq_len, :]: [Seq_Len, Embed_Dim]
+            # We add [None, :seq_len, :] to broadcasting
+            x = x + pos_pe[:seq_len, :][None, :, :]
 
         # 2. Causal Mask
         if mask is None:
-            mask = np.tril(np.ones((seq_len, seq_len)))
+            # When using KV cache, only the new token is processed but the
+            # mask must cover Q_Len x K_Len where K_Len includes accumulated
+            # cached tokens.  Full causal mask at the effective sequence length.
+            if use_cache and cache_idx is not None:
+                effective_len = cache_idx
+            else:
+                effective_len = seq_len
+            mask = np.tril(np.ones((effective_len, effective_len)))
 
         # 3. Transformer Blocks
         block_caches = []

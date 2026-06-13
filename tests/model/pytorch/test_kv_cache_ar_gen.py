@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import torch
-from src.model.pytorch.transformer import PyTorchTransformer
-from src.model.pytorch.attention_kvcache import PyTorchTurboQuantCache
+from model.pytorch.transformer import PyTorchTransformer
+from model.pytorch.attention_kvcache import PyTorchTurboQuantCache
 
 
 def test_cache_size_increases_by_input_length():

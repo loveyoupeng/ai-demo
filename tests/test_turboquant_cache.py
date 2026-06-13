@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import torch
-import src.model.pytorch.attention_kvcache as kvcache_module
-from src.model.pytorch.attention_kvcache import (
+import model.pytorch.attention_kvcache as kvcache_module
+from model.pytorch.attention_kvcache import (
     PyQuantize,
     PyTorchTurboQuantCache,
 )
@@ -224,8 +224,8 @@ def test_cache_autoregressive_generation():
     num_gen = 5
 
     import torch
-    from src.model.pytorch.attention_kvcache import PyTorchTurboQuantCache
-    from src.model.pytorch.transformer import PyTorchTransformer
+    from model.pytorch.attention_kvcache import PyTorchTurboQuantCache
+    from model.pytorch.transformer import PyTorchTransformer
 
     full_seq_len = prompt_len + num_gen
     full_seq = torch.randint(0, vocab_size, (1, full_seq_len))

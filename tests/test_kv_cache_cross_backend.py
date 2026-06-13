@@ -14,27 +14,49 @@ from model.pytorch.transformer import PyTorchTransformer
 
 def _copy_params(np_model: Transformer, pt_model: PyTorchTransformer) -> None:
     """Copy weights from NumPy model to PyTorch model using get_params/set_params."""
-    key_map = {
-        "token_embedding.embedding.weight": "token_embedding.weight",
-        "lm_head": "lm_head.weight",
-        "blocks.0.ln1.weight": "blocks.0.ln1.weight",
-        "blocks.0.ln1.bias": "blocks.0.ln1.bias",
-        "blocks.0.ln2.weight": "blocks.0.ln2.weight",
-        "blocks.0.ln2.bias": "blocks.0.ln2.bias",
-        "blocks.0.mha.W_q.weight": "blocks.0.mha.W_q.weight",
-        "blocks.0.mha.W_k.weight": "blocks.0.mha.W_k.weight",
-        "blocks.0.mha.W_v.weight": "blocks.0.mha.W_v.weight",
-        "blocks.0.mha.W_o.weight": "blocks.0.mha.W_o.weight",
-        "blocks.1.ln1.weight": "blocks.1.ln1.weight",
-        "blocks.1.ln2.weight": "blocks.1.ln2.weight",
-        "blocks.1.mha.W_q.weight": "blocks.0.mha.W_q.weight",
-        "blocks.1.mha.W_k.weight": "blocks.0.mha.W_k.weight",
-        "blocks.1.mha.W_v.weight": "blocks.0.mha.W_v.weight",
-        "blocks.1.mha.W_o.weight": "blocks.0.mha.W_o.weight",
-    }
-
     np_params = np_model.get_params()
     pt_params = pt_model.state_dict()
+
+    # NumPy key (from np_model.get_params()) -> PT key (from pt_model.state_dict())
+    key_map = {
+        "token_embedding.weights": "token_embedding.weight",
+        "lm_head": "lm_head.weight",
+        "blocks.0.ln1.gamma": "blocks.0.ln1.gamma",
+        "blocks.0.ln1.beta": "blocks.0.ln1.beta",
+        "blocks.0.ln2.gamma": "blocks.0.ln2.gamma",
+        "blocks.0.ln2.beta": "blocks.0.ln2.beta",
+        "blocks.0.mha.W_q": "blocks.0.mha.W_q",
+        "blocks.0.mha.W_k": "blocks.0.mha.W_k",
+        "blocks.0.mha.W_v": "blocks.0.mha.W_v",
+        "blocks.0.mha.W_o": "blocks.0.mha.W_o",
+        "blocks.0.moe.router.weights": "blocks.0.moe.router.w",
+        "blocks.0.moe.expert.0.W1": "blocks.0.moe.experts.0.w1",
+        "blocks.0.moe.expert.0.b1": "blocks.0.moe.experts.0.b1",
+        "blocks.0.moe.expert.0.W2": "blocks.0.moe.experts.0.w2",
+        "blocks.0.moe.expert.0.b2": "blocks.0.moe.experts.0.b2",
+        "blocks.0.moe.expert.1.W1": "blocks.0.moe.experts.1.w1",
+        "blocks.0.moe.expert.1.b1": "blocks.0.moe.experts.1.b1",
+        "blocks.0.moe.expert.1.W2": "blocks.0.moe.experts.1.w2",
+        "blocks.0.moe.expert.1.b2": "blocks.0.moe.experts.1.b2",
+    }
+    if np_model.num_layers >= 2:
+        for layer_idx in range(2, np_model.num_layers):
+            layer_key = f"blocks.{layer_idx}"
+            key_map[f"{layer_key}.ln1.gamma"] = f"{layer_key}.ln1.gamma"
+            key_map[f"{layer_key}.ln1.beta"] = f"{layer_key}.ln1.beta"
+            key_map[f"{layer_key}.ln2.gamma"] = f"{layer_key}.ln2.gamma"
+            key_map[f"{layer_key}.ln2.beta"] = f"{layer_key}.ln2.beta"
+            key_map[f"{layer_key}.mha.W_q"] = f"{layer_key}.mha.W_q"
+            key_map[f"{layer_key}.mha.W_k"] = f"{layer_key}.mha.W_k"
+            key_map[f"{layer_key}.mha.W_v"] = f"{layer_key}.mha.W_v"
+            key_map[f"{layer_key}.mha.W_o"] = f"{layer_key}.mha.W_o"
+            for expert_idx in range(np_model.blocks[0].moe.num_experts):
+                key_map[f"{layer_key}.moe.router.weights"] = f"{layer_key}.moe.router.w"
+                key_map[f"{layer_key}.moe.expert.{expert_idx}.W1"] = f"{layer_key}.moe.experts.{expert_idx}.w1"
+                key_map[f"{layer_key}.moe.expert.{expert_idx}.b1"] = f"{layer_key}.moe.experts.{expert_idx}.b1"
+                key_map[f"{layer_key}.moe.expert.{expert_idx}.W2"] = f"{layer_key}.moe.experts.{expert_idx}.w2"
+                key_map[f"{layer_key}.moe.expert.{expert_idx}.b2"] = f"{layer_key}.moe.experts.{expert_idx}.b2"
+
     for np_key, pt_key in key_map.items():
         if np_key == "lm_head":
             pt_params[pt_key] = torch.from_numpy(np_params[np_key].T)
@@ -59,14 +81,21 @@ def _make_identical_model_params(vocab_size: int, embed_dim: int, num_layers: in
 
 
 def _ar_generate_numpy(model, tokenizer, prompt, num_new_tokens, temperature=0.0):
-    """Simulate KV-cache-aware AR generation with NumPy model."""
+    """Simulate KV-cache-aware AR generation with NumPy model.
+
+    Pure step-by-step generation: each step embeds + processes only the new token.
+    The KV cache is empty at start, matching the PyTorch implementation.
+    """
     current_ids = tokenizer.encode(prompt).reshape(1, -1).astype(np.int32)
     prompt_len = current_ids.shape[1]
     generated = []
 
+    # Pre-fill KV cache with prompt tokens first
+    _, _ = model.forward(current_ids, use_cache=True, cache_idx=0)
+
     for step in range(num_new_tokens):
-        logits, _ = model.forward(current_ids, use_cache=True, cache_idx=step + prompt_len)
-        # For deterministic generation (temperature=0), argmax
+        new_token_ids = current_ids[:, -1:]  # [1, 1] — only new token
+        logits, _ = model.forward(new_token_ids, use_cache=True, cache_idx=prompt_len + step)
         next_token = logits[:, -1, :].argmax(axis=-1)
         next_token = next_token.reshape(1, 1).astype(np.int32)
         current_ids = np.concatenate([current_ids, next_token], axis=1)
@@ -97,6 +126,10 @@ def _ar_generate_pytorch(model, tokenizer, prompt, num_new_tokens, temperature=0
             )
             for _ in range(num_layers)
         ]
+
+    # Pre-fill KV cache with prompt tokens first
+    if use_kv_cache:
+        model(torch.tensor(current_ids, dtype=torch.int64), kv_caches=kv_caches)
 
     for step in range(num_new_tokens):
         x = current_ids[:, -1:]  # [1, 1]
@@ -132,7 +165,6 @@ def test_kv_cache_cross_backend_parity():
     tok = CharTokenizer("the quick brown fox jumps over the lazy dog. " * 20)
 
     torch.manual_seed(42)
-    np_model.train()
 
     # Generate with both backends
     np_tokens = _ar_generate_numpy(np_model, tok, prompt, num_new_tokens, temperature=0.0)

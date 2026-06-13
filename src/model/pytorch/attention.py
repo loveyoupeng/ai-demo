@@ -151,14 +151,9 @@ class PyTorchMultiHeadAttention(nn.Module):
                 # last q_len rows of the original mask, then the result is
                 # clamped to lower-triangular so every query can see at most
                 # all past keys.
-                # The last `orig_rows` rows of the original causal mask define
-                # which key positions each query position may attend to.
-                causal_mask: torch.Tensor = torch.zeros(
-                    (q_len, k_len), dtype=mask.dtype, device=mask.device
+                causal_mask: torch.Tensor = torch.tril(
+                    torch.ones((q_len, k_len), dtype=mask.dtype, device=mask.device)
                 )
-                orig_rows = min(q_len, mask.shape[-2])
-                if orig_rows > 0:
-                    causal_mask[-orig_rows:, : mask.shape[-1]] = mask[-orig_rows:]
                 mask = causal_mask
             scores = scores.masked_fill(mask == 0, float("-1e9"))
 

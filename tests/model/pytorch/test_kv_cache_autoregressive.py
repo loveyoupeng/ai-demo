@@ -1,10 +1,9 @@
 """Autoregressive step: 1 token in, cache grows by 1 per layer."""
 from __future__ import annotations
 
-import pytest
 import torch
-from src.model.pytorch.transformer import PyTorchTransformer
-from src.model.pytorch.attention_kvcache import PyTorchTurboQuantCache
+from model.pytorch.transformer import PyTorchTransformer
+from model.pytorch.attention_kvcache import PyTorchTurboQuantCache
 
 
 def test_autoregressive_cache_accumulation_per_layer():

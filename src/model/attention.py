@@ -49,7 +49,9 @@ class MultiHeadAttention:
         self.W_o = np.random.randn(embed_dim, embed_dim) * 0.01
 
         # Cache for KV values during inference (KV Cache)
+        # Keyed by layer number (0, 1, 2, ...) for accumulation across steps
         self.kv_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        self._cache_step: int = 0  # Track current step for cache accumulation
 
     def forward(
         self,
@@ -90,13 +92,21 @@ class MultiHeadAttention:
 
         # --- KV CACHE LOGIC (for autoregressive generation) ---
         if use_cache and cache_idx is not None:
-            if cache_idx in self.kv_cache:
-                prev_K, prev_V = self.kv_cache[cache_idx]
-                # Concat along the sequence dimension (axis 2)
-                # [Batch, Num_Heads, Prev_Seq_Len + Current_Seq_Len, Head_Dim]
+            # Accumulate K/V across single-token inference steps.
+            # When processing a single token at a time (the correct AR pattern),
+            # each step contributes exactly 1 token to the K,V cache, so we can
+            # safely concatenate the previous step's cache with the current one.
+            # For multi-token inputs with cache enabled, the cache tracks all
+            # input tokens as a single block without accumulating across calls.
+            step = self._cache_step
+            self._cache_step += 1
+            if seq_len == 1 and step > 0 and (step - 1) in self.kv_cache:
+                prev_K, prev_V = self.kv_cache[step - 1]
+                # Concatenate along the sequence dimension (axis 2)
+                # [Batch, Num_Heads, Prev_Seq_Len + 1, Head_Dim]
                 K = np.concatenate([prev_K, K], axis=2)
                 V = np.concatenate([prev_V, V], axis=2)
-            self.kv_cache[cache_idx] = (K, V)
+            self.kv_cache[step] = (K, V)
         # ----------------------
 
         # 3. Scaled Dot-Product Attention
@@ -104,10 +114,16 @@ class MultiHeadAttention:
         d_k = self.head_dim
         scores = np.matmul(Q, K.transpose(0, 1, 3, 2)) / np.sqrt(d_k)
 
-        # 4. Apply causal mask if provided
+        # 4. Apply causal mask if provided.
+        # In KV cache mode, mask is [Q_seq, K_seq] where K_seq includes cached.
+        # If mask was built for the full sequence it may be oversized; we clip
+        # it to [Q_Len, K_Len] to match scores' final two dims.
         if mask is not None:
-            # mask shape: [Seq_Len, Seq_Len]
-            # scores shape: [Batch, Num_Heads, Q_Seq_Len, K_Seq_Len]
+            q_len, k_len = scores.shape[-2], scores.shape[-1]
+            if mask.shape[0] != q_len or mask.shape[1] != k_len:
+                # Build a fresh causal mask matching the actual Q/K lengths
+                causal = np.tril(np.ones((q_len, k_len)))
+                mask = causal
             scores = np.where(mask == 0, -1e9, scores)
 
         # 5. Softmax to get attention weights: [Batch, Num_Heads, Q_Seq_Len, K_Seq_Len]

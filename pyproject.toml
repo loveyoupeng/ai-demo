@@ -18,6 +18,6 @@ pythonpath = ["src", "tests"]
 testpaths = ["tests"]
 
 [tool.pyright]
-reportPrivateImportUsage = false
-include = ["src"]
+include = ["src", "tests"]
+extraPaths = ["src", "tests"]
 # Only check src/, not tests/ (tests have cross-imports that pyright can't resolve)

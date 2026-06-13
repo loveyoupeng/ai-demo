@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 import torch
-from src.model.pytorch.transformer import PyTorchTransformer
-from src.model.pytorch.attention_kvcache import PyTorchTurboQuantCache
+from model.pytorch.transformer import PyTorchTransformer
+from model.pytorch.attention_kvcache import PyTorchTurboQuantCache
 
 
 class TestKVCacheShapeMismatch:
