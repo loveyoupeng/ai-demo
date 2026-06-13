@@ -32,6 +32,7 @@ def numerical_gradient_moe(moe, x, eps=1e-6):
 
 @pytest.mark.timeout(20)
 def test_moe_layer_backward_numerical():
+    np.random.seed(42)
     batch_size = 2
     seq_len = 3
     embed_dim = 4
