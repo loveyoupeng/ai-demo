@@ -1,23 +1,42 @@
 [project]
 name = "ai-demo"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-requires-python = ">=3.14"
+description = "Decoder-only transformer learning project in 4 backends"
+requires-python = ">=3.10"
 dependencies = [
-    "numpy>=2.4.6",
-    "pyright>=1.1.409",
-    "pytest>=9.0.3",
-    "pytest-timeout>=2.4.0",
-    "ruff>=0.15.14",
-    "torch>=2.12.0",
+    "numpy>=1.24",
+    "datasets>=2.14",
+    "tokenizers>=0.15",
+    "tqdm>=4.65",
+    "transformers>=4.40",
 ]
+optional-dependencies = {triton = ["triton>=2.2"], cuda = ["cuda-python>=12.0"]}
+dev = ["pyright>=1.1", "pytest>=7.0", "pytest-timeout>=2.0", "ruff>=0.4"]
+
+[project.scripts]
+train = "src.numpy.cli:main"
+infer = "src.numpy.cli:main"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "C90"]
+ignore = ["E501"]  # let formatter handle line lengths
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src", "tests"]
 testpaths = ["tests"]
+timeout = 300
+pythonpath = ["shared"]
 
 [tool.pyright]
-include = ["src", "tests"]
-extraPaths = ["src", "tests"]
-# Only check src/, not tests/ (tests have cross-imports that pyright can't resolve)
+include = ["shared"]
+extraPaths = ["shared", "tests"]
+reportMissingImports = true
+reportUnknownMemberType = false
+reportUnknownParameterType = false
+reportUnknownVariableType = false

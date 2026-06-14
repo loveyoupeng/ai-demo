@@ -83,6 +83,8 @@
 | Top-2 MoE routing | Default 2 experts per token – enough capacity, not too sparse |
 | TurboQuant: 1-bit KV | Google's approach, dramatic memory savings for long sequences |
 | Checkpoint shared format | Any backend trains → any backend infers |
+| Strict TDD: test file first, then implementation | User explicitly required this; all agents must follow |
+| Smaller test cases for debugging | When tests fail, isolate the issue with minimal test case — don't over-reason |
 
 ## Validation Strategy
 

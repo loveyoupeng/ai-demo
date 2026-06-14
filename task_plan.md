@@ -4,70 +4,44 @@
 Build a fully functional decoder-only transformer LLM from scratch in 4 implementations (NumPy, PyTorch, Triton, CUDA) with identical behavior, trained on TinyStories, featuring RoPE, MHA, MoE, GQA, and multi-level KV caching for educational purposes.
 
 ## Current Phase
-Phase 1 - Planning Review
+Phase 1A — Shared Foundation (Execution in `docs/phase_a_plan.md`)
 
-## Phases
+---
 
-### Phase 0: Project Initialization
-- [ ] Verify empty project structure after cleanup
-- [ ] Set up pyproject.toml with dependencies
-- [ ] Create directory structure
-- [ ] Set up CI/lint/config files
-- [ ] Confirm plan with user
-
-### Phase 1: Shared Foundations & Testing Infrastructure
-- [ ] Create config module (all hyperparameters)
-- [ ] Create tokenizer (BytePair or CharLevel)
-- [ ] Create dataset loader (TinyStories)
-- [ ] Create shared base model interface
-- [ ] Set up cross-backend test infrastructure
-- [ ] Create parameter naming conventions & constants
+## High-Level Roadmap
 
 ### Phase 2: NumPy Implementation (Learning-Focused)
-- [ ] Core layers: Embedding, LayerNorm, RMSNorm, SiLU, GeLU
-- [ ] RoPE position encoding (configurable)
-- [ ] MHA (configurable: heads, dim, GQA toggle)
-- [ ] FeedForward + MoE (configurable: num_experts, topk)
-- [ ] TransformerBlock + DecoderStack
-- [ ] Full model class with forward/backward
-- [ ] Loss functions: CrossEntropy
-- [ ] Optimizers: SGD, Adam
-- [ ] KV Cache: Naive implementation
-- [ ] KV Cache: TurboQuant implementation
-- [ ] Training loop (full)
-- [ ] Inference engine (autoregressive)
-- [ ] Checkpoint save/load
-- [ ] CLI for training and inference
-- [ ] Comprehensive unit tests
-- [ ] Cross-backend reference tests
+- All core layers, RoPE, MHA, MoE, TransformerBlock, DecoderStack
+- Loss functions, optimizers, KV Cache (Naive + TurboQuant)
+- Training loop, inference engine, checkpoint save/load
+- CLI, unit tests, cross-backend reference tests
 
 ### Phase 3: PyTorch Implementation (Production-Ready)
-- [ ] All layers using PyTorch nn.Module with same interfaces
-- [ ] Same forward/backward behavior as NumPy
-- [ ] Same KV cache, training loop, inference
-- [ ] Proper docstrings for production use
-- [ ] Cross-backend parity tests
-- [ ] Performance benchmarks comparison
+- Same architecture as NumPy, `nn.Module` based
+- Cross-backend parity tests, benchmarks
 
 ### Phase 4: Triton Implementation (GPU Kernel Optimization)
-- [ ] Compute kernels: LayerNorm, attention, MoE routing, activation
-- [ ] Same model architecture using Triton kernels
-- [ ] Inference with triton-accelerated kernels
-- [ ] Cross-backend parity tests
-- [ ] Profiling vs NumPy/PyTorch comparison
+- Custom kernels: LayerNorm, attention, MoE routing, activations
+- Parity tests, profiling vs NumPy/PyTorch
 
 ### Phase 5: CUDA Implementation (Lowest Level)
-- [ ] Compute kernels via nvidia/cuda-python bindings
-- [ ] Same model architecture using CUDA kernels
-- [ ] Inference with CUDA-accelerated kernels
-- [ ] Cross-backend parity tests
-- [ ] Performance benchmarks
+- `nvidia/cuda-python` bindings, same architecture
+- Parity tests, benchmarks
 
 ### Phase 6: Integration & Verification
-- [ ] Train model on TinyStories using each backend
-- [ ] Save/load checkpoint cross-validation
-- [ ] Generate identical outputs for same query across backends
-- [ ] Final e2e verification script
+- Train on TinyStories per backend -> save/load cross-validation -> identical outputs -> final e2e script
+
+---
+
+## Phase 1A: Shared Foundation (Canonical Plan)
+📍 **This is the active execution plan.** See `docs/phase_a_plan.md` for full details, agent statuses, and gates.
+
+**Summary:** Create `shared/` module with config, constants, tokenizer, dataset loaders for all 4 backends.
+- ✅ `shared/config.py` — 41 tests pass
+- ⏳ `shared/tokenizer.py` — 21 tests pass
+- ❌ `shared/constants.py` — 52/79 tests fail (needs full impl)
+- ❌ `shared/dataset.py` — tests timeout (download issue)
+- ⏳ `shared/checkpoint.py` — BLOCKED by constants + dataset
 
 ## Key Questions
 1. ~~Tokenizer choice for TinyStories~~ (confirmed: BytePair + Char fallback)
@@ -81,7 +55,7 @@ Phase 1 - Planning Review
 ## Decisions Made
 | Decision | Rationale |
 |----------|-----------|
-| NumPy first, then torch/triton/cuda | Learning path; NumPy is reference |
+| NumPy first, then torch/triton/cuda | Learning path; NumPy is reference implementation |
 | TinyStories dataset | Small, clean, ideal for demo |
 | Shared config + tokenizer | Single source of truth across backends |
 | TurboQuant for KV | Google research, 1-bit compression |
@@ -90,9 +64,5 @@ Phase 1 - Planning Review
 ## Errors Encountered
 | Error | Attempt | Resolution |
 |-------|---------|------------|
-| N/A | - | Clean slate, no errors yet |
-
-## Notes
-- Cleaned existing codebase to start fresh
-- Planning files created for tracking progress
-- Awaiting user approval before implementation begins
+| Previous TDD agents ignored "test-first" requirement | 1 | User enforced: write ALL tests first, run to confirm fail, then implement |
+| Tests timeout downloading TinyStories dataset | 1 | Tests already written; dataset loading expected to take ~1 min first time |
