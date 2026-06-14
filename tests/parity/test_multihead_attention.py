@@ -13,6 +13,7 @@ class TestMultiHeadAttentionParity:
         self.head_dim = self.embed_dim // self.num_heads
         self.numpy_mha = NumPyAttention(self.embed_dim, self.num_heads)
         self.pytorch_mha = PyTorchAttention(self.embed_dim, self.num_heads)
+        self.pytorch_mha.double()
         self.seq_len = 16
         self.batch_size = 2
 
@@ -36,7 +37,7 @@ class TestMultiHeadAttentionParity:
         """Forward pass should match between NumPy and PyTorch."""
         np.random.seed(42)
         x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
-            np.float32
+            np.float64
         )
         mask = np.tril(np.ones((self.seq_len, self.seq_len)))
 
@@ -53,14 +54,14 @@ class TestMultiHeadAttentionParity:
         """Backward pass for W_q should match."""
         np.random.seed(42)
         x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
-            np.float32
+            np.float64
         )
         mask = np.tril(np.ones((self.seq_len, self.seq_len)))
 
         _, numpy_cache = self.numpy_mha.forward(x, mask)
         grad_output = np.random.randn(
             self.batch_size, self.seq_len, self.embed_dim
-        ).astype(np.float32)
+        ).astype(np.float64)
         cache = {
             "context": numpy_cache["context"],
             "Q": numpy_cache["Q"],
@@ -89,13 +90,13 @@ class TestMultiHeadAttentionParity:
         """Backward pass for W_k should match."""
         np.random.seed(42)
         x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
-            np.float32
+            np.float64
         )
         mask = np.tril(np.ones((self.seq_len, self.seq_len)))
         _, numpy_cache = self.numpy_mha.forward(x, mask)
         grad_output = np.random.randn(
             self.batch_size, self.seq_len, self.embed_dim
-        ).astype(np.float32)
+        ).astype(np.float64)
         cache = {
             "context": numpy_cache["context"],
             "Q": numpy_cache["Q"],
@@ -124,13 +125,13 @@ class TestMultiHeadAttentionParity:
         """Backward pass for W_v should match."""
         np.random.seed(42)
         x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
-            np.float32
+            np.float64
         )
         mask = np.tril(np.ones((self.seq_len, self.seq_len)))
         _, numpy_cache = self.numpy_mha.forward(x, mask)
         grad_output = np.random.randn(
             self.batch_size, self.seq_len, self.embed_dim
-        ).astype(np.float32)
+        ).astype(np.float64)
         cache = {
             "context": numpy_cache["context"],
             "Q": numpy_cache["Q"],
@@ -159,13 +160,13 @@ class TestMultiHeadAttentionParity:
         """Backward pass for W_o should match."""
         np.random.seed(42)
         x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
-            np.float32
+            np.float64
         )
         mask = np.tril(np.ones((self.seq_len, self.seq_len)))
         _, numpy_cache = self.numpy_mha.forward(x, mask)
         grad_output = np.random.randn(
             self.batch_size, self.seq_len, self.embed_dim
-        ).astype(np.float32)
+        ).astype(np.float64)
         cache = {
             "context": numpy_cache["context"],
             "Q": numpy_cache["Q"],
@@ -194,13 +195,13 @@ class TestMultiHeadAttentionParity:
         """Backward pass for input x should match."""
         np.random.seed(42)
         x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
-            np.float32
+            np.float64
         )
         mask = np.tril(np.ones((self.seq_len, self.seq_len)))
         _, numpy_cache = self.numpy_mha.forward(x, mask)
         grad_output = np.random.randn(
             self.batch_size, self.seq_len, self.embed_dim
-        ).astype(np.float32)
+        ).astype(np.float64)
         cache = {
             "context": numpy_cache["context"],
             "Q": numpy_cache["Q"],
@@ -226,7 +227,7 @@ class TestMultiHeadAttentionParity:
         """Forward pass without mask should match."""
         np.random.seed(42)
         x = np.random.randn(self.batch_size, self.seq_len, self.embed_dim).astype(
-            np.float32
+            np.float64
         )
 
         numpy_out, _ = self.numpy_mha.forward(x)

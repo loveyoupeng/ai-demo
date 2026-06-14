@@ -7,6 +7,7 @@ import torch.nn as nn
 import numpy as np
 from core.registry import registry
 from model.pytorch.attention_kvcache import PyTorchTurboQuantCache
+from model.pytorch.rope import apply_rope as _apply_rope_pt, reverse_rope as _reverse_rope_pt, compute_theta as _compute_theta_pt
 
 
 class PyTorchMultiHeadAttention(nn.Module):
@@ -91,6 +92,7 @@ class PyTorchMultiHeadAttention(nn.Module):
         x: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         kv_cache: Optional[PyTorchTurboQuantCache] = None,
+        use_rope: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """
         Compute multi-head attention.
@@ -130,8 +132,30 @@ class PyTorchMultiHeadAttention(nn.Module):
 
         # 3. KV cache integration — store new K/V, retrieve full history.
         if kv_cache is not None:
+            cache_size: int = kv_cache.size
             kv_cache.append(K, V)
             K, V = kv_cache.get_kv()
+
+            # 2b. Apply RoPE to Q and K with correct absolute positions
+            if use_rope:
+                # Q corresponds to new tokens at positions [cache_size, ..., cache_size+seq_len-1]
+                q_positions = torch.arange(cache_size, cache_size + seq_len, device=x.device, dtype=torch.float32)
+                rope_theta_q = _compute_theta_pt(q_positions, self.head_dim)
+                Q = _apply_rope_pt(Q, rope_theta_q)
+                # K covers the full sequence [0, 1, 2, ..., total_positions-1]
+                total_k_len = K.shape[-2]  # k_len is cache_size + seq_len (may cap at max_seq_len)
+                k_positions = torch.arange(total_k_len, device=x.device, dtype=torch.float32)
+                rope_theta_k = _compute_theta_pt(k_positions, self.head_dim)
+                K = _apply_rope_pt(K, rope_theta_k)
+                self._forward_rope_theta = rope_theta_k
+        elif use_rope:
+            # 2b. Apply RoPE to Q and K (no KV cache — standard path)
+            rope_theta = _compute_theta_pt(torch.arange(seq_len, device=x.device, dtype=torch.float32), self.head_dim)
+            Q = _apply_rope_pt(Q, rope_theta)
+            K = _apply_rope_pt(K, rope_theta)
+            self._forward_rope_theta = rope_theta
+        else:
+            self._forward_rope_theta = None
 
         # 3. Scaled dot-product attention: [Batch, Num_Heads, Q_Len, K_Len]
         scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.head_dim)
@@ -244,12 +268,24 @@ class PyTorchMultiHeadAttention(nn.Module):
             - torch.sum(d_attn_weights * attn_weights, dim=-1, keepdim=True)
         )
 
-        # 4. Scale by sqrt(d_k)
+        # 4. Apply mask gradient (same as NumPy backward)
+        if mask is not None:
+            d_scores = d_scores * mask
+
+        # 4b. Scale by sqrt(d_k)
         d_scores = d_scores * np.sqrt(self.head_dim)
 
         # 5. Gradient w.r.t. Q and K
         d_Q = torch.matmul(d_scores, K)
         d_K = torch.matmul(d_scores.transpose(-2, -1), Q)
+
+        # 5b. Reverse-rotate d_Q/d_K: these are ∂L/∂Q_rotated, need ∂L/∂Q_raw
+        theta = getattr(self, "_forward_rope_theta", None)
+        if theta is not None:
+            # NumPy: reverse_rope receives [B, S, H, D] via d_Q.transpose(0,2,1,3)
+            # PyTorch reverse_rope: expects [B, H, S, D] — same as d_Q currently
+            d_Q = _reverse_rope_pt(d_Q, theta)
+            d_K = _reverse_rope_pt(d_K, theta)
 
         # 6. Reshape gradients back to [Batch, Seq_Len, Embed_Dim]
         d_Q = d_Q.transpose(1, 2).reshape(batch_size, seq_len, self.embed_dim)

@@ -70,9 +70,9 @@ class Router:
 
         w = self.last_routing_weights
 
-        # Softmax backward: d_logits = d_probs - w * sum(d_probs * w, axis=-1, keepdims=True)
+        # Softmax backward: d_logits = w * (d_probs - sum(w * d_probs, axis=-1, keepdims=True))
         term2 = np.sum(d_probs * w, axis=-1, keepdims=True)
-        d_logits = d_probs - (w * term2)
+        d_logits = w * (d_probs - term2)
 
         d_weights = np.dot(
             x.reshape(-1, embed_dim).T, d_logits.reshape(-1, num_experts)

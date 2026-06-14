@@ -430,14 +430,8 @@ class PyTorchTransformer(nn.Module):
         self._max_seq_len = max_seq_len
 
         # 1. Embeddings
-        # Token embedding: lookup table [V, D]
+        # Token embedding: lookup table [V, D] (RoPE provides positional encoding in MHA)
         self.token_embedding = nn.Embedding(vocab_size, embed_dim)
-        # Positional encoding as a registered buffer (non-trainable)
-        self.pos_embedding = nn.Sequential(
-            _PositionalEmbedding(max_seq_len, embed_dim),
-            # Wrap so it behaves like a module with get_params/set_params
-        )
-        self._pos_embedding_module = _PositionalEmbedding(max_seq_len, embed_dim)
 
         # 2. Transformer Stack
         # Each block: [B, L, D] -> [B, L, D]
@@ -468,7 +462,6 @@ class PyTorchTransformer(nn.Module):
         registry.register(
             "pytorch", "token_embedding.embedding.weight", "token_embedding.weight"
         )
-        registry.register("pytorch", "pos_embedding.pe", "pos_embedding.pe")
         registry.register("pytorch", "lm_head.weight", "lm_head.weight")
 
     @property
@@ -499,19 +492,9 @@ class PyTorchTransformer(nn.Module):
         """
         batch_size, seq_len = input_ids.shape
 
-        # 1. Token + Positional Embeddings
+        # 1. Token Embedding (RoPE provides positional encoding in MHA)
         # [Batch, Seq_Len, Embed_Dim]
         x = self.token_embedding(input_ids)
-
-        # Positional embedding from buffer
-        pe = self._pos_embedding_module.get_buffer("pe")  # type: ignore[return-value]
-        if kv_caches is not None and len(kv_caches) > 0 and seq_len == 1:
-            # Single-token AR step: PE for this token should be at the next
-            # free position (i.e. the size of the first layer's cache).
-            offset = kv_caches[0]._size
-            x = x + pe[offset : offset + 1, :].unsqueeze(0)
-        else:
-            x = x + pe[:seq_len, :].unsqueeze(0)  # [1, Seq_Len, Embed_Dim]
 
         # 2. Causal Mask
         if mask is None:
@@ -638,10 +621,6 @@ class PyTorchTransformer(nn.Module):
                 params[f"blocks.{i}.{k}"] = v
         # LM Head
         params["lm_head"] = self.lm_head.weight
-        # Positional Embedding (buffer, not a trainable param, but included for parity)
-        pe = self._pos_embedding_module.get_buffer("pe")  # type: ignore[return-value]
-        if pe is not None:
-            params["pos_embedding.pe"] = pe
         return params
 
     def set_params(self, params: dict[str, object]) -> None:
@@ -709,55 +688,4 @@ class PyTorchTransformer(nn.Module):
                     self.lm_head.weight.copy_(cast(torch.Tensor, val))
 
 
-class _PositionalEmbedding(nn.Module):
-    r"""
-    Internal helper for positional encoding as a registered buffer.
 
-    Computes fixed sinusoidal positional encodings:
-
-    .. math::
-
-        \text{PE}_{(pos, 2i)} = \sin(pos / 10000^{2i/d}), \quad
-        \text{PE}_{(pos, 2i+1)} = \cos(pos / 10000^{2i/d})
-
-    The resulting matrix is :math:`[MaxSeqLen, D]` and is added to token
-    embeddings. This class is wrapped by ``PyTorchTransformer`` and
-    mirrors :class:`~src.model.layers.PositionalEmbedding` from the
-    NumPy implementation.
-
-    >>> import torch
-    >>> pe = _PositionalEmbedding(max_seq_len=32, embed_dim=64)
-    >>> x = torch.randn(2, 8, 64)
-    >>> out = pe(x)
-    >>> out.shape
-    torch.Size([2, 8, 64])
-    >>> # Buffer is non-trainable
-    >>> "pe" in pe.get_buffer("pe") or True
-    True
-    """
-
-    def __init__(self, max_seq_len: int, embed_dim: int):
-        super().__init__()
-        # Positional encoding matrix: [Max_Seq_Len, Embed_Dim]
-        pe = torch.zeros(max_seq_len, embed_dim, dtype=torch.float32)
-        position = torch.arange(0, max_seq_len, dtype=torch.float32).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, embed_dim, 2, dtype=torch.float32)
-            * -(torch.log(torch.tensor(10000.0)) / embed_dim)
-        )
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Add positional encoding to input embeddings."""
-        pe = self.get_buffer("pe")  # type: ignore[arg-type]
-        return x + pe[: x.shape[1], :]
-
-    def get_params(self) -> dict[str, torch.Tensor]:
-        """Return the positional encoding buffer (non-trainable)."""
-        return {"pe": self.get_buffer("pe")}  # type: ignore[return-value]
-
-    def set_params(self, params: dict[str, object]) -> None:
-        """Positional embeddings are fixed — no parameters to load."""
-        pass

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from model.rope import apply_rope, compute_theta, reverse_rope
+
 
 class MultiHeadAttention:
     r"""
@@ -59,6 +61,7 @@ class MultiHeadAttention:
         mask: np.ndarray | None = None,
         use_cache: bool = False,
         cache_idx: int | None = None,
+        use_rope: bool = True,
     ) -> tuple[np.ndarray, dict[str, object]]:
         """
         Args:
@@ -89,6 +92,18 @@ class MultiHeadAttention:
         V = V.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(
             0, 2, 1, 3
         )
+
+        # Store RoPE theta for backward pass (reverse rotation of d_Q/d_K)
+        rope_theta = None
+        # Apply RoPE to Q and K (in [B, h, L, d] format via apply_rope which handles 4D)
+        if use_rope:
+            rope_theta = compute_theta(
+                np.arange(seq_len, dtype=np.float64), self.head_dim
+            )
+            # apply_rope expects [B, L, H, D] format, Q/K are [B, H, L, D]
+            Q = apply_rope(Q.transpose(0, 2, 1, 3), rope_theta).transpose(0, 2, 1, 3)
+            K = apply_rope(K.transpose(0, 2, 1, 3), rope_theta).transpose(0, 2, 1, 3)
+            self._forward_rope_theta = rope_theta
 
         # --- KV CACHE LOGIC (for autoregressive generation) ---
         if use_cache and cache_idx is not None:
@@ -148,6 +163,7 @@ class MultiHeadAttention:
             "attn_weights": attn_weights,
             "context": context_out,
             "mask": mask,
+            "rope_theta": rope_theta,
         }
 
         return output, cache
@@ -229,9 +245,17 @@ class MultiHeadAttention:
         d_Q = np.matmul(d_scores, K)
         d_K = np.matmul(d_scores.transpose(0, 1, 3, 2), Q)
 
-        # 6. Reshape gradients back to [Batch, Seq_Len, Embed_Dim]
-        d_Q = d_Q.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
-        d_K = d_K.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
+        # 5b. Reverse-rotate d_Q/d_K: these are ∂L/∂Q_rotated, need ∂L/∂Q_raw
+        if getattr(self, "_forward_rope_theta", None) is not None:
+            d_Q = reverse_rope(d_Q.transpose(0, 2, 1, 3), self._forward_rope_theta).reshape(
+                batch_size, seq_len, self.embed_dim
+            )
+            d_K = reverse_rope(d_K.transpose(0, 2, 1, 3), self._forward_rope_theta).reshape(
+                batch_size, seq_len, self.embed_dim
+            )
+        else:
+            d_Q = d_Q.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
+            d_K = d_K.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
         d_V = d_V.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
 
         # 7. Gradients for W_q, W_k, W_v

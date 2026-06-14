@@ -40,7 +40,7 @@ def _copy_params(np_model: Transformer, pt_model: PyTorchTransformer) -> None:
         "blocks.0.moe.expert.1.b2": "blocks.0.moe.experts.1.b2",
     }
     if np_model.num_layers >= 2:
-        for layer_idx in range(2, np_model.num_layers):
+        for layer_idx in range(1, np_model.num_layers):
             layer_key = f"blocks.{layer_idx}"
             key_map[f"{layer_key}.ln1.gamma"] = f"{layer_key}.ln1.gamma"
             key_map[f"{layer_key}.ln1.beta"] = f"{layer_key}.ln1.beta"
@@ -50,7 +50,7 @@ def _copy_params(np_model: Transformer, pt_model: PyTorchTransformer) -> None:
             key_map[f"{layer_key}.mha.W_k"] = f"{layer_key}.mha.W_k"
             key_map[f"{layer_key}.mha.W_v"] = f"{layer_key}.mha.W_v"
             key_map[f"{layer_key}.mha.W_o"] = f"{layer_key}.mha.W_o"
-            for expert_idx in range(np_model.blocks[0].moe.num_experts):
+            for expert_idx in range(np_model.blocks[layer_idx].moe.num_experts):
                 key_map[f"{layer_key}.moe.router.weights"] = f"{layer_key}.moe.router.w"
                 key_map[f"{layer_key}.moe.expert.{expert_idx}.W1"] = f"{layer_key}.moe.experts.{expert_idx}.w1"
                 key_map[f"{layer_key}.moe.expert.{expert_idx}.b1"] = f"{layer_key}.moe.experts.{expert_idx}.b1"

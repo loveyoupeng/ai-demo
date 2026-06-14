@@ -195,7 +195,7 @@ class Transformer:
         max_seq_len: int = 512,
     ):
 
-        from model.layers import TokenEmbedding, PositionalEmbedding
+        from model.layers import TokenEmbedding
 
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
@@ -204,7 +204,6 @@ class Transformer:
 
         # 1. Embeddings
         self.token_embedding = TokenEmbedding(vocab_size, embed_dim)
-        self.pos_embedding = PositionalEmbedding(max_seq_len, embed_dim)
 
         # 2. Transformer Stack
         self.blocks = []
@@ -236,27 +235,9 @@ class Transformer:
         """
         batch_size, seq_len = input_ids.shape
 
-        # 1. Token + Positional Embeddings
+        # 1. Token Embedding (RoPE provides positional encoding in MHA)
         # [Batch, Seq_Len, Embed_Dim]
         x = self.token_embedding.forward(input_ids)
-        pos_pe = self.pos_embedding.forward()  # [Max_Seq_Len, Embed_Dim]
-        
-        # When using KV cache, the new token's PE should be at its absolute
-        # position (cache_idx), not at position 0. This matches the PyTorch
-        # implementation which adds pe[offset:offset+seq_len] in cache mode.
-        if use_cache and cache_idx is not None and seq_len == 1:
-            # Add positional embedding only when processing a single token
-            # in cache mode (autoregressive step). For multi-token inputs
-            # with cache enabled, use positions [0:seq_len] to match
-            # non-cache behavior (cache mode affects attention mask + KV
-            # accumulation, not PE offset).
-            x = x + pos_pe[cache_idx:cache_idx + seq_len][None, :, :]
-        else:
-            # Add positional embedding with broadcasting
-            # x: [Batch, Seq_Len, Embed_Dim]
-            # pos_pe[:seq_len, :]: [Seq_Len, Embed_Dim]
-            # We add [None, :seq_len, :] to broadcasting
-            x = x + pos_pe[:seq_len, :][None, :, :]
 
         # 2. Causal Mask
         if mask is None:
