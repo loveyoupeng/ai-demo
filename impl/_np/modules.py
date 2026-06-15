@@ -814,3 +814,99 @@ class Linear:
         if bias is not None:
             out += bias  # broadcast bias over batch dims
         return out
+
+
+class TransformerBlock:
+    """Standard decoder-only transformer block.
+
+        Parameters
+        ----------
+        embed_dim : int
+            Input/output embedding dimension.
+        n_heads : int
+            Number of attention heads.
+        n_experts : int
+            Number of MoE experts.
+        ff_dim : int
+            Hidden dimension for MoE experts.
+        k : int
+            Number of top experts to activate per token.
+        rope_dim : int
+            Number of head dimensions for RoPE (0 = no RoPE).
+        seed : int
+            Random seed for weight initialization.
+
+        Forward
+        -------
+        x : np.ndarray, shape (batch_size, seq_len, embed_dim)
+
+        Returns
+        -------
+        out : np.ndar
+
+    [...4 lines truncated...]
+
+            h = x + MHA(ln1(x)) + MoE(ln2(x + MHA(ln1(x))))
+
+            where:
+              ln1 = RMSNorm, ln2 = RMSNorm
+              MHA = MultiHeadAttention (with optional RoPE)
+              MoE = Mixture of Experts (with top-k routing)
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        n_heads: int,
+        n_experts: int,
+        ff_dim: int,
+        k: int = 2,
+        rope_dim: int = 0,
+        seed: int = 0,
+    ) -> None:
+        self.n_heads = n_heads
+        self.n_experts = n_experts
+        self.k = k
+
+        # RMSNorm weights — gamma for layer normalization
+        self.ln1_gamma = np.ones(embed_dim, dtype=np.float32)
+        self.ln2_gamma = np.ones(embed_dim, dtype=np.float32)
+
+        # Multi-Head Attention
+        self.mha = MultiHeadAttention(embed_dim, n_heads=n_heads, rope_dim=rope_dim, seed=seed + 2)
+
+        # Mixture of Experts
+        self.moe = MoE(embed_dim, n_experts=n_experts, ff_dim=ff_dim, k=k, seed=seed + 3)
+
+    def forward(self, x: np.ndarray) -> np.ndarray:
+        """Forward pass through the transformer block.
+
+        Parameters
+        ----------
+        x : np.ndarray, shape (batch_size, seq_len, embed_dim)
+
+        Returns
+        -------
+        out : np.ndarray, shape (batch_size, seq_len, embed_dim)
+        """
+        # Stream 1: Attention
+        # ln1: (B, S, D) → (B, S, D) — layer norm
+        ln1_out = RMSNorm().forward(x, self.ln1_gamma)  # (B, S, D)
+
+        # MHA: (B, S, D) → (B, S, D) — self-attention output
+        attn_out = self.mha.forward(ln1_out)  # (B, S, D)
+
+        # First residual: x + attn_out  — (B, S, D)
+        h = x + attn_out  # (B, S, D)
+
+        # Stream 2: MoE
+        # ln2: (B, S, D) → (B, S, D) — layer norm of residual
+        ln2_out = RMSNorm().forward(h, self.ln2_gamma)  # (B, S, D)
+
+        # MoE: (B, S, D) → (B, S, D) — mixture of experts output
+        moe_out = self.moe.forward(ln2_out)  # (B, S, D)
+
+        # Second residual: h + moe_out  — (B, S, D)
+        out = h + moe_out  # (B, S, D)
+
+        return out
