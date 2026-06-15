@@ -114,32 +114,34 @@ class TextDataset:
 
     def get_sequences(
         self,
-        num_samples: int,
+        num_batches: int = 1,
         batch_size: int = 8,
-    ) -> list[tuple[list[int], list[int]]]:
-        """Generate random training sequences from the token stream.
+    ) -> list[tuple[list[list[int]], list[list[int]]]]:
+        """Generate random training batches from the token stream.
 
-        Samples `num_samples` random windows from the concatenated token
-        stream. Each window has `context_length` tokens; the target is
-        the same window shifted by 1 position (standard next-token prediction).
+        Samples `num_batches` random batches from the concatenated token
+        stream. Each batch contains `batch_size` sequences of
+        `context_length` tokens; target is the same window shifted by 1.
 
         Args:
-            num_samples: Number of (input, target) pairs to generate.
-            batch_size: Number of samples per batch (used for grouping).
+            num_batches: Number of batches to generate.
+            batch_size: Number of sequences per batch.
 
         Returns:
-            List of (input_ids, target_ids) tuples.
-            Each element: ([context_length] ints, [context_length] ints)
+            List of (input_batch, target_batch) tuples.
+            Each batch: ([batch_size, context_length] ints, [batch_size, context_length] ints)
 
         Raises:
             ValueError: If no token data is available.
 
         Example:
             >>> ds = TextDataset(stories, tokenizer)
-            >>> seqs = ds.get_sequences(10, batch_size=5)
-            >>> len(seqs)  # 10 samples
+            >>> batches = ds.get_sequences(num_batches=10, batch_size=5)
+            >>> len(batches)  # 10 batches
             10
-            >>> len(seqs[0][0])  # window length
+            >>> len(batches[0][0])  # batch_size = 5 sequences
+            5
+            >>> len(batches[0][0][0])  # context_length = 256 tokens
             256
         """
         if not self.token_ids:
@@ -149,21 +151,32 @@ class TextDataset:
             )
 
         max_start = max(1, len(self.token_ids) - self.context_length - 1)
-        sequences: list[tuple[list[int], list[int]]] = []
+        batches: list[tuple[list[list[int]], list[list[int]]]] = []
 
-        for _ in range(num_samples):
-            start = self.rng.randint(0, max_start)
-            window = self.token_ids[start : start + self.context_length]
+        for _ in range(num_batches):
+            batch_input: list[list[int]] = []
+            batch_target: list[list[int]] = []
+            for _ in range(batch_size):
+                start = self.rng.randint(0, max_start)
+                window = self.token_ids[start : start + self.context_length]
+                if len(window) < self.context_length:
+                    continue
+                # Input: [t0, t1, ..., tN], Target: [t1, t2, ..., tN+1] (shifted by 1)
+                # Both have same length (context_length) for next-token prediction.
+                # If the token stream ends, pad target with the last known token.
+                end_pos = start + self.context_length
+                if end_pos < len(self.token_ids):
+                    target = window[1:] + [self.token_ids[end_pos]]
+                else:
+                    target = window[1:] + [window[-1]]
+                batch_input.append(window)
+                batch_target.append(target)
 
-            # Skip if window is incomplete (not enough tokens remaining)
-            if len(window) < self.context_length:
-                continue
+            # Only include batches that have valid sequences
+            if batch_input:
+                batches.append((batch_input, batch_target))
 
-            # Target = window shifted by 1 (predict next token)
-            target = window[1:]
-            sequences.append((window, target))
-
-        return sequences
+        return batches
 
 
 def get_dataloader_sequences(
@@ -201,8 +214,9 @@ def get_dataloader_sequences(
     """
     batches: list[tuple[list[list[int]], list[list[int]]]] = []
     for _ in range(num_batches):
-        seqs = dataset.get_sequences(batch_size)
-        input_batch = [seq[0] for seq in seqs]
-        target_batch = [seq[1] for seq in seqs]
-        batches.append((input_batch, target_batch))
+        result = dataset.get_sequences(num_batches=1, batch_size=batch_size)
+        if result:
+            batches.append(result[0])
+        else:
+            batches.append(([], []))
     return batches
