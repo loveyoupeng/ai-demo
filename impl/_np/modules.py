@@ -385,6 +385,223 @@ class RoPE:
         return rotated
 
 
+class MultiHeadAttention:
+    """Scaled dot-product multi-head attention (with GQA support).
+
+    Parameters
+    ----------
+    embed_dim : int
+        Input/output embedding dimension.
+    n_heads : int
+        Number of query heads.
+    n_groups : int, optional (default=embed_dim // (embed_dim // n_heads) or n_heads)
+        Number of K/V groups for grouped-query attention.
+        If n_groups == n_heads → standard MHA (no GQA).
+        If n_groups < n_heads → GQA: K/V shared across groups.
+    rope_dim : int
+        Number of head dimensions to apply RoPE to (0 = no RoPE).
+    seed : int
+        Random seed for weight initialization.
+
+    Forward
+    -------
+    x : np.ndarray, shape (batch_size, seq_len, embed_dim)
+
+    Returns
+    -------
+    out : np.ndarray, shape (batch_size, seq_len, embed_dim)
+
+    Architecture
+    ------------
+    X [B,S,D] → Q_proj [W_q: (D, H*head_dim), b_q: (H*head_dim)] → Q [B,S,H,D]
+                  K_proj [W_k: (D, G*head_dim), b_k: (G*head_dim)] → K [B,S,G,D]
+                  V_proj [W_v: (D, G*head_dim), b_v: (G*head_dim)] → V [B,S,G,D]
+
+    QK^T / sqrt(d) [B,H,S,S] → softmax → multiply V
+
+    For GQA (G=3, H=6): K and V are broadcast from G to H heads.
+    For non-GQA (G=H): no broadcasting needed.
+
+    Final: reshape → O_proj [W_o: (H*head_dim, D), b_o: (D)] → [B,S,D]
+
+    Notes
+    -----
+    head_dim = embed_dim // n_heads.
+    All weights are trained via backpropagation.
+    """
+
+    NP_QW: str = "mha.Wq"
+    NP_QB: str = "mha.bq"
+    NP_KW: str = "mha.Wk"
+    NP_KB: str = "mha.bk"
+    NP_VW: str = "mha.Wv"
+    NP_VB: str = "mha.bv"
+    NP_OW: str = "mha.Wo"
+    NP_OB: str = "mha.bo"
+
+    def __init__(
+        self,
+        embed_dim: int,
+        n_heads: int,
+        rope_dim: int = 0,
+        n_groups: int | None = None,
+        seed: int = 0,
+    ) -> None:
+        self.embed_dim = embed_dim
+        self.n_heads = n_heads
+        self.head_dim = embed_dim // n_heads
+        self.rope_dim = rope_dim
+        if n_groups is None:
+            n_groups = n_heads
+
+        self.n_groups = n_groups
+        rng = np.random.default_rng(seed)
+
+        # Q projection: [D, H * head_dim]
+        # fan_in for Xavier: input_dim = D
+        scale_q = np.sqrt(2.0 / (embed_dim + self.n_heads * self.head_dim))  # noqa: F841
+        self.Wq = rng.normal(0, 1.0 / np.sqrt(embed_dim), (embed_dim, self.n_heads * self.head_dim)).astype(np.float32)
+        self.bq = np.zeros(self.n_heads * self.head_dim, dtype=np.float32)
+
+        # K projection: [D, G * head_dim]
+        self.Wk = rng.normal(0, 1.0 / np.sqrt(embed_dim), (embed_dim, self.n_groups * self.head_dim)).astype(np.float32)
+        self.bk = np.zeros(self.n_groups * self.head_dim, dtype=np.float32)
+
+        # V projection: [D, G * head_dim]
+        self.Wv = rng.normal(0, 1.0 / np.sqrt(embed_dim), (embed_dim, self.n_groups * self.head_dim)).astype(np.float32)
+        self.bv = np.zeros(self.n_groups * self.head_dim, dtype=np.float32)
+
+        # Output projection: [H * head_dim, D]
+        self.Wo = rng.normal(0, 1.0 / np.sqrt(embed_dim), (self.n_heads * self.head_dim, embed_dim)).astype(np.float32)
+        self.bo = np.zeros(embed_dim, dtype=np.float32)
+
+    def forward(
+        self,
+        x: np.ndarray,
+        Wq: np.ndarray | None = None,
+        bq: np.ndarray | None = None,
+        Wk: np.ndarray | None = None,
+        bk: np.ndarray | None = None,
+        Wv: np.ndarray | None = None,
+        bv: np.ndarray | None = None,
+        Wo: np.ndarray | None = None,
+        bo: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Compute multi-head attention forward pass.
+
+        Parameters
+        ----------
+        x : np.ndarray, shape (batch_size, seq_len, embed_dim)
+        Wq : np.ndarray, shape (embed_dim, n_heads * head_dim) — if None, use self.Wq
+        ... (similar for Wk, bk, Wv, bv, Wo, bo)
+
+        Returns
+        -------
+        out : np.ndarray, shape (batch_size, seq_len, embed_dim)
+        """
+        batch_size, seq_len, embed_dim = x.shape
+
+        # Use passed weights or instance weights (for testing)
+        q_w = Wq or self.Wq
+        q_b = bq or self.bq
+        k_w = Wk or self.Wk
+        k_b = bk or self.bk
+        v_w = Wv or self.Wv
+        v_b = bv or self.bv
+        o_w = Wo or self.Wo
+        o_b = bo or self.bo
+
+        # Q, K, V projections
+        # Q: (B, S, D) @ (D, H*d) → (B, S, H*d)  — add bias
+        q = x @ q_w + q_b  # (B, S, H*d)  where H=d=16, d=4
+
+        # K, V: (B, S, D) @ (D, G*d) → (B, S, G*d)
+        k = x @ k_w + k_b  # (B, S, G*d)  where G=3, d=4
+
+        # Reshape Q: (B, S, H*d) → (B, H, S, d)
+        q = q.reshape(batch_size, seq_len, self.n_heads, self.head_dim).transpose(0, 2, 1, 3)  # (B, H, S, d)
+
+        # Reshape K, V: (B, S, G*d) → (B, G, S, d)
+        k = k.reshape(batch_size, seq_len, self.n_groups, self.head_dim).transpose(0, 2, 1, 3)  # (B, G, S, d)
+
+        # Apply RoPE to Q and K if rope_dim > 0
+        if self.rope_dim > 0:
+            q = q.reshape(batch_size, self.n_heads, seq_len, self.head_dim)  # (B, H, S, d)
+            k = k.reshape(batch_size, self.n_groups, seq_len, self.head_dim)  # (B, G, S, d)
+
+            # RoPE only on first rope_dim dims of head_dim
+            q = RoPE().forward(q, np.arange(seq_len), rope_dim=self.rope_dim)
+            k = RoPE().forward(k, np.arange(seq_len), rope_dim=self.rope_dim)
+
+            # Reshape back for the following transpose
+            q = q.reshape(batch_size, self.n_heads, seq_len, self.head_dim)
+            k = k.reshape(batch_size, self.n_groups, seq_len, self.head_dim)
+
+        # Scaled dot-product attention: Q @ K^T / sqrt(d)
+        # Q: (B, H, S, d), K^T: (B, G, d, S)
+        # scores: (B, H, S, S)
+
+        # For GQA: K has G heads, Q has H heads.
+        # We need to broadcast K and V from G to H heads.
+        # K for attention: (B, H, S, d) where K_h = K_{h % G}
+        # V for attention: (B, H, S, d) where V_h = V_{h % G}
+
+        # Expand K and V from (B, G, S, d) to (B, H, S, d) by repeating
+        # This handles both standard MHA (G=H, no-op) and GQA (G<H)
+        if self.n_groups != self.n_heads:
+            # GQA: expand K and V from G to H heads
+            expansion = np.zeros((self.n_heads, self.n_groups), dtype=np.float32)
+            for h in range(self.n_heads):
+                expansion[h, h % self.n_groups] = 1.0
+            # k: (B, H, S, d) = (H, G) @ (B, G, S, d) — but this is matrix multiply over head dim
+            # Better: just index-repeat K
+            k_expanded = np.zeros((batch_size, self.n_heads, seq_len, self.head_dim), dtype=np.float32)
+            for h in range(self.n_heads):
+                k_expanded[:, h, :, :] = k[:, h % self.n_groups, :, :]
+            k = k_expanded
+
+            v = x @ v_w + v_b  # (B, S, G*d)
+            v = v.reshape(batch_size, seq_len, self.n_groups, self.head_dim).transpose(0, 2, 1, 3)  # (B, G, S, d)
+
+            v_expanded = np.zeros((batch_size, self.n_heads, seq_len, self.head_dim), dtype=np.float32)
+            for h in range(self.n_heads):
+                v_expanded[:, h, :, :] = v[:, h % self.n_groups, :, :]
+            v = v_expanded
+        else:
+            v = x @ v_w + v_b  # (B, S, H*d)
+            v = v.reshape(batch_size, seq_len, self.n_heads, self.head_dim).transpose(0, 2, 1, 3)  # (B, H, S, d)
+
+        # Scaled dot-product attention
+        # Q: (B, H, S, d), K: (B, H, S, d) → K^T: (B, H, d, S)
+        # scores: (B, H, S, S)
+        # dim d = self.head_dim = 16, 4 = 4 → sqrt(4) = 2.0
+        head_dim_sqrt = np.sqrt(float(self.head_dim))  # sqrt(head_dim)
+        scores = (q @ k.transpose(0, 1, 3, 2)) / head_dim_sqrt  # (B, H, S, S)  — QK^T / sqrt(d)
+
+        # Softmax over the last dim (key positions) — attention weights for each query position
+        # scores: (B, H, S, S)  — for each batch, head, query pos, scores over all key positions
+        scores_max = np.max(scores, axis=-1, keepdims=True)  # (B, H, S, 1)
+        scores = scores - scores_max  # (B, H, S, S) — numerical stability
+        exp_scores = np.exp(scores)  # (B, H, S, S)
+        scores_sum = np.sum(exp_scores, axis=-1, keepdims=True)  # (B, H, S, 1)
+        attn_weights = exp_scores / scores_sum  # (B, H, S, S) — softmax over keys
+
+        # Attention output: attn_weights @ V
+        # (B, H, S, S) @ (B, H, S, d) → (B, H, S, d)
+        attn_out = attn_weights @ v  # (B, H, S, d)
+
+        # Reshape and output projection
+        # (B, H, S, d) → (B, S, H*d) — put sequence dim back
+        attn_out = attn_out.transpose(0, 2, 1, 3).reshape(
+            batch_size, seq_len, self.n_heads * self.head_dim
+        )  # (B, S, H*d)
+
+        # Final output projection: (B, S, H*d) @ (H*d, D) + (D,)  — → (B, S, D)
+        out = attn_out @ o_w + o_b  # (B, S, D)
+
+        return out
+
+
 class Linear:
     """Fully connected linear layer: y = x @ W + b.
 
