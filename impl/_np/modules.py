@@ -385,6 +385,151 @@ class RoPE:
         return rotated
 
 
+class MoE:
+    """Mixture of Experts — each token is routed to top-k experts for processing.
+
+    Parameters
+    ----------
+    embed_dim : int
+        Input/output dimension (hidden size).
+    n_experts : int
+        Total number of experts.
+    ff_dim : int
+        Hidden dimension for each expert (SwiGLU FFN).
+    k : int
+        Number of top experts to select per token.
+    seed : int
+        Random seed for weight initialization.
+
+    Forward
+    -------
+    x : np.ndarray, shape (batch_size, seq_len, embed_dim)
+
+    Returns
+    -------
+    out : np.ndarray, shape (batch_size, seq_len, embed_dim)
+
+    Architecture
+    ------------
+    x [B,S,D] → router_scores = softmax(x @ W_router.T + b_router) [B,S,E]
+
+    For each token t:
+      top_k = argtopk(router_scores[t], k)    # k expert indices
+      expert_out[t] = sum(router_scores[t, idx] * experts[idx](x[t]) for idx in top_k)
+
+    Final: out = expert_out [B,S,D]
+
+    Notes
+    -----
+    Each expert is a SwiGLU FFN (SiLU(w1 @ x) * (w3 @ x) @ w2).
+    Softmax is applied across ALL experts (not just top-k), but only top-k
+    contribute to the output (others get multiplied by 0 via gating).
+    """
+
+    NP_ROUTER: str = "moe.router"
+    NP_BIAS: str = "moe.bias"
+
+    def __init__(
+        self,
+        embed_dim: int,
+        n_experts: int,
+        ff_dim: int,
+        k: int = 2,
+        seed: int = 0,
+    ) -> None:
+        self.embed_dim = embed_dim
+        self.n_experts = n_experts
+        self.ff_dim = ff_dim
+        self.k = k
+
+        # Router: linear layer from embed_dim to n_experts
+        # Shape: [embed_dim, n_experts]
+        self.router = (
+            np.random.default_rng(seed).normal(0, 1.0 / np.sqrt(embed_dim), (embed_dim, n_experts)).astype(np.float32)
+        )
+        self.bias = np.zeros(n_experts, dtype=np.float32)
+
+        # Experts: each expert is a SwiGLUFFN
+        # Each expert: input embed_dim → output embed_dim
+        self.experts = [SwiGLUFFN(embed_dim, ff_dim, seed=seed + expert_idx) for expert_idx in range(n_experts)]
+
+    def forward(
+        self,
+        x: np.ndarray,
+        router: np.ndarray | None = None,
+        bias: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Compute MoE forward pass.
+
+        Parameters
+        ----------
+        x : np.ndarray, shape (batch_size, seq_len, embed_dim)
+        router : np.ndarray, shape (embed_dim, n_experts) — if None, use self.router
+        bias : np.ndarray, shape (n_experts,) — if None, use self.bias
+
+        Returns
+        -------
+        out : np.ndarray, shape (batch_size, seq_len, embed_dim)
+        """
+        batch_size, seq_len, embed_dim = x.shape
+
+        rout_w = router or self.router
+        rout_b = bias or self.bias
+
+        # Router scores: (B, S, D) @ (D, E) + (E,) → (B, S, E)
+        # Compute scores for all experts, all tokens
+        router_scores = x @ rout_w + rout_b  # (B, S, E)
+
+        # Softmax over expert dimension for routing weights
+        # Normalize across experts: sum over E = 1 for each (batch, seq)
+        router_scores_max = np.max(router_scores, axis=-1, keepdims=True)  # (B, S, 1)
+        router_scores = router_scores - router_scores_max  # (B, S, E) — stable
+        exp_scores = np.exp(router_scores)  # (B, S, E)
+        score_sum = np.sum(exp_scores, axis=-1, keepdims=True)  # (B, S, 1)
+        routing_weights = exp_scores / score_sum  # (B, S, E) — softmax over experts
+
+        # For each token, select top-k experts
+        # Compute expert outputs for all tokens and all experts
+        # Then combine weighted by top-k routing weights
+
+        # Mask to top-k experts: only the top-k selected experts contribute
+        # For each token, find the k-th highest routing weight
+        # and zero out all other experts below this threshold
+        if self.k < self.n_experts:
+            # Get the threshold value: k-th largest routing weight per token
+            # We use a stable approach: sort weights and take the k-th largest
+            sorted_indices = np.argsort(routing_weights, axis=-1)[:, :, ::-1]  # (B, S, E) descending
+            kth_indices = sorted_indices[:, :, self.k - 1 : self.k]  # (B, S, 1)
+            kth_values = np.take_along_axis(routing_weights, kth_indices, axis=-1)  # (B, S, 1)
+
+            # Zero out experts with weights below the k-th threshold
+            # For experts at exactly the threshold, keep them (they could be any of the top-k)
+            routing_weights = np.where(routing_weights >= kth_values, routing_weights, 0.0)  # (B, S, E)
+
+            # Renormalize to sum to 1 across experts
+            renorm_sum = np.sum(routing_weights, axis=-1, keepdims=True)  # (B, S, 1)
+            # Avoid division by zero
+            renorm_sum = np.maximum(renorm_sum, 1e-8)
+            routing_weights = routing_weights / renorm_sum  # (B, S, E)
+
+        # Zero output buffer: (B, S, D)
+        out = np.zeros((batch_size, seq_len, self.embed_dim), dtype=np.float32)
+
+        # Process each token (vectorized over tokens for speed)
+        # For each expert, compute expert_output for all (batch, seq) positions
+        for expert_idx, expert in enumerate(self.experts):
+            # expert: (B, S, D) → expert_output: (B, S, D)
+            expert_output = expert.forward(x)  # (B, S, D)
+
+            # Get routing weight for this expert: (B, S, 1)
+            w = routing_weights[:, :, expert_idx : expert_idx + 1]  # (B, S, 1)
+
+            # Weighted contribution: w * expert_output
+            out = out + w * expert_output  # (B, S, D)
+
+        return out
+
+
 class MultiHeadAttention:
     """Scaled dot-product multi-head attention (with GQA support).
 
