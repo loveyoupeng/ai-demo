@@ -5,6 +5,7 @@ description = "Decoder-only transformer learning project in 4 backends"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
+    "torch>=2.0",
     "datasets>=2.14",
     "tokenizers>=0.15",
     "tqdm>=4.65",
@@ -12,6 +13,13 @@ dependencies = [
 ]
 optional-dependencies = {triton = ["triton>=2.2"], cuda = ["cuda-python>=12.0"]}
 dev = ["pyright>=1.1", "pytest>=7.0", "pytest-timeout>=2.0", "ruff>=0.4"]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
 
 [project.scripts]
 train = "src.numpy.cli:main"
