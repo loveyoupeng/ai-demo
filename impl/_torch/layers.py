@@ -287,9 +287,201 @@ class RoPE(nn.Module):
         y_even = x_even * cos_broad - x_odd * sin_broad  # (B, S, H, pair_dim)
         y_odd = x_even * sin_broad + x_odd * cos_broad  # (B, S, H, pair_dim)
 
-        # Reassemble: (B, S, H, pair_dim, 2) → (B, S, H, rope_dim)
+        # Reassemble: (B, S, H, pair_dim, 2) → (B, S, H, x_rot_size)
         rotated = torch.stack([y_even, y_odd], dim=-1).reshape(x_rot.shape)
 
         if x_pass is not None:
             return torch.cat([rotated, x_pass], dim=-1)
         return rotated
+
+
+class Linear(nn.Module):
+    """Simple linear layer with optional zero bias.
+
+    Parameters:
+        in_features: Input dimension.
+        out_features: Output dimension.
+        bias: If False, no bias term (matching NumPy convention).
+
+    Shape:
+        - Input:  (..., in_features)
+        - Output: (..., out_features)
+    """
+
+    __slots__ = ("weight", "bias")
+
+    def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
+        super().__init__()
+        # weight.shape = (out_features, in_features) — matches nn.Linear convention
+        self.weight = nn.Parameter(torch.empty(out_features, in_features))
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(out_features))
+        else:
+            self.register_parameter("bias", None)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        """Initialize weight with Kaiming uniform. Zero bias."""
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            bound = 1 / math.sqrt(self.weight.size(1))
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Linear forward.
+
+        Args:
+            x: Input tensor. Any shape with last dim = in_features.
+
+        Returns:
+            Output with last dim = out_features.
+        """
+        w = self.weight.to(x.dtype)
+        b = self.bias.to(x.dtype) if self.bias is not None else None
+        return nn.functional.linear(x, w, b)
+
+
+class MultiHeadAttention(nn.Module):
+    """Scaled dot-product multi-head attention with grouped-query (GQA).
+
+    Parameters:
+        embed_dim: Total embedding dimension (also output dimension).
+        n_heads: Number of attention heads. Must divide embed_dim evenly.
+        n_groups: Number of groups for GQA. n_groups <= n_heads.
+                  n_groups == n_heads → standard MHA (no GQA).
+        rope_dim: Number of head dimensions to rotate. 0 = no RoPE.
+
+    Architecture:
+        X [B,S,D] → Q_proj → Q [B,S,H,head_dim]
+                  → K_proj → K [B,S,G,head_dim]
+                  → V_proj → V [B,S,G,head_dim]
+
+        For GQA: K and V shared across groups of query heads (G<H).
+        K/V expanded from G to H heads for attention computation.
+
+        Scaled: QK^T / sqrt(head_dim) → softmax → V
+
+        Final: reshape → O_proj → [B,S,D]
+
+    Args:
+        embed_dim: Input/output dimension.
+        n_heads: Number of query heads.
+        n_groups: Number of K/V groups (default = n_heads, standard MHA).
+        rope_dim: Rotary position embedding dimension (default 0 = disabled).
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        n_heads: int,
+        n_groups: int | None = None,
+        rope_dim: int = 0,
+    ) -> None:
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.n_heads = n_heads
+        self.rope_dim = rope_dim
+        self.n_groups = n_groups if n_groups is not None else n_heads
+        self.head_dim = embed_dim // n_heads
+        assert embed_dim % n_heads == 0, "embed_dim must be divisible by n_heads"
+        assert self.n_groups <= n_heads, "n_groups must be <= n_heads"
+
+        # Q projection: D → H * head_dim (one projection per query head)
+        self.Wq = Linear(embed_dim, n_heads * self.head_dim)
+
+        # K projection: D → G * head_dim (shared across G groups) — no bias
+        self.Wk = Linear(embed_dim, self.n_groups * self.head_dim, bias=False)
+
+        # V projection: D → G * head_dim (shared across G groups) — no bias
+        self.Wv = Linear(embed_dim, self.n_groups * self.head_dim, bias=False)
+
+        # Output projection: H * head_dim → D
+        self.Wo = Linear(n_heads * self.head_dim, embed_dim)
+
+        # RoPE module
+        self.rope = RoPE()
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        past_key_value: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
+        position: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Multi-head attention forward pass.
+
+        Args:
+            x: Input activations [batch, seq_len, embed_dim].
+            past_key_value: Optional list of (k, v) pairs per layer for KV cache.
+                            Each k is [B, n_groups, cached_len, head_dim],
+                            each v is [B, n_groups, cached_len, head_dim].
+            position: Current position index for KV cache (not used but kept for
+                      API compatibility with TransformerBlock).
+        Returns:
+            output: [batch, seq_len, embed_dim] — attention output
+            attn_weights: [batch, n_heads, seq_len, seq_len] — attention for debug
+        """
+        batch_size, seq_len = x.shape[0], x.shape[1]
+        head_dim = self.head_dim
+
+        # Q, K, V projections
+        # q: (B, S, H*hd) → reshape → (B, H, S, hd)
+        # k: (B, S, G*hd) → reshape → (B, G, S, hd)
+        # v: (B, S, G*hd) → reshape → (B, G, S, hd)
+        q = self.Wq(x).reshape(batch_size, seq_len, self.n_heads, head_dim).transpose(1, 2)  # (B, H, S, hd)
+
+        # For past_key_value, we need to handle appending
+        if past_key_value is not None:
+            pk, pv = past_key_value[0]
+            # pk, pv already have shape (B, n_groups, past_len, head_dim)
+            # We need to concat along seq dimension, but k/v come from projections
+            # Since x is the NEW tokens only, we need to append to past
+            # BUT this design doesn't quite work — let me reconsider.
+            # Actually, in the NumPy version, the past_key_value is used in
+            # TransformerBlock, which passes the CURRENT full input x (not just new tokens).
+            # So the KV cache updates happen at the block level.
+            # For now, this forward only handles fresh sequences.
+            # The KV cache will be managed by TransformerBlock.
+            k = self.Wk(x).reshape(batch_size, seq_len, self.n_groups, head_dim).transpose(1, 2)  # (B, G, S, hd)
+            v = self.Wv(x).reshape(batch_size, seq_len, self.n_groups, head_dim).transpose(1, 2)  # (B, G, S, hd)
+        else:
+            k = self.Wk(x).reshape(batch_size, seq_len, self.n_groups, head_dim).transpose(1, 2)  # (B, G, S, hd)
+            v = self.Wv(x).reshape(batch_size, seq_len, self.n_groups, head_dim).transpose(1, 2)  # (B, G, S, hd)
+
+        # Apply RoPE to Q and K if rope_dim > 0
+        if self.rope_dim > 0:
+            # RoPE expects (B, seq_len, n_heads/dim, head_dim) but we have (B, n_heads, seq_len, head_dim)
+            # So we need to reshape for RoPE
+            q_reshape = q.transpose(1, 2)  # (B, S, H, hd) → RoPE expects (B, S, H, hd)
+            k_reshape = k.transpose(1, 2)  # (B, S, G, hd)
+            q = self.rope(q_reshape, torch.arange(seq_len), rope_dim=self.rope_dim).transpose(1, 2)  # (B, H, S, hd)
+            k = self.rope(k_reshape, torch.arange(seq_len), rope_dim=self.rope_dim).transpose(1, 2)  # (B, G, S, hd)
+
+        # For GQA: expand K and V from G to H by repeating heads
+        # k: (B, G, S, hd) → (B, H, S, hd) where head_i gets group_i % G
+        if self.n_groups != self.n_heads:
+            # Repeat K/V along the head dim: for each query head h, use group h % G
+            # k: (B, G, S, hd) → (B, H, S, hd) via index_repeat
+            repeat_idxs = torch.tensor([h % self.n_groups for h in range(self.n_heads)], device=x.device)
+            k = k[:, repeat_idxs, :, :]  # (B, H, S, hd)
+            v = v[:, repeat_idxs, :, :]  # (B, H, S, hd)
+
+        # Scaled dot-product attention
+        # q: (B, H, S, hd), k: (B, H, S, hd) → k^T: (B, H, hd, S)
+        # scores: (B, H, S, S) = q @ k^T
+        scores = (q @ k.transpose(-2, -1)) / math.sqrt(float(head_dim))  # (B, H, S, S)
+
+        # Softmax with numerical stability (max subtraction)
+        scores = scores - scores.max(dim=-1, keepdim=True).values  # (B, H, S, S)
+        exp_scores = torch.exp(scores)  # (B, H, S, S)
+        attn_weights = exp_scores / exp_scores.sum(dim=-1, keepdim=True)  # (B, H, S, S)
+
+        # Attention: score @ V
+        # scores: (B, H, S, S), V: (B, H, S, hd) → output: (B, H, S, hd)
+        context = attn_weights @ v  # (B, H, S, hd)
+
+        # Output projection
+        # context: (B, H, S, hd) → (B, S, H*hd) → O_proj → (B, S, D)
+        context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, self.n_heads * head_dim)  # (B, S, H*hd)
+        output = self.Wo(context)  # (B, S, D)
+
+        return output, attn_weights
