@@ -187,3 +187,109 @@ class SwiGLUFFN(nn.Module):
     def SiLU(self) -> nn.Module:
         """Return a SiLU activation module."""
         return nn.SiLU()
+
+
+class RoPE(nn.Module):
+    """Rotary Positional Embedding — injects position via 2D rotation.
+
+    Applies a rotation matrix to each (odd, even) pair of head dimensions,
+    where the rotation angle depends on the token position:
+        x_m' = x_m * cos(mθ) - x_{m+1} * sin(mθ)
+        x_{m+1}' = x_m * sin(mθ) + x_{m+1} * cos(mθ)
+    where θ = 10000^(-2k/d) for the k-th dimension pair.
+
+    Parameters:
+        None — frequencies are computed from head_dim and position.
+
+    Shape:
+        - Input:  (..., n_heads, head_dim) — Q or K tensor
+        - Output: (..., n_heads, head_dim) — rotated Q or K
+
+    Args:
+        x: Q or K tensor with shape [batch, seq_len, n_heads, head_dim].
+        positions: Position indices, shape [seq_len] (int64).
+        rope_dim: Number of head_dims to rotate. 0 = full rotation.
+                  Values after rope_dim pass through unchanged.
+
+    Returns:
+        Rotated tensor with same shape as input.
+    """
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        rope_dim: int = 0,
+    ) -> torch.Tensor:
+        """Apply rotary positional embedding.
+
+        Args:
+            x: Q or K tensor. Shape [batch, seq_len, n_heads, head_dim].
+            positions: Position indices. Shape [seq_len].
+            rope_dim: Rotate only first rope_dim dims. 0 = all.
+
+        Returns:
+            Rotated tensor. Same shape as input.
+        """
+        # x:          (B, S, H, D)
+        # positions:  (S,) — position indices
+        # output:     (B, S, H, D)
+
+        # Separate unrotated dims (after rope_dim)
+        head_dim = x.shape[-1]
+        if rope_dim > 0 and rope_dim < head_dim:
+            x_rot = x[..., :rope_dim]
+            x_pass = x[..., rope_dim:]
+        else:
+            x_rot = x
+            x_pass = None
+
+        batch_size, seq_len = x_rot.shape[0], x_rot.shape[1]
+        n_heads = x_rot.shape[2]
+        # pair_dim = half of the actual rotated dimensions (not full head_dim)
+        pair_dim = x_rot.shape[-1] // 2
+
+        # Compute rotation frequencies: use full head_dim in denominator
+        # (same as NumPy: freqs for the first pair_dim pairs)
+        # (pair_dim,) = 1 / 10000^(2k / head_dim)
+        freqs = 1.0 / (
+            10000.0
+            ** (torch.arange(pair_dim, device=x.device) * 2.0 / head_dim)
+        )
+
+        # For each position and each pair: angle = pos * freq
+        # positions: (S,)
+        # freqs:     (pair_dim,)
+        # angles:    (S, pair_dim) ← then broadcast to (B, S, 1, pair_dim)
+        angles = positions.unsqueeze(-1) * freqs.unsqueeze(0)  # (S, pair_dim)
+
+        cos = torch.cos(angles)  # (S, pair_dim)
+        sin = torch.sin(angles)  # (S, pair_dim)
+
+        # Reshape: (B, S, H, pair_dim, 2) — last dim is (even, odd) pair
+        x_flat = x_rot.reshape(batch_size, seq_len, n_heads, pair_dim, 2)
+
+        # Extract odd and even components
+        # x_even: (B, S, H, pair_dim)  — x_{2k}
+        # x_odd:  (B, S, H, pair_dim)  — x_{2k+1}
+        # cos_broad: (S, 1, pair_dim) → (1, S, 1, pair_dim)
+        # sin_broad: (S, 1, pair_dim) → (1, S, 1, pair_dim)
+        x_even = x_flat[..., 0]  # (B, S, H, pair_dim)
+        x_odd = x_flat[..., 1]  # (B, S, H, pair_dim)
+
+        # Broadcast cos/sin from (S, pair_dim) → (B, S, 1, pair_dim) to match x
+        cos_broad = cos[:, None, :].unsqueeze(0)  # (1, S, 1, pair_dim)
+        sin_broad = sin[:, None, :].unsqueeze(0)  # (1, S, 1, pair_dim)
+
+        # Apply 2D rotation: each pair rotates independently
+        # y_{2k}   = x_{2k}   * cos - x_{2k+1}   * sin
+        # y_{2k+1} = x_{2k}   * sin + x_{2k+1}   * cos
+        y_even = x_even * cos_broad - x_odd * sin_broad  # (B, S, H, pair_dim)
+        y_odd = x_even * sin_broad + x_odd * cos_broad  # (B, S, H, pair_dim)
+
+        # Reassemble: (B, S, H, pair_dim, 2) → (B, S, H, rope_dim)
+        rotated = torch.stack([y_even, y_odd], dim=-1).reshape(x_rot.shape)
+
+        if x_pass is not None:
+            return torch.cat([rotated, x_pass], dim=-1)
+        return rotated
