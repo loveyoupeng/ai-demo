@@ -168,6 +168,100 @@ class SiLULayer:
         return x * sigmoid_x  # (..., embed_dim)
 
 
+class SwiGLUFFN:
+    """SwiGLU Feedforward Network: SiLU(w1 @ x) * (w3 @ x) @ w2.
+
+    A modern feedforward with gating that uses SiLU to provide
+    smooth feature selection between w1 and w3 projections.
+
+    Parameters
+    ----------
+    embed_dim : int
+        Input/output dimension.
+    ff_dim : int
+        Intermediate (hidden) dimension.
+    seed : int, optional
+        Random seed for weight initialization (default 42).
+
+    Forward
+    -------
+    x : np.ndarray, shape (batch_size, seq_len, embed_dim)
+        Input activations.
+
+    Returns
+    -------
+    out : np.ndarray, shape (batch_size, seq_len, embed_dim)
+        Feedforward output.
+
+    Notes
+    -----
+    SwiGLU formula:
+      gate = SiLU(w1 @ x)          → (..., ff_dim)
+      proj = w3 @ x                → (..., ff_dim)
+      gated = gate * proj          → (..., ff_dim)  — element-wise
+      out = gated @ w2             → (..., embed_dim)
+
+    where:
+      w1: (embed_dim, ff_dim)
+      w3: (embed_dim, ff_dim)
+      w2: (ff_dim, embed_dim)
+    """
+
+    def __init__(self, embed_dim: int, ff_dim: int, seed: int = 42) -> None:
+        """Initialize SwiGLU weights.
+
+        Parameters
+        ----------
+        embed_dim : int
+            Input/output dimension.
+        ff_dim : int
+            Hidden dimension.
+        seed : int
+            Random seed for reproducibility.
+        """
+        rng = np.random.default_rng(seed)
+        # Xavier initialization to keep activations at reasonable scale
+        self.W1: np.ndarray = rng.uniform(
+            -np.sqrt(6.0 / (embed_dim + ff_dim)),
+            np.sqrt(6.0 / (embed_dim + ff_dim)),
+            size=(embed_dim, ff_dim),
+        ).astype(np.float32)
+        self.W2: np.ndarray = rng.uniform(
+            -np.sqrt(6.0 / (ff_dim + embed_dim)),
+            np.sqrt(6.0 / (ff_dim + embed_dim)),
+            size=(ff_dim, embed_dim),
+        ).astype(np.float32)
+        self.W3: np.ndarray = rng.uniform(
+            -np.sqrt(6.0 / (embed_dim + ff_dim)),
+            np.sqrt(6.0 / (embed_dim + ff_dim)),
+            size=(embed_dim, ff_dim),
+        ).astype(np.float32)
+
+    def forward(self, x: np.ndarray) -> np.ndarray:
+        """Compute SwiGLU feedforward with gating.
+
+        Parameters
+        ----------
+        x : np.ndarray, shape (..., embed_dim)
+            Input activations.
+
+        Returns
+        -------
+        np.ndarray, shape (..., embed_dim)
+            Gated feedforward output.
+        """
+        # x:              (..., embed_dim)
+        # w1 @ x:         (..., ff_dim)     — first linear projection
+        # SiLU(w1 @ x):   (..., ff_dim)     — smooth gating signal
+        # w3 @ x:         (..., ff_dim)     — second linear projection (parallel)
+        # gate * proj:    (..., ff_dim)     — element-wise gating
+        # (gate * proj) @ w2: (..., embed_dim) — final linear projection
+        gate = SiLULayer().forward(x @ self.W1)  # (..., ff_dim)
+        proj = x @ self.W3  # (..., ff_dim)
+        gated_output = gate * proj  # (..., ff_dim) — gating combines w1 and w3
+        return gated_output @ self.W2  # (..., embed_dim)
+
+
 class Linear:
     """Fully connected linear layer: y = x @ W + b.
 
