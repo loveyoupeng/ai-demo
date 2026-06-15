@@ -121,6 +121,53 @@ class RMSNorm:
         return (x / rms) * gamma  # (..., embed_dim)
 
 
+class SiLULayer:
+    """Sigmoid Linear Unit (SiLU / Swish) activation: f(x) = x * sigmoid(x).
+
+    Parameters
+    ----------
+    None — activation is stateless.
+
+    Forward
+    -------
+    x : np.ndarray, shape (..., embed_dim)
+        Input activations.
+
+    Returns
+    -------
+    out : np.ndarray, shape (..., embed_dim)
+        SiLU activation applied element-wise.
+
+    Notes
+    -----
+    SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
+    Properties:
+      - For large positive x: f(x) ≈ x (near-identity)
+      - For large negative x: f(x) ≈ 0 (suppressed)
+      - For x = 0: f(0) = 0
+      - Smooth, non-monotonic gating that enables feature selection
+    """
+
+    def forward(self, x: np.ndarray) -> np.ndarray:
+        """Apply SiLU activation element-wise.
+
+        Parameters
+        ----------
+        x : np.ndarray
+            Input tensor of any shape.
+
+        Returns
+        -------
+        np.ndarray, same shape as x
+            SiLU(x) = x * sigmoid(x).
+        """
+        # x:   (..., embed_dim)
+        # sigmoid(x): (..., embed_dim) = 1 / (1 + exp(-x))
+        # out: (..., embed_dim) = x * sigmoid(x)
+        sigmoid_x = 1.0 / (1.0 + np.exp(-x))  # (..., embed_dim)
+        return x * sigmoid_x  # (..., embed_dim)
+
+
 class Linear:
     """Fully connected linear layer: y = x @ W + b.
 
