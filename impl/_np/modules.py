@@ -262,6 +262,129 @@ class SwiGLUFFN:
         return gated_output @ self.W2  # (..., embed_dim)
 
 
+class RoPE:
+    """Rotary Positional Embedding — injects position via 2D rotation in key dimensions.
+
+    Parameters
+    ----------
+    None — all parameters (freqs) are computed on-the-fly from position and head_dim.
+
+    Forward
+    -------
+    x : np.ndarray, shape (batch_size, seq_len, n_heads, head_dim)
+        Q or K tensor.
+    position : np.ndarray, shape (seq_len,) or (batch_size, seq_len) or int
+        Position indices for each sequence element.
+
+    Returns
+    -------
+    out : np.ndarray, shape (batch_size, seq_len, n_heads, head_dim)
+        Rotated Q or K with positional information embedded.
+
+    Notes
+    -----
+    RoPE rotates each (odd, even) pair of dimensions by a position-dependent angle:
+      x_m' = x_m * cos(mθ) - x_{m+1} * sin(mθ)
+      x_{m+1}' = x_m * sin(mθ) + x_{m+1} * cos(mθ)
+
+    where θ = 10000^(-2k/d) for the k-th dimension pair.
+    rope_dim=0 means full head_dim rotation; rope_dim=n means only the first
+    rope_dim dimensions are rotated (last head_dim-rope_dim dims pass through).
+    """
+
+    def forward(
+        self,
+        x: np.ndarray,
+        position: int | np.ndarray,
+        *,
+        rope_dim: int = 0,
+    ) -> np.ndarray:
+        """Apply rotary positional embedding to Q or K tensor.
+
+        Parameters
+        ----------
+        x : np.ndarray, shape (batch_size, seq_len, n_heads, head_dim)
+            Q or K inputs.
+        position : int or np.ndarray, shape (seq_len,) or (batch_size, seq_len)
+            Position indices — scalar int gives all positions same angle.
+        rope_dim : int, optional
+            Number of head_dims to rotate. 0 = full head_dim rotation.
+
+        Returns
+        -------
+        np.ndarray, shape (batch_size, seq_len, n_heads, head_dim)
+            Rotary-embedded tensor with position-dependent rotation.
+        """
+        # x:          (B, S, H, D)  — batch, seq, heads, head_dim
+        # position:   scalar or (S,) or (B, S)  — position indices
+        # freqs:      (S,) or (B, S, 1, D//2)   — precomputed frequencies
+        # output:     (B, S, H, D)               — rotated Q/K
+
+        # Separate unrotated dims (after rope_dim)
+        if rope_dim > 0 and rope_dim < x.shape[-1]:
+            x_rotated = x[..., :rope_dim]
+            x_unchanged = x[..., rope_dim:]
+        else:
+            x_rotated = x
+            x_unchanged = None
+
+        # Handle both batched and single position
+        batch_size, seq_len = x_rotated.shape[0], x_rotated.shape[1]
+
+        if np.isscalar(position):
+            pos = np.full((batch_size, seq_len), position, dtype=np.int32)
+        else:
+            pos = np.asarray(position, dtype=np.int32)
+
+        # Handle both batched (B, S) and unbatched (S,) positions
+        if pos.ndim == 1 and pos.shape[0] == seq_len:
+            pos = np.broadcast_to(pos, (batch_size, seq_len))  # (B, S)
+
+        # Compute rotation frequencies for each (odd, even) pair in the pair_dim
+        pair_dim = x_rotated.shape[-1] // 2  # number of rotating pairs = head_dim // 2
+
+        # freqs: (pair_dim,) = 1 / 10000^(2k / D) where k=0,1,...,pair_dim-1
+        freqs = 1.0 / (10000.0 ** (np.arange(pair_dim, dtype=np.float32) * 2.0 / x_rotated.shape[-1]))
+        # shape: (pair_dim,)  — one frequency per pair
+
+        # For each position and each pair, compute rotation angle: pos * freq
+        # freqs: (pair_dim,)
+        # pos.reshape: (B, S, 1)  — broadcast to (B, S, pair_dim)
+        # angles: (B, S, pair_dim) — pos * freq for each position-head_dim pair
+        angles = pos[:, :, np.newaxis] * freqs[np.newaxis, np.newaxis, :]  # (B, S, pair_dim)
+
+        cos = np.cos(angles)  # (B, S, pair_dim) — cosines
+        sin = np.sin(angles)  # (B, S, pair_dim) — sines
+
+        # Reshape for pairwise operations
+        # x_flat: (B, S, H, pair_dim, 2) — last dim is (m, m+1) pair
+        x_flat = x_rotated.reshape(x_rotated.shape[:-1] + (pair_dim, 2))  # (B, S, H, pair_dim, 2)
+
+        # Extract odd and even components (paired by position in last dim)
+        # Even: x[..., 0] → x_m, Odd: x[..., 1] → x_{m+1}
+        # After reshape: (B, S, H, pair_dim, 2)
+        x_even = x_flat[..., 0]  # (B, S, H, pair_dim)  — x_m
+        x_odd = x_flat[..., 1]  # (B, S, H, pair_dim)  — x_{m+1}
+
+        # Broadcast cos/sin for pairwise rotation
+        # cos: (B, S, pair_dim,) → (B, S, 1, pair_dim,) — broadcast over heads
+        cos_broad = cos[:, :, np.newaxis, :]  # (B, S, 1, pair_dim)
+        sin_broad = sin[:, :, np.newaxis, :]  # (B, S, 1, pair_dim)
+
+        # Apply 2D rotation: each (odd, even) pair rotates independently
+        # y_m = x_m * cos - x_odd * sin
+        # y_{m+1} = x_m * sin + x_odd * cos
+        y_even = x_even * cos_broad - x_odd * sin_broad  # (B, S, H, pair_dim)
+        y_odd = x_even * sin_broad + x_odd * cos_broad  # (B, S, H, pair_dim)
+
+        # Reassemble: (B, S, H, pair_dim, 2) → (B, S, H, head_dim)
+        rotated = np.stack([y_even, y_odd], axis=-1).reshape(x_rotated.shape)
+
+        if x_unchanged is not None:
+            return np.concatenate([rotated, x_unchanged], axis=-1)
+        return rotated
+
+
 class Linear:
     """Fully connected linear layer: y = x @ W + b.
 
