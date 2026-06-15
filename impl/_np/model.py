@@ -116,6 +116,13 @@ class NumPyModel:
         ff_dim_out = embed_dim * 2  # output projection hidden dim
         self.output = SwiGLUFFN(embed_dim, ff_dim_out, seed=seed + 200)
 
+        # Output projection weights — maps SwiGLU output [D] → vocab [V]
+        # These are separate from the SwiGLU output module and store
+        # the actual linear projection from hidden dim to vocab size.
+        rng = np.random.default_rng(seed + 300)
+        self.output_proj_w: np.ndarray = rng.random((embed_dim, vocab_size), dtype=np.float32)
+        self.output_proj_b: np.ndarray = np.zeros(vocab_size, dtype=np.float32)
+
     def forward(
         self,
         input_ids: np.ndarray,
@@ -162,12 +169,9 @@ class NumPyModel:
 
         # Linear projection to vocab: (B*S, D) @ (D, V) + (V,) → (B*S, V)
         # This is the actual output projection — using a simple linear layer
-        vocab_proj_w = np.random.default_rng(self.seed + 300).random(
-            (self.embed_dim, self.vocab_size), dtype=np.float32
-        )
-        vocab_proj_b = np.zeros(self.vocab_size, dtype=np.float32)
-
-        logits_flat = swi_out @ vocab_proj_w + vocab_proj_b  # (B*S, V)
+        # Uses self.output_proj_w and self.output_proj_b (instance attributes)
+        # instead of regenerating on every call to ensure deterministic forward pass
+        logits_flat = swi_out @ self.output_proj_w + self.output_proj_b  # (B*S, V)
 
         # Reshape back: (B*S, V) → (B, S, V)
         logits = logits_flat.reshape(batch_size, seq_len, self.vocab_size)  # (B, S, V)
@@ -220,6 +224,10 @@ class NumPyModel:
         params["output.W1"] = self.output.W1
         params["output.W2"] = self.output.W2
         params["output.W3"] = self.output.W3
+
+        # Output projection weights
+        params["output_proj_w"] = self.output_proj_w
+        params["output_proj_b"] = self.output_proj_b
 
         return params
 
