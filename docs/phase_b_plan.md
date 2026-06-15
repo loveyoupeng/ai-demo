@@ -63,7 +63,7 @@ tests/
 **Structure rationale:** 
 - `impl/` top-level (as per design doc) with `numpy/` as one backend
 - `utils/` subfolder for tiny helper functions that are reused across modules
-- Test mirror structure: `tests/unit/numpy/` for all NumPy-specific tests
+- Test mirror structure: `tests/unit/_np/` for all NumPy-specific tests
 - Each test file follows the "one class per test file" pattern
 
 ---
@@ -74,24 +74,24 @@ For each component, follow this strict cycle:
 
 ### Step 1: Write test file — ALL TESTS FAIL
 ```bash
-# Write tests/unit/numpy/test_<component>.py — only tests, NO implementation
-# Run: PYTHONPATH=shared PYTHONPATH=impl PYTHONPATH=impl/numpy uv run pytest tests/unit/numpy/test_<component>.py -v --timeout=10
+# Write tests/unit/_np/test_<component>.py — only tests, NO implementation
+# Run: PYTHONPATH=shared PYTHONPATH=impl PYTHONPATH=impl/_np uv run pytest tests/unit/_np/test_<component>.py -v --timeout=10
 # Expected: ALL tests fail (ModuleNotFoundError / ImportError)
 ```
 
 ### Step 2: Implement minimal code
 ```bash
 # Write minimal implementation that makes ALL tests pass
-# Run: PYTHONPATH=shared PYTHONPATH=impl PYTHONPATH=impl/numpy uv run pytest tests/unit/numpy/test_<component>.py -v --timeout=10
+# Run: PYTHONPATH=shared PYTHONPATH=impl PYTHONPATH=impl/_np uv run pytest tests/unit/_np/test_<component>.py -v --timeout=10
 # Expected: ALL pass
 ```
 
 ### Step 3: Quality check
 ```bash
-PYTHONPATH=shared ruff check impl/numpy/<component>.py && \
-PYTHONPATH=shared pyright impl/numpy/<component>.py && \
-PYTHONPATH=shared ruff check tests/unit/numpy/test_<component>.py && \
-PYTHONPATH=shared pyright tests/unit/numpy/test_<component>.py
+PYTHONPATH=shared ruff check impl/_np/<component>.py && \
+PYTHONPATH=shared pyright impl/_np/<component>.py && \
+PYTHONPATH=shared ruff check tests/unit/_np/test_<component>.py && \
+PYTHONPATH=shared pyright tests/unit/_np/test_<component>.py
 ```
 
 ### Step 4: Commit
@@ -114,11 +114,11 @@ git add -A && git commit -m "b<stage>: <component> — <N> tests pass"
 
 | Stage | Files | Gate | Test Count |
 |-------|-------|------|------------|
-| **B0.1** | `impl/`, `tests/unit/numpy/` directories, `__init__.py` files | pytest collects 0 tests | 0 |
-| **B0.2** | `tests/unit/numpy/test_modules.py` — import the package | pytest discovers tests | 1 |
+| **B0.1** | `impl/`, `tests/unit/_np/` directories, `__init__.py` files | pytest collects 0 tests | 0 |
+| **B0.2** | `tests/unit/_np/test_modules.py` — import the package | pytest discovers tests | 1 |
 
 ```python
-# tests/unit/numpy/test_modules.py
+# tests/unit/_np/test_modules.py
 from impl.numpy import NumPyModel, ModelConfig
 
 def test_numPyModel_imports():
@@ -142,7 +142,7 @@ class Embedding:
 ```
 
 ```python
-# tests/unit/numpy/test_embedding.py
+# tests/unit/_np/test_embedding.py
 class TestEmbeddingForward:
     def test_output_shape(self):
         # input_ids: [batch=2, seq_len=4] with values in [0, vocab_size)
@@ -173,7 +173,7 @@ class RMSNorm:
 ```
 
 ```python
-# tests/unit/numpy/test_rmsnorm.py
+# tests/unit/_np/test_rmsnorm.py
 class TestRMSNormForward:
     def test_output_shape(self):
         # input [batch, seq_len, embed_dim], gamma [embed_dim]
@@ -211,7 +211,7 @@ class SiLULayer:
 ```
 
 ```python
-# tests/unit/numpy/test_silu.py
+# tests/unit/_np/test_silu.py
 class TestSiLULayer:
     def test_output_shape(self):
         # Same shape as input
@@ -242,7 +242,7 @@ class SwiGLUFFN:
 ```
 
 ```python
-# tests/unit/numpy/test_swiglu.py
+# tests/unit/_np/test_swiglu.py
 class TestSwiGLUFFN:
     def test_output_shape(self):
         # [batch, seq_len, embed_dim] → [batch, seq_len, embed_dim]
@@ -276,7 +276,7 @@ class RoPE:
 ```
 
 ```python
-# tests/unit/numpy/test_rope.py
+# tests/unit/_np/test_rope.py
 class TestRoPE:
     def test_output_shape(self):
         # Same shape as input (Q, K unchanged shape)
@@ -309,7 +309,7 @@ class MultiHeadAttention:
 ```
 
 ```python
-# tests/unit/numpy/test_mha.py
+# tests/unit/_np/test_mha.py
 class TestMultiHeadAttentionForward:
     def test_output_shape(self):
         # X [B, S, D] → output [B, S, D]
@@ -339,7 +339,7 @@ class TestMultiHeadAttentionForward:
 ```
 
 ```python
-# tests/unit/numpy/test_gqa.py
+# tests/unit/_np/test_gqa.py
 class TestGroupedQueryAttention:
     def test_k_v_broadcast(self):
         # K and V from n_groups projections, broadcast to n_heads
@@ -368,7 +368,7 @@ class MoE:
 ```
 
 ```python
-# tests/unit/numpy/test_moe.py
+# tests/unit/_np/test_moe.py
 class TestMoEForward:
     def test_output_shape(self):
         # [B, S, D] → [B, S, D]
@@ -401,7 +401,7 @@ class TransformerBlock:
 ```
 
 ```python
-# tests/unit/numpy/test_transformer_block.py
+# tests/unit/_np/test_transformer_block.py
 class TestTransformerBlockForward:
     def test_output_shape(self):
         # X [B, S, D] → output [B, S, D]
@@ -433,7 +433,7 @@ class DecoderStack:
 ```
 
 ```python
-# tests/unit/numpy/test_decoder_stack.py
+# tests/unit/_np/test_decoder_stack.py
 class TestDecoderStackForward:
     def test_output_shape(self):
         # X [B, S, D] → output [B, S, D]
@@ -461,7 +461,7 @@ class NumPyModel:
 ```
 
 ```python
-# tests/unit/numpy/test_model.py
+# tests/unit/_np/test_model.py
 class TestNumPyModelForward:
     def test_output_shape(self):
         # input_tokens: [B, S] (int32)
@@ -505,7 +505,7 @@ class CrossEntropyLoss:
 ```
 
 ```python
-# tests/unit/numpy/test_crossentropy.py
+# tests/unit/_np/test_crossentropy.py
 class TestCrossEntropyLossForward:
     def test_scalar_output(self):
         # loss is a scalar
@@ -536,7 +536,7 @@ class AdamW:
 ```
 
 ```python
-# tests/unit/numpy/test_adamw.py
+# tests/unit/_np/test_adamw.py
 class TestAdamW:
     def test_updates_parameters(self):
         # After step, parameter values change
@@ -569,7 +569,7 @@ def train_step(model, batch_input, batch_target, optimizer, loss_fn) -> float:
 
 **Tests focus on the orchestration:**
 ```python
-# tests/unit/numpy/test_training_loop.py
+# tests/unit/_np/test_training_loop.py
 class TestTrainingLoop:
     def test_training_reduses_loss(self):
         # Run several steps, loss should decrease
@@ -600,7 +600,7 @@ class NaiveKVCache:
 ```
 
 ```python
-# tests/unit/numpy/test_naive_kvcache.py
+# tests/unit/_np/test_naive_kvcache.py
 class TestNaiveKVCache:
     def test_output_shape(self):
         # k_cache, v_cache have correct shapes
@@ -631,7 +631,7 @@ class TurboQuantKVCache:
 ```
 
 ```python
-# tests/unit/numpy/test_turboquant_kvcache.py
+# tests/unit/_np/test_turboquant_kvcache.py
 class TestTurboQuantKVCache:
     def test_compression_ratio(self):
         # 1-bit storage uses less memory
@@ -664,7 +664,7 @@ class NumPyModel:
 ```
 
 ```python
-# tests/unit/numpy/test_inference.py
+# tests/unit/_np/test_inference.py
 class TestInference:
     def test_output_length(self):
         # Generated tokens have correct length
@@ -682,7 +682,7 @@ class TestInference:
 
 ### B10.2: CLI interface
 
-**What it does:** `uv run impl/numpy/cli.py --prompt "hello" --max_new_tokens 10`
+**What it does:** `uv run impl/_np/cli.py --prompt "hello" --max_new_tokens 10`
 
 ```bash
 # Simple argparse: --prompt, --max_new_tokens, --temperature, --model_dir, --checkpoint_name
@@ -690,7 +690,7 @@ class TestInference:
 ```
 
 ```python
-# tests/unit/numpy/test_cli.py
+# tests/unit/_np/test_cli.py
 # Tests CLI parsing only (no actual inference needed)
 class TestCLI:
     def test_help_text(self):
@@ -711,7 +711,7 @@ class TestCLI:
 **What it does:** Train a small model on synthetic data, verify loss decreases.
 
 ```python
-# tests/unit/numpy/test_full_training.py
+# tests/unit/_np/test_full_training.py
 class TestFullTraining:
     def test_loss_decreases(self):
         # Use hardcoded small dataset (no TinyStories needed)
@@ -734,7 +734,7 @@ class TestFullTraining:
 **What it does:** NumPyModel integrates with `shared/config.py` and `shared/constants.py`.
 
 ```python
-# tests/unit/numpy/test_numpy_config_integration.py
+# tests/unit/_np/test_numpy_config_integration.py
 class TestNumPyModelConfigIntegration:
     def test_builds_with_transformer_config(self):
         # NumPyModel(TransformerConfig(...)) works
@@ -787,17 +787,17 @@ After all stages complete:
 
 ```bash
 # 1. All unit tests pass
-PYTHONPATH=shared PYTHONPATH=impl uv run pytest tests/unit/numpy/ -v --timeout=300
+PYTHONPATH=shared PYTHONPATH=impl uv run pytest tests/unit/_np/ -v --timeout=300
 
 # 2. Ruff + pyright clean on NumPy code
-PYTHONPATH=shared ruff check impl/numpy/ tests/unit/numpy/
-PYTHONPATH=shared pyright impl/numpy/ tests/unit/numpy/
+PYTHONPATH=shared ruff check impl/_np/ tests/unit/_np/
+PYTHONPATH=shared pyright impl/_np/ tests/unit/_np/
 
 # 3. Small model trains on TinyStories (sanity check)
-PYTHONPATH=shared PYTHONPATH=impl uv run impl/numpy/cli.py --prompt "The" --max_new_tokens 5 --model_dir test_model --n_layers 1 --embed_dim 32 --n_heads 2 --vocab_size 512
+PYTHONPATH=shared PYTHONPATH=impl uv run impl/_np/cli.py --prompt "The" --max_new_tokens 5 --model_dir test_model --n_layers 1 --embed_dim 32 --n_heads 2 --vocab_size 512
 
 # 4. Checkpoint round-trip (NumPy)
-PYTHONPATH=shared uv run impl/numpy/cli.py train --checkpoint_name tiny_demo --n_layers 1 --embed_dim 32 --n_heads 2
+PYTHONPATH=shared uv run impl/_np/cli.py train --checkpoint_name tiny_demo --n_layers 1 --embed_dim 32 --n_heads 2
 
 # 5. All existing tests still pass
 PYTHONPATH=shared uv run pytest tests/unit/ -v --timeout=300
