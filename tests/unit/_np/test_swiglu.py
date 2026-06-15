@@ -36,9 +36,7 @@ class TestSwiGLUFFNForward:
         out = layer.forward(x)
 
         # Output should not be all zeros (weights are randomly initialized, not zeroed)
-        assert not np.allclose(out, 0.0), (
-            "SwiGLU output should not be all zeros with random weights"
-        )
+        assert not np.allclose(out, 0.0), "SwiGLU output should not be all zeros with random weights"
 
     def test_ff_dim_independence(self):
         """Output shape is always [batch, seq_len, embed_dim] regardless of ff_dim."""
@@ -62,9 +60,7 @@ class TestSwiGLUFFNForward:
 
         out_perturbed = layer.forward(x.copy())
 
-        assert not np.allclose(out_base, out_perturbed, rtol=1e-3), (
-            "Perturbing W1 should change output"
-        )
+        assert not np.allclose(out_base, out_perturbed, rtol=1e-3), "Perturbing W1 should change output"
 
     def test_gradient_existence_w3(self):
         """SwiGLU computes through w3 — changing w3 should change output."""
@@ -78,6 +74,4 @@ class TestSwiGLUFFNForward:
 
         out_perturbed = layer.forward(x.copy())
 
-        assert not np.allclose(out_base, out_perturbed, rtol=1e-3), (
-            "Perturbing W3 should change output"
-        )
+        assert not np.allclose(out_base, out_perturbed, rtol=1e-3), "Perturbing W3 should change output"

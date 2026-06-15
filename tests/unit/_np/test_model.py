@@ -50,9 +50,7 @@ class TestNumPyModelForward:
         logits = model.forward(input_ids)
         alt_logits = model.forward(alt_ids)
 
-        assert not np.allclose(logits, alt_logits, atol=1e-3), (
-            "Different inputs should produce different outputs"
-        )
+        assert not np.allclose(logits, alt_logits, atol=1e-3), "Different inputs should produce different outputs"
 
     def test_gradient_existence(self):
         """All parameters have gradients after backward."""

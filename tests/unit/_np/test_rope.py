@@ -81,6 +81,4 @@ class TestRoPEForward:
         out_k = rope.forward(k, pos)
 
         # Same input → same output (deterministic function)
-        assert np.allclose(out_q, out_k, rtol=1e-5), (
-            "Identical Q and K should produce identical RoPE outputs"
-        )
+        assert np.allclose(out_q, out_k, rtol=1e-5), "Identical Q and K should produce identical RoPE outputs"
