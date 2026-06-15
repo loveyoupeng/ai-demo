@@ -910,3 +910,88 @@ class TransformerBlock:
         out = h + moe_out  # (B, S, D)
 
         return out
+
+
+class DecoderStack:
+    """Stack of TransformerBlocks — chains n_layers of decoder blocks.
+
+    Parameters
+    ----------
+    n_layers : int
+        Number of TransformerBlocks to stack.
+    embed_dim : int
+        Input/output embedding dimension.
+    n_heads : int
+        Number of attention heads per block.
+    n_experts : int
+        Number of MoE experts per block.
+    ff_dim : int
+        Hidden dimension for MoE experts per block.
+    k : int
+        Number of top experts to activate per token.
+    rope_dim : int
+        Number of head dimensions for RoPE (0 = no RoPE).
+    seed : int
+        Random seed for weight initialization.
+
+    Forward
+    -------
+    x : np.ndarray, shape (batch_size, seq_len, embed_dim)
+
+    Returns
+    -------
+    out : np.ndarray, shape (batch_size, seq_len, embed_dim)
+
+    Architecture
+    ------------
+    X [B,S,D] → block_0 → block_1 → ... → block_{n_layers-1} → output [B,S,D]
+
+    Each block:
+      h = x + MHA(RMSNorm(x)) + MoE(RMSNorm(x + MHA(x)))
+    """
+
+    def __init__(
+        self,
+        n_layers: int,
+        embed_dim: int,
+        n_heads: int,
+        n_experts: int,
+        ff_dim: int,
+        k: int = 2,
+        rope_dim: int = 0,
+        seed: int = 0,
+    ) -> None:
+        self.n_layers = n_layers
+
+        # Create TransformerBlocks in sequence — each uses a different seed
+        # to avoid weight collisions
+        self.blocks = [
+            TransformerBlock(
+                embed_dim=embed_dim,
+                n_heads=n_heads,
+                n_experts=n_experts,
+                ff_dim=ff_dim,
+                k=k,
+                rope_dim=rope_dim,
+                seed=seed + layer_idx,
+            )
+            for layer_idx in range(n_layers)
+        ]
+
+    def forward(self, x: np.ndarray) -> np.ndarray:
+        """Forward pass through all stacked blocks.
+
+        Parameters
+        ----------
+        x : np.ndarray, shape (batch_size, seq_len, embed_dim)
+
+        Returns
+        -------
+        out : np.ndarray, shape (batch_size, seq_len, embed_dim)
+        """
+        out = x  # (B, S, D)
+
+        for block in self.blocks:
+            out = block.forward(out)  # (B, S, D) → (B, S, D)
+
+        return out
