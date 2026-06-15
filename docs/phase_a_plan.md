@@ -5,10 +5,7 @@ Create `shared/` module with config, constants, tokenizer, dataset, checkpoint f
 
 ## Execution Stages
 
-### Stage 0: Directory Structure ✅
-`shared/` and `tests/unit/` created (checkpoint commit)
-
-### Stage 1: ✅ COMPLETE — All 120 tests pass, ruff+pyright clean on shared/
+### Stage 1: ✅ COMPLETE — 131 tests pass, ruff+pyright clean on shared/
 
 | Agent | Files | Test Count | Status |
 |-------|-------|------------|--------|
@@ -18,13 +15,19 @@ Create `shared/` module with config, constants, tokenizer, dataset, checkpoint f
 | **Agent 4** | `shared/dataset.py` | 12 | ✅ complete — cache in resource/, fixed batching |
 | **Agent 5** | `shared/checkpoint.py` | 11 | ✅ complete — save/load config + npz |
 
-### Stage 2: Next — Integration (Agent 6)
+### Stage 2: ✅ COMPLETE — Integration tests for full pipeline
 
-| Agent | Files | Gate | Status |
-|-------|-------|------|--------|
-| **Agent 6** | `tests/conftest.py` + `tests/unit/test_shared_pipeline.py` | pytest all + ruff + pyright + import test | ⏳ NEXT |
+| Agent | Files | Test Count | Status |
+|-------|-------|------------|--------|
+| **Agent 6** | `tests/conftest.py` + `tests/unit/test_shared_pipeline.py` | 11 | ✅ complete — full pipeline: config→save→load→verify |
 
-## Final Gate (after Stage 2)
+## Final Gate Results
 ```bash
-PYTHONPATH=shared uv run pytest tests/unit/ -v --timeout=120 && ruff check shared/ tests/ && pyright shared/ && python -c "import shared; print('OK')"
+PYTHONPATH=shared uv run pytest tests/unit/ -v --timeout=120   # 131 passed
+PYTHONPATH=shared ruff check shared/                             # All checks passed
+PYTHONPATH=shared pyright shared/                                # 0 errors
+PYTHONPATH=shared python -c "import shared; print('OK')"         # OK
 ```
+
+## Phase A: DONE
+All shared Foundation modules are complete and tested. Ready for Phase B: NumPy Implementation.
