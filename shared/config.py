@@ -103,6 +103,7 @@ class TransformerConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TransformerConfig:
-        """Deserialize, ignoring derived fields."""
-        skip = {"head_dim", "k_dim", "v_dim"}
-        return cls(**{k: v for k, v in data.items() if k not in skip})
+        """Deserialize, ignoring derived fields and metadata (model_type, etc.)."""
+        skip = {"head_dim", "k_dim", "v_dim", "model_type"}
+        filtered = {k: v for k, v in data.items() if k not in skip}
+        return cls(**filtered)
