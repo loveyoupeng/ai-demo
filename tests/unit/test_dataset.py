@@ -1,9 +1,10 @@
 """Tests for shared.dataset — TinyStories dataset loading and batching.
 
 Tests cover: load_tinystories(), TextDataset class, get_dataloader_sequences().
-The TinyStories dataset downloads on first use (~1 min).
+All data loaded from local resource files with no external downloads.
 """
 
+from __future__ import annotations
 
 
 class TestLoadTinyStories:
@@ -40,10 +41,10 @@ class TestTextDataset:
     def test_dataset_initialization(self):
         """Dataset initializes by concatenating tokenized text."""
         from shared.dataset import TextDataset, load_tinystories
-        from shared.tokenizer import create_tokenizer
+        from shared.tokenizer import SimpleCharTokenizer
 
         stories = load_tinystories("train")[:100]  # small subset for speed
-        tok = create_tokenizer()
+        tok = SimpleCharTokenizer()
         ds = TextDataset(stories, tok, context_length=32, seed=42)
         # Should have concatenated token IDs
         assert len(ds.token_ids) > 0
@@ -52,10 +53,10 @@ class TestTextDataset:
     def test_get_sequences(self):
         """get_sequences returns correct number of (input, target) pairs."""
         from shared.dataset import TextDataset, load_tinystories
-        from shared.tokenizer import create_tokenizer
+        from shared.tokenizer import SimpleCharTokenizer
 
         stories = load_tinystories("train")[:100]
-        tok = create_tokenizer()
+        tok = SimpleCharTokenizer()
         ds = TextDataset(stories, tok, context_length=16, seed=42)
 
         seqs = ds.get_sequences(5, batch_size=3)
@@ -67,10 +68,10 @@ class TestTextDataset:
     def test_get_sequences_context_length(self):
         """Each sample is exactly context_length tokens."""
         from shared.dataset import TextDataset, load_tinystories
-        from shared.tokenizer import create_tokenizer
+        from shared.tokenizer import SimpleCharTokenizer
 
         stories = load_tinystories("train")[:100]
-        tok = create_tokenizer()
+        tok = SimpleCharTokenizer()
 
         for ctx_len in [16, 32, 64, 128]:
             ds = TextDataset(stories, tok, context_length=ctx_len, seed=42)
@@ -84,10 +85,10 @@ class TestTextDataset:
     def test_get_sequences_context_length_custom(self):
         """Context length 1 produces minimal windows."""
         from shared.dataset import TextDataset, load_tinystories
-        from shared.tokenizer import create_tokenizer
+        from shared.tokenizer import SimpleCharTokenizer
 
         stories = load_tinystories("train")[:100]
-        tok = create_tokenizer()
+        tok = SimpleCharTokenizer()
         ds = TextDataset(stories, tok, context_length=1, seed=42)
         seqs = ds.get_sequences(3, batch_size=2)
         assert len(seqs) == 3
@@ -99,10 +100,10 @@ class TestTextDataset:
     def test_text_dataset_skip_empty_stories(self):
         """Empty stories are skipped during initialization."""
         from shared.dataset import TextDataset
-        from shared.tokenizer import create_tokenizer
+        from shared.tokenizer import SimpleCharTokenizer
 
         stories = ["Once upon", "", "   ", "The cat sat"]
-        tok = create_tokenizer()
+        tok = SimpleCharTokenizer()
         ds = TextDataset(stories, tok, context_length=8, seed=42)
         # Should still have tokens from non-empty stories
         assert len(ds.token_ids) > 0
@@ -118,10 +119,10 @@ class TestDataloaderSequences:
             get_dataloader_sequences,
             load_tinystories,
         )
-        from shared.tokenizer import create_tokenizer
+        from shared.tokenizer import SimpleCharTokenizer
 
         stories = load_tinystories("train")[:50]
-        tok = create_tokenizer()
+        tok = SimpleCharTokenizer()
         ds = TextDataset(stories, tok, context_length=32, seed=42)
 
         batches = get_dataloader_sequences(ds, batch_size=4, num_batches=2)
@@ -138,10 +139,10 @@ class TestDataloaderSequences:
             get_dataloader_sequences,
             load_tinystories,
         )
-        from shared.tokenizer import create_tokenizer
+        from shared.tokenizer import SimpleCharTokenizer
 
         stories = load_tinystories("train")[:50]
-        tok = create_tokenizer()
+        tok = SimpleCharTokenizer()
         ds = TextDataset(stories, tok, context_length=64, seed=42)
 
         batches = get_dataloader_sequences(ds, batch_size=8, num_batches=1)
@@ -160,10 +161,10 @@ class TestDataloaderSequences:
             get_dataloader_sequences,
             load_tinystories,
         )
-        from shared.tokenizer import create_tokenizer
+        from shared.tokenizer import SimpleCharTokenizer
 
         stories = load_tinystories("train")[:50]
-        tok = create_tokenizer()
+        tok = SimpleCharTokenizer()
         ds = TextDataset(stories, tok, context_length=32, seed=42)
 
         batches = get_dataloader_sequences(ds, batch_size=2, num_batches=5)
@@ -176,10 +177,10 @@ class TestDataloaderSequences:
             get_dataloader_sequences,
             load_tinystories,
         )
-        from shared.tokenizer import create_tokenizer
+        from shared.tokenizer import SimpleCharTokenizer
 
         stories = load_tinystories("train")[:50]
-        tok = create_tokenizer()
+        tok = SimpleCharTokenizer()
         ds = TextDataset(stories, tok, context_length=32, seed=42)
 
         for batch_size in [1, 4, 8, 16]:

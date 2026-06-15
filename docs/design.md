@@ -319,28 +319,29 @@ def set_global_seed(seed: int):
 ## 5. Implementation Priority Order
 
 ```
-Phase A: Shared Foundation (NumPy-first approach)
-Phase B: NumPy Implementation (complete)
-Phase C: PyTorch Implementation
-Phase D: Triton Implementation
-Phase E: CUDA Implementation
-Phase F: Integration & E2E
+Phase A: Shared Foundation (NumPy-first approach) ✅ COMPLETE
+Phase B: NumPy Implementation (complete) ✅ COMPLETE
+Phase C: PyTorch Implementation ⏳ PLANNED (Not Started)
+Phase D: Triton Implementation 🔲 Not Started
+Phase E: CUDA Implementation 🔲 Not Started
+Phase F: Integration & E2E 🔲 Not Started
 ```
 
-### Phase A: Shared Foundation
+### Phase A: Shared Foundation ✅ COMPLETE
 **Goal:** Create shared code that all 4 backends will import
 **Prerequisite:** NumPy implementation MUST exist first (backend for reference)
 
 1. `config.py` — TransformerConfig dataclass
 2. `constants.py` — Parameter name string constants (no raw magic strings allowed)
 3. `tokenizer.py` — BPE + CharLevel tokenizers
-4. `dataset.py` — TinyStories streaming loader
+4. `dataset.py` — TinyStories streaming loader → local JSON (no external downloads)
 5. `checkpoint.py` — Load/Save in shared format
 6. `conftest.py` — Pytest fixtures shared across backends
 
-### Phase B: NumPy Implementation
+### Phase B: NumPy Implementation ✅ COMPLETE
 **Goal:** Reference implementation, fully tested
 **Principle:** Educational, every operation explained
+**Result:** 21 commits (b0–b19), ~70 tests, all tests pass
 
 1. Layer primitives: Embedding, RMSNorm, SiLU, SwiGLU, MLP
 2. RoPE position encoding (configurable dimension)
@@ -360,19 +361,21 @@ Phase F: Integration & E2E
 16. Unit tests for each component
 17. Cross-backend reference tests (numpy is the baseline)
 
-### Phase C: PyTorch Implementation
+### Phase C: PyTorch Implementation ⏳ PLANNED (Not Started)
 **Goal:** Production-ready, mirrors NumPy behavior exactly
+**Status:** Plan exists at `docs/phase_c_plan.md` — execution ready
 
 1. nn.Module equivalents of all layers
 2. Same model construction with same parameter mapping
 3. Automatic backward (torch.autograd) replaces manual gradients
+
 4. Same training loop (uses torch.optim, torch.utils.data)
 5. Same inference engine (torch-based KV cache)
 6. Same CLI interface
 7. Cross-backend parity tests (numpy vs torch)
 8. Performance comparison (optional)
 
-### Phase D: Triton Implementation
+### Phase D: Triton Implementation 🔲 Not Started
 **Goal:** GPU kernels for compute-heavy operations
 
 1. Triton kernels for: LayerNorm, Attention, MoE routing, SiGLU
@@ -382,7 +385,7 @@ Phase F: Integration & E2E
 5. Cross-backend parity tests
 6. Profiling comparison
 
-### Phase E: CUDA Implementation
+### Phase E: CUDA Implementation 🔲 Not Started
 **Goal:** Lowest-level GPU programming
 
 1. nvidia/cuda-python bindings (no PyTorch dependency)
@@ -392,7 +395,7 @@ Phase F: Integration & E2E
 5. Same training + inference loops
 6. Cross-backend parity tests
 
-### Phase F: Integration & E2E
+### Phase F: Integration & E2E 🔲 Not Started
 **Goal:** Verify everything works end-to-end
 
 1. Train on TinyStories with each backend (NumPy, PyTorch)
@@ -575,7 +578,7 @@ def test_decoder_stack_equivalent():
 
 ## 9. Build Sequence (Phase-by-Phase)
 
-### Phase A: Shared Foundation
+### Phase A: Shared Foundation ✅ COMPLETE
 ```
 1. config.py + constants.py
 2. tokenizer.py
@@ -585,7 +588,8 @@ def test_decoder_stack_equivalent():
 ```
 *Acceptance:* All shared code imports without errors.
 
-### Phase B: NumPy (15 sub-phases)
+### Phase B: NumPy (15 sub-phases) ✅ COMPLETE
+**Status:** 21 commits (b0-b19), ~70 tests pass, all quality gates clean
 ```
 B1: Basic layers (Embedding, RMSNorm, SiLU, SwiGLU)
 B2: RoPE
@@ -605,7 +609,8 @@ B15: CLI + Inference
 ```
 *Acceptance:* 100% unit tests pass. Model trains on TinyStories. Generates coherent text.
 
-### Phase C: PyTorch
+### Phase C: PyTorch ⏳ PLANNED (Not Started)
+**Status:** Execution ready in `docs/phase_c_plan.md` — 14 sub-phases (C0-C14), 20+ commits, ~65-70 tests
 ```
 C1: Layer wrappers (nn.Module)
 C2: Full model construction
@@ -616,7 +621,7 @@ C6: CLI integration
 ```
 *Acceptance:* PyTorch matches NumPy on all parity tests.
 
-### Phase D: Triton
+### Phase D: Triton 🔲 Not Started
 ```
 D1: Custom kernels (LayerNorm, Attention, MoE, Activation)
 D2: Model using Triton kernels
@@ -625,7 +630,7 @@ D4: Training + Inference
 ```
 *Acceptance:* Triton matches NumPy/PyTorch on parity tests.
 
-### Phase E: CUDA
+### Phase E: CUDA 🔲 Not Started
 ```
 E1: CUDA kernels (all compute ops)
 E2: Python wrapper for kernels
@@ -635,7 +640,7 @@ E5: Training + Inference
 ```
 *Acceptance:* CUDA matches NumPy/PyTorch/Triton on parity tests.
 
-### Phase F: Integration
+### Phase F: Integration 🔲 Not Started
 ```
 F1: Train model on TinyStories (NumPy + PyTorch)
 F2: Checkpoint cross-load (torch→numpy, numpy→torch)

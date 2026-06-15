@@ -4,21 +4,26 @@
 Build a fully functional decoder-only transformer LLM from scratch in 4 implementations (NumPy, PyTorch, Triton, CUDA) with identical behavior, trained on TinyStories, featuring RoPE, MHA, MoE, GQA, and multi-level KV caching for educational purposes.
 
 ## Current Phase
-Phase 1A — Shared Foundation (Execution in `docs/phase_a_plan.md`)
+**Phase 3 — PyTorch Implementation is PLANNED (not started). Execution ready at `docs/phase_c_plan.md`.**
+
+**Phase 2 (NumPy) is complete.** Next step: execute Phase 3 plan.
 
 ---
 
 ## High-Level Roadmap
 
-### Phase 2: NumPy Implementation (Learning-Focused)
+### Phase 2: NumPy Implementation (Learning-Focused) ✅ COMPLETE
 - All core layers, RoPE, MHA, MoE, TransformerBlock, DecoderStack
 - Loss functions, optimizers, KV Cache (Naive + TurboQuant)
 - Training loop, inference engine, checkpoint save/load
 - CLI, unit tests, cross-backend reference tests
+- **Result:** 21 commits (b0–b19), TDD-style re-implementation, all tests pass 📍 `docs/phase_b_plan.md`
 
-### Phase 3: PyTorch Implementation (Production-Ready)
+### Phase 3: PyTorch Implementation (Production-Ready) ⏳ PLANNED (Not Started)
 - Same architecture as NumPy, `nn.Module` based
 - Cross-backend parity tests, benchmarks
+- **Plan:** `docs/phase_c_plan.md`
+- **Status:** 0/20 commits, 0/65 tests — execution ready
 
 ### Phase 4: Triton Implementation (GPU Kernel Optimization)
 - Custom kernels: LayerNorm, attention, MoE routing, activations
@@ -33,15 +38,16 @@ Phase 1A — Shared Foundation (Execution in `docs/phase_a_plan.md`)
 
 ---
 
-## Phase 1A: Shared Foundation (Canonical Plan)
-📍 **This is the active execution plan.** See `docs/phase_a_plan.md` for full details, agent statuses, and gates.
+## Phase 1A: Shared Foundation ✅ COMPLETE
+**This phase is done.** See `docs/phase_a_plan.md` for full details.
 
 **Summary:** Create `shared/` module with config, constants, tokenizer, dataset loaders for all 4 backends.
 - ✅ `shared/config.py` — 41 tests pass
-- ⏳ `shared/tokenizer.py` — 21 tests pass
-- ❌ `shared/constants.py` — 52/79 tests fail (needs full impl)
-- ❌ `shared/dataset.py` — tests timeout (download issue)
-- ⏳ `shared/checkpoint.py` — BLOCKED by constants + dataset
+- ✅ `shared/tokenizer.py` — 21 tests pass
+- ✅ `shared/constants.py` — 79 tests pass (strict TDD: class-by-class)
+- ✅ `shared/dataset.py` — 12 tests pass (cache in resource/)
+- ✅ `shared/checkpoint.py` — 11 tests pass (save/load config + npz)
+- ✅ Integration tests — 11 tests (full pipeline: config→save→load→verify)
 
 ## Key Questions
 1. ~~Tokenizer choice for TinyStories~~ (confirmed: BytePair + Char fallback)

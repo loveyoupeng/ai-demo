@@ -18,6 +18,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from impl._np.cross_entropy import CrossEntropyLoss
 from impl._np.inference import TextGenerator
@@ -29,6 +30,7 @@ from impl._np.training import train_step
 class TestFullTraining:
     """Test end-to-end training pipeline with loss tracking."""
 
+    @pytest.mark.timeout(30)
     def test_loss_decreases(self):
         """Train on synthetic data — loss should decrease after 5 steps.
 

@@ -1,6 +1,6 @@
 """Dataset loading and preprocessing for the decoder-only transformer.
 
-Loads TinyStories from HuggingFace, tokenizes into sequences,
+Loads TinyStories from local resource files, tokenizes into sequences,
 and generates training batches. All backends import from here.
 
 Data Pipeline:
@@ -10,10 +10,10 @@ Data Pipeline:
 
 from __future__ import annotations
 
+import json
 import random
+from pathlib import Path
 from typing import Protocol
-
-from datasets import load_dataset  # type: ignore[import-untyped]
 
 
 class TokenizerLike(Protocol):
@@ -23,17 +23,20 @@ class TokenizerLike(Protocol):
         ...
 
 
+_RESOURCES_DIR = Path(__file__).resolve().parent.parent / "resource"
+
+
 def load_tinystories(
     split: str = "train",
     num_stories: int | None = None,
 ) -> list[str]:
-    """Load TinyStories dataset from HuggingFace.
+    """Load TinyStories dataset from local resource files.
 
-    Downloads the dataset (~8MB for all stories, cached by datasets lib).
+    Loads pre-downloaded stories from JSON files.
     For the demo, a cap of 10k training stories is applied automatically.
 
     Args:
-        split: Dataset split - "train", "validation", or "test".
+        split: Dataset split - "train" or "validation".
         num_stories: Max stories to load. Auto-capped to 10000 for train.
 
     Returns:
@@ -46,15 +49,13 @@ def load_tinystories(
         'Once upon a time, there was a little girl named...'
     """
     limit = num_stories or (10000 if split == "train" else 50)
-    ds = load_dataset("roneneldan/TinyStories", split=split, streaming=True)
-    stories: list[str] = []
-    for i, example in enumerate(ds):
-        text = example.get("text", "")
-        if text and text.strip():
-            stories.append(text)
-            if i >= limit:
-                break
-    return stories
+    file_map = {"train": "tinystories_train.json", "validation": "tinystories_val.json"}
+    if split not in file_map:
+        raise ValueError(f"Unknown split: {split}. Use 'train' or 'validation'.")
+    json_file = _RESOURCES_DIR / file_map[split]
+    with open(json_file) as f:
+        all_stories: list[str] = json.load(f)
+    return all_stories[:limit]
 
 
 class TextDataset:

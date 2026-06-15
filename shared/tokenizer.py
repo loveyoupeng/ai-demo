@@ -235,7 +235,7 @@ class SimpleCharTokenizer:
                 self.vocab[ch] = len(self.vocab)
                 self.reverse_vocab[len(self.vocab) - 1] = ch
 
-    def encode(self, text: str) -> list[int]:
+    def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
         """Encode text to token IDs.
 
         Maps each character to its ID, appending EOS at the end.
