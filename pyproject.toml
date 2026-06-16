@@ -22,8 +22,9 @@ url = "https://download.pytorch.org/whl/cpu"
 torch = { index = "pytorch-cpu" }
 
 [project.scripts]
-train = "src.numpy.cli:main"
-infer = "src.numpy.cli:main"
+train = "impl._np.cli:main"
+infer = "impl._np.cli:main"
+torch-infer = "impl._torch.cli:main"
 
 [tool.ruff]
 line-length = 120
