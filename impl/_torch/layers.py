@@ -485,3 +485,95 @@ class MultiHeadAttention(nn.Module):
         output = self.Wo(context)  # (B, S, D)
 
         return output, attn_weights
+
+
+class MixtureOfExperts(nn.Module):
+    """Mixture of Experts with top-k selection.
+
+    For each input token, a small router network produces softmax over E experts.
+    Only the top-k experts (with highest routing weight) fire. Each expert is a
+    SwiGLU FFN. The output is the weighted sum of the k active experts.
+
+    Architecture:
+        x [B,S,D] → router = x @ W_r + b_r [B,S,E] → softmax → w_r [B,S,E]
+        topk(w_r, k) → k expert indices per token
+
+        expert_out[t] = sum(w_r[t, i] * experts[i](x[t]) for i in top-k)
+
+    Parameters:
+        embed_dim: Input/output dimension of each expert.
+        n_experts: Number of expert networks.
+        ff_dim: Feed-forward hidden dimension within each expert.
+        k: Number of top experts to select per token (default=2).
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        n_experts: int,
+        ff_dim: int,
+        k: int = 2,
+    ) -> None:
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.n_experts = n_experts
+        self.ff_dim = ff_dim
+        self.k = k
+
+        # Router: linear layer from embed_dim to n_experts
+        # Shape: [embed_dim, n_experts]
+        self.router = Linear(embed_dim, n_experts, bias=False)
+
+        # Experts: each expert is a SwiGLU FFN
+        # Each expert: input embed_dim → output embed_dim
+        self.experts = nn.ModuleList(
+            [SwiGLUFFN(embed_dim, ff_dim) for _ in range(n_experts)]
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Mixture of Experts forward pass.
+
+        Args:
+            x: Input tensor. Shape [batch, seq, embed_dim].
+
+        Returns:
+            Output tensor. Shape [batch, seq, embed_dim].
+        """
+        n_experts = self.n_experts
+        k = self.k
+
+        # Router: (B, S, D) @ (D, E) → (B, S, E)
+        # Apply softmax over experts for routing
+        router_scores = self.router(x)  # (B, S, E)
+
+        # Softmax over the expert dimension for routing weights
+        # Normalize across experts: sum over E = 1 for each (batch, seq)
+        router_scores_max = router_scores.max(dim=-1, keepdim=True).values  # (B, S, 1)
+        router_scores = router_scores - router_scores_max  # stable
+        exp_scores = torch.exp(router_scores)  # (B, S, E)
+        exp_scores_sum = exp_scores.sum(dim=-1, keepdim=True)  # (B, S, 1)
+        routing_weights = exp_scores / exp_scores_sum  # (B, S, E) — softmax over experts
+
+        # For each token, select top-k experts
+        # Zero out weights below the k-th highest
+        if k < n_experts:
+            # Get the k-th highest weight per token via k-th argmax
+            # torch.topk returns (values, indices) — use it to find threshold
+            top_k_values, _ = torch.topk(routing_weights, k, dim=-1)  # (B, S, k)
+            threshold = top_k_values.min(dim=-1, keepdim=True).values  # (B, S, 1)
+            # Mask: keep only weights >= threshold
+            routing_weights = routing_weights * (routing_weights >= threshold).float()
+            # Re-normalize so selected weights sum to 1
+            routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+
+        # Compute expert outputs for ALL experts and ALL tokens in parallel
+        # expert_out: [n_experts, B, S, D]
+        expert_outs = torch.stack([expert(x) for expert in self.experts])  # (E, B, S, D)
+
+        # Weighted sum: route_weights[B,S,E] @ expert_outs[E,B,S,D] → (B,S,D)
+        # Equivalent to: sum over E of routing_weights[e] * expert_outs[e]
+        # For each (b, s): output[b,s] = sum_e(routing_weights[b,s,e] * expert_outs[e,b,s])
+        # bse × ebsd → bsd (sum over expert dimension e)
+        output = torch.einsum("bse,ebsd->bsd", routing_weights, expert_outs)
+
+        return output
