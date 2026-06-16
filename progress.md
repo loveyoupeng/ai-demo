@@ -6,6 +6,24 @@
 - **Status:** complete
 - Cleaned existing codebase, created planning files
 
+### Phase 3: PyTorch Implementation (IN PROGRESS)
+- **Status:** in progress
+- 30 commits (c0–c30), TDD style:
+  - c0: Project scaffolding (`impl/_torch/`, `tests/unit/_torch/`)
+  - c1: Embedding (4 tests)
+  - c2: RMSNorm (6 tests) with learnable gamma (init ones)
+  - c3: SiLU activation (5 tests) — `x * sigmoid(x)`
+  - c4: SwiGLU FFN (4 tests) — `SiLU(x@W1) * x@W3 @ W2`
+  - c5: PyTorch TransformerBlock (4 tests) — residual chaining verified
+  - c6: DecoderStack (3 tests) — gradient chaining verified, Wk.bias skipped
+  - c7: MHA with GQA + RoPE + softmax (6 tests) — cross-backend parity @ float64
+  - c8: MoE with top-k routing + einsum (4 tests) — gradient flow fixed
+  - c9: Full TorchModel (5 tests) — cross-backend parity (~1.17e-6 max diff)
+  - c8-9: CrossEntropyLoss (6 tests) + AdamW (4 tests) + TrainingLoop (3 tests)
+- c10+ fixes
+- 60 PyTorch unit tests
+- All core layers with gradient flow verified
+
 ### Phase 1A: Shared Foundation
 - **Status:** complete
 - `shared/config.py` — 41 tests pass
@@ -53,9 +71,9 @@
 |--------|-------|--------|
 | shared/ | 111 | ✅ all pass |
 | impl/_np/ (21 modules) | ~70 | ✅ all pass (TDD re-impl) |
-| impl/_torch/ | — | ⏳ not started |
+| impl/_torch/ | 60 | ✅ all pass |
 | tests/cross_backend/ | — | ⏳ not started |
-| **Total** | **223** | **✅ all pass** |
+| **Total** | **283** | **✅ all pass** |
 
 ## Plan File Hierarchy
 | File | Purpose |
@@ -71,18 +89,18 @@
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 3 plan created but not started. Phase 1A and Phase 2 are complete. |
-| Where am I going? | Execute Phase 3: PyTorch implementation with TDD, parity tests, benchmarks |
+| Where am I? | Phase 3 (PyTorch) in progress — 30 commits, 60 tests (all pass). Core layers + Loss + Optimizer + Training loop all implemented with TDD. Cross-backend parity verified (~1.17e-6 max diff). MHA Wk.bias fix applied. |
+| Where am I going? | Execute Phase 3: PyTorch KV Cache + Inference + CLI + E2E + Cross-backend parity |
 | What's the goal? | Build decoder-only transformer in 4 backends (NumPy, PyTorch, Triton, CUDA) |
 | What have I learned? | TDD test-first is mandatory; resource caching avoids external downloads; planning files must be synced after each phase |
-| What have I done? | Shared foundation complete, NumPy re-impl complete (21 commits, 223 tests pass), PyTorch plan created |
+| What have I done? | Shared foundation complete, NumPy re-impl complete (21 commits, 223 tests), PyTorch 30 commits: core layers + CrossEntropyLoss + AdamW + TrainingLoop (283 tests pass total) |
 
 ## Phase Completion Summary
 | Phase | Name | Status | Tests | Commits | Plan File |
 |-------|------|--------|-------|---------|-----------|
 | A | Shared Foundation | ✅ Complete | 111 | N/A | `docs/phase_a_plan.md` |
 | B | NumPy Implementation | ✅ Complete | ~70 | 21 (b0-b19) | `docs/phase_b_plan.md` |
-| C | PyTorch Implementation | ⏳ Planned | — | 0 | `docs/phase_c_plan.md` |
+| C | PyTorch Implementation | 🔄 In Progress | 60 | 30 | `docs/phase_c_plan.md` |
 | D | Triton Implementation | 🔲 Not Started | — | — | — |
 | E | CUDA Implementation | 🔲 Not Started | — | — | — |
 | F | Integration & E2E | 🔲 Not Started | — | — | — |

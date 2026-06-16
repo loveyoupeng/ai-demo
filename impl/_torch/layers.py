@@ -920,6 +920,151 @@ class TorchModel(nn.Module):
         load("output_proj_w", self.output_proj.weight)
         load("output_proj_b", self.output_proj.bias)
 
+    def save_as_numpy(self) -> dict[str, Any]:  # Returns dict[str, np.ndarray]
+        """Save all parameters as a NumPy-compatible dictionary.
+
+        Returns a dict with the same key structure as NumPyModel.get_all_parameters(),
+        enabling cross-backend parameter exchange for parity testing.
+
+        Returns
+        -------
+        params : dict[str, np.ndarray]
+            Dictionary mapping parameter names to NumPy arrays.
+
+        Notes
+        -----
+        Linear weight matrices are NOT transposed — stored as (out, in)
+        to match what load_from_numpy reads back. NumPy Linear uses (in, out)
+        convention, so load_from_numpy transposes on the way in.
+        """
+
+        params: dict[str, Any] = {}
+
+        def save(tensor: Any, np_key: str) -> None:
+            """Copy PyTorch tensor to NumPy array with matching key."""
+            params[np_key] = tensor.detach().cpu().numpy()
+
+        # ── Embedding ──────────────────────────────────────────────
+        save(self.embedding.weight, "embedding_weights")
+
+        # ── DecoderStack ───────────────────────────────────────────
+        for layer_idx, block in enumerate(self.stack.layers):
+            prefix = f"blocks.{layer_idx}"
+
+            # Layer norm gamma
+            save(block.ln1.gamma, f"{prefix}.ln1_gamma")
+            save(block.ln2.gamma, f"{prefix}.ln2_gamma")
+
+            # MHA Q (weight + bias)
+            save(block.mha.Wq.weight, f"{prefix}.mha.Wq")
+            save(block.mha.Wq.bias, f"{prefix}.mha.bq")
+
+            # MHA K (weight + bias)
+            save(block.mha.Wk.weight, f"{prefix}.mha.Wk")
+            save(block.mha.Wk.bias, f"{prefix}.mha.bk")
+
+            # MHA V (weight + bias)
+            save(block.mha.Wv.weight, f"{prefix}.mha.Wv")
+            save(block.mha.Wv.bias, f"{prefix}.mha.bv")
+
+            # MHA O (weight + bias)
+            save(block.mha.Wo.weight, f"{prefix}.mha.Wo")
+            save(block.mha.Wo.bias, f"{prefix}.mha.bo")
+
+            # MoE router
+            save(block.moe.router.weight, f"{prefix}.moe.router")
+
+            # MoE experts
+            for expert_idx, expert in enumerate(block.moe.experts):  # pyright: ignore[reportArgumentType]
+                expert_prefix = f"{prefix}.moe.experts.{expert_idx}"
+                save(expert.W1, f"{expert_prefix}.W1")
+                save(expert.W2, f"{expert_prefix}.W2")
+                save(expert.W3, f"{expert_prefix}.W3")
+
+        # ── Final RMSNorm ──────────────────────────────────────────
+        save(self.final_ln.gamma, "final_gamma")
+
+        # ── Output SwiGLU ──────────────────────────────────────────
+        save(self.output.W1, "output.W1")
+        save(self.output.W2, "output.W2")
+        save(self.output.W3, "output.W3")
+
+        # ── Output projection ──────────────────────────────────────
+        save(self.output_proj.weight, "output_proj_w")
+        save(self.output_proj.bias, "output_proj_b")
+
+        return params  # type: ignore[return-value]
+
+    def load_from_numpy_dict(self, params_dict: dict[str, Any]) -> None:
+        """Load parameters from a raw NumPy-compatible dictionary.
+
+        This is the reverse of save_as_numpy(). It loads a dict with the
+        same key structure as NumPyModel.get_all_parameters() and copies
+        the values into this model's parameters. The keys match the output
+        of save_as_numpy(), so save→dict→load is a no-op.
+
+        Args:
+            params_dict: Dictionary mapping parameter names to array-like values.
+                         Keys match those from save_as_numpy() (not transposed).
+        """
+
+        def load(tensor: Any, np_key: str) -> None:
+            """Copy numpy array to tensor in-place.
+            Matches save_as_numpy() convention — do NOT transpose because
+            saved weights are already in PyTorch (out, in) layout.
+            """
+            loaded = torch.from_numpy(params_dict[np_key]).to(tensor.dtype)
+            tensor.data.copy_(loaded)
+
+        # ── Embedding ──────────────────────────────────────────────
+        load(self.embedding.weight, "embedding_weights")
+
+        # ── DecoderStack ───────────────────────────────────────────
+        for layer_idx, block in enumerate(self.stack.layers):
+            prefix = f"blocks.{layer_idx}"
+
+            # Layer norm gamma
+            load(block.ln1.gamma, f"{prefix}.ln1_gamma")
+            load(block.ln2.gamma, f"{prefix}.ln2_gamma")
+
+            # MHA Q (weight + bias)
+            load(block.mha.Wq.weight, f"{prefix}.mha.Wq")
+            load(block.mha.Wq.bias, f"{prefix}.mha.bq")
+
+            # MHA K (weight + bias)
+            load(block.mha.Wk.weight, f"{prefix}.mha.Wk")
+            load(block.mha.Wk.bias, f"{prefix}.mha.bk")
+
+            # MHA V (weight + bias)
+            load(block.mha.Wv.weight, f"{prefix}.mha.Wv")
+            load(block.mha.Wv.bias, f"{prefix}.mha.bv")
+
+            # MHA O (weight + bias)
+            load(block.mha.Wo.weight, f"{prefix}.mha.Wo")
+            load(block.mha.Wo.bias, f"{prefix}.mha.bo")
+
+            # MoE router
+            load(block.moe.router.weight, f"{prefix}.moe.router")
+
+            # MoE experts
+            for expert_idx, expert in enumerate(block.moe.experts):  # pyright: ignore[reportArgumentType]
+                expert_prefix = f"{prefix}.moe.experts.{expert_idx}"
+                load(expert.W1, f"{expert_prefix}.W1")
+                load(expert.W2, f"{expert_prefix}.W2")
+                load(expert.W3, f"{expert_prefix}.W3")
+
+        # ── Final RMSNorm ──────────────────────────────────────────
+        load(self.final_ln.gamma, "final_gamma")
+
+        # ── Output SwiGLU ──────────────────────────────────────────
+        load(self.output.W1, "output.W1")
+        load(self.output.W2, "output.W2")
+        load(self.output.W3, "output.W3")
+
+        # ── Output projection ──────────────────────────────────────
+        load(self.output_proj.weight, "output_proj_w")
+        load(self.output_proj.bias, "output_proj_b")
+
 
 # ============================================================================
 # AdamW Optimizer
