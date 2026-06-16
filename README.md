@@ -22,109 +22,121 @@ uv sync
 
 ## Usage
 
-### Training the Model
-
-Train the model on a text dataset using the CLI entry point:
-
-```bash
-# Basic training with default parameters
-uv run src/train.py train --checkpoint_name my_model
-
-# Advanced training with custom parameters
-uv run src/train.py train \
-    --embed_dim 64 \
-    --layers 4 \
-    --heads 8 \
-    --experts 8 \
-    --max_context 128 \
-    --epochs 10 \
-    --lr 0.001 \
-    --checkpoint_name advanced_model \
-    --backend numpy
-```
-
 ### Running Inference
 
-Generate text from a trained checkpoint:
+Generate text from a small model:
 
 ```bash
-# Basic inference
-uv run src/train.py infer --checkpoint_name my_model --prompt "the"
+# NumPy model inference
+uv run python -m impl._np.cli --prompt "hello" --max_new_tokens 10
 
-# Advanced inference with temperature and generation length
-uv run src/train.py infer \
-    --checkpoint_name my_model \
-    --prompt "Once upon a" \
-    --num_new_tokens 50 \
-    --temperature 0.8
+# PyTorch model inference
+uv run python -m impl._torch.cli --prompt "hello" --max_new_tokens 10
+
+# With custom parameters
+uv run python -m impl._torch.cli \
+    --prompt "hello" \
+    --max_new_tokens 20 \
+    --temperature 0.8 \
+    --embed_dim 32 \
+    --n_layers 2
 ```
 
-## Cross-Backend Validation
+### Testing
 
-This project provides an E2E validation script that ensures the NumPy and PyTorch backends produce numerically identical results:
-
-```bash
-# Run all 4 validation scenarios (forward/backward parity + cross-load)
-uv run src/validate_e2e.py
-```
-
-### Scenarios
-
-| #   | Description                                                  | Verified                     |
-| --- | ------------------------------------------------------------ | ---------------------------- |
-| 1   | Standalone layer parity (NumPy vs PyTorch)                   | All 5 layer types           |
-| 2   | Transformer block forward + backward parity                   | Parameter gradients         |
-| 3   | Cross-load PyTorch → NumPy                                   | Forward + backward match    |
-| 4   | Cross-load NumPy → PyTorch                                   | Forward + backward match    |
-
-All scenarios pass with a maximum difference of < 0.5e-6 (float64).
-
-## Test Suite
+Run the test suite:
 
 ```bash
 # Run all tests
 uv run pytest tests/ -v
 
+# Run NumPy backend tests
+uv run pytest tests/unit/_np/ -v
+
+# Run PyTorch backend tests
+uv run pytest tests/unit/_torch/ -v
+
 # Run cross-backend parity tests
-uv run pytest tests/test_cross_backend.py -v
-
-# Run E2E validation
-uv run pytest tests/test_e2e_cross_backend.py -v
+uv run pytest tests/cross_backend/ -v
 ```
 
-### Test Categories
-
-- **NumPy backend**: 60+ tests covering all layers, transformer, training loop.
-- **PyTorch backend**: 40+ tests mirroring NumPy tests.
-- **Cross-backend**: 6 parity tests ensuring NumPy and PyTorch produce matching results (with tiered tolerances: standalone rtol=1e-4, single chain rtol=1e-3, full chain rtol=1e-2 per AGENTS.md).
-- **E2E validation**: 4 cross-load scenarios verifying bidirectional parameter loading.
-
-## Project Structure
+### Project Structure
 
 ```
-src/
-├── train.py                 # Main CLI entry point (train/infer/generate)
-├── validate_e2e.py          # E2E cross-backend validation
-├── model/
-│   ├── layers.py            # NumPy: TokenEmbedding, LayerNorm, FeedForward, PositionalEmbedding
-│   ├── attention.py         # NumPy: MultiHeadAttention
-│   ├── moe.py               # NumPy: Router, Expert, MoELayer
-│   ├── transformer.py       # NumPy: TransformerBlock, Transformer
-│   ├── pytorch/
-│   │   ├── layers.py        # PyTorch: PyTorchTokenEmbedding, PyTorchLayerNorm, PyTorchFeedForward, PyTorchPositionalEmbedding
-│   │   ├── attention.py     # PyTorch: PyTorchMultiHeadAttention
-│   │   ├── moe.py           # PyTorch: PyTorchRouter, PyTorchExpert, PyTorchMoELayer
-│   │   └── transformer.py   # PyTorch: PyTorchTransformerBlock, PyTorchTransformer
-├── training/
-│   ├── data_loader.py       # TextDataLoader
-│   ├── trainer.py           # Training loop
-│   └── config.py            # CLI argument definitions
-├── tokenizer/               # Character-level tokenizer
-└── inference.py             # Autoregressive generation logic
+impl/
+├── _np/                    # NumPy implementation
+│   ├── __init__.py
+│   ├── cli.py              # CLI entry point (training, inference)
+│   ├── inference.py        # Autoregressive generation logic
+│   ├── layers.py           # TokenEmbedding, LayerNorm, FeedForward, etc.
+│   ├── model.py            # NumPyModel: full transformer
+│   ├── training.py         # Training loop
+│   └── cross_entropy.py    # Cross-entropy loss
+│
+├── _torch/                 # PyTorch implementation
+│   ├── __init__.py
+│   ├── cli.py              # CLI entry point (inference)
+│   ├── cross_entropy.py    # Cross-entropy loss (F.cross_entropy)
+│   ├── inference.py        # Autoregressive generation with greedy/sampled/top-k
+│   ├── kv_cache.py         # Naive KV cache
+│   ├── layers.py           # Embedding, RMSNorm, SwiGLU, RoPE, MHA, MoE, AdamW
+│   ├── model_config.py     # ModelConfig dataclass + TorchModel stub
+│   ├── training.py         # Training loop (autograd)
+│   └── turboquant_kv_cache.py  # 1-bit compressed KV cache
+│
+shared/                     # Shared utilities (config, constants)
 tests/
-├── test_cross_backend.py    # 6 parity tests (NumPy vs PyTorch)
-├── test_e2e_cross_backend.py # E2E cross-load validation
-└── test_numpy_*.py          # NumPy backend tests
-└── test_pytorch_*.py        # PyTorch backend tests
+├── cross_backend/          # Cross-backend parity tests
+├── unit/
+│   ├── _np/               # NumPy backend tests (~75 tests)
+│   └── _torch/            # PyTorch backend tests (~70+ tests)
+scripts/
+└── download_tinystories.py # Dataset download utility
 ```
 
+## CLI Commands
+
+All commands run via `uv run python -m`:
+
+```bash
+# NumPy inference
+uv run python -m impl._np.cli --prompt "the" --max_new_tokens 10 --temperature 0.0
+
+# PyTorch inference
+uv run python -m impl._torch.cli --prompt "the" --max_new_tokens 10 --temperature 0.0
+
+# With all options
+uv run python -m impl._torch.cli \
+    --prompt "Once upon a" \
+    --max_new_tokens 50 \
+    --temperature 0.9 \
+    --top_k 20 \
+    --embed_dim 64 \
+    --n_layers 4 \
+    --n_heads 8
+```
+
+## Tests
+
+- **NumPy backend**: 70+ tests covering all layers, transformer, training loop, CLI.
+- **PyTorch backend**: 65+ tests mirroring NumPy tests. Tests include layers, training loop, KV cache (naive + TurboQuant), inference engine, CLI.
+- **Cross-backend**: Parity tests at three tiers per AGENTS.md:
+  - **Standalone layers** (isolated): rtol=1e-4, atol=1e-4
+  - **Single chain** (one layer chain): rtol=1e-3, atol=1e-3
+  - **Multi-layer chains**: rtol=1e-2, atol=1e-2
+
+## Development
+
+Use `uv` for dependency management and running scripts:
+
+```bash
+# Run tests
+uv run pytest tests/ -v
+
+# Lint and format
+uv run ruff check .
+uv run ruff format .
+
+# Type checking
+uv run pyright .
+```

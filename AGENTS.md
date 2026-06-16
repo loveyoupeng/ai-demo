@@ -21,23 +21,20 @@ See [task_plan.md](task_plan.md) for the current project plan, progress tracking
 
 ### CLI Commands
 
-All commands run via `uv run`:
+All commands run via `uv run python -m`:
 
 ```bash
-# Train model (default: NumPy backend)
-uv run src/train.py train --checkpoint_name my_model
+# Inference (NumPy backend)
+uv run python -m impl._np.cli --prompt "the" --max_new_tokens 10
 
-# Advanced training
-uv run src/train.py train \
-    --embed_dim 64 --layers 4 --heads 8 --experts 8 \
-    --max_context 128 --epochs 10 --lr 0.001 \
-    --backend numpy  # or "torch"
+# Inference (PyTorch backend)
+uv run python -m impl._torch.cli --prompt "the" --max_new_tokens 10
 
-# Text generation from trained checkpoint
-uv run src/train.py infer --checkpoint_name my_model --prompt "the"
-
-# E2E cross-backend validation (4 scenarios)
-uv run src/validate_e2e.py
+# With custom parameters
+uv run python -m impl._torch.cli \
+    --prompt "Once upon a" --max_new_tokens 50 \
+    --temperature 0.9 --top_k 20 \
+    --embed_dim 64 --n_layers 4 --n_heads 8
 ```
 
 ### Testing
@@ -46,44 +43,47 @@ uv run src/validate_e2e.py
 # All tests
 uv run pytest tests/ -v
 
-# Cross-backend parity tests
-uv run pytest tests/test_cross_backend.py -v
+# NumPy backend tests
+uv run pytest tests/unit/_np/ -v
 
-# E2E cross-load validation
-uv run pytest tests/test_e2e_cross_backend.py -v
+# PyTorch backend tests
+uv run pytest tests/unit/_torch/ -v
+
+# Cross-backend parity tests
+uv run pytest tests/cross_backend/ -v
 ```
 
 ## Rules and Principles
 
 1. **Quick iteration feedback loop over repetitive thinking** — When debugging, always run the minimal failing test first, capture the actual error, then make a targeted fix. Never spend time reading and re-reading code without running a test to get feedback. Every hypothesis must be validated with a test result, not with more thinking. Prefer:
-   - Write/run minimal failing test → observe error → fix → verify pass
-   - Over: read code → reason about what might be wrong → guess → read more code
-    
+    - Write/run minimal failing test → observe error → fix → verify pass
+    - Over: read code → reason about what might be wrong → guess → read more code
+
 2. **Tiered tolerance policy for parity tests** — All parity tests use float64. Acceptable tolerances depend on computational chain depth:
-   - **Standalone components** (tested in isolation): `rtol=1e-4, atol=1e-4` — e.g., LayerNorm, FeedForward, MoE, MHA tested independently without gradient chaining through multiple layers.
-   - **Component in single chain** (e.g., MHA inside TransformerBlock with single residual): `rtol=1e-3, atol=1e-3` — one level of gradient accumulation.
-   - **Full transformer backward chains** (e.g., `blocks.0` params when gradient flows through `lm_head → block.1 → block.0`): `rtol=1e-2, atol=1e-2` — gradient compound through 2+ layers, float64 precision limits accumulate to ~0.001–0.01 drift.
+    - **Standalone components** (tested in isolation): `rtol=1e-4, atol=1e-4` — e.g., LayerNorm, FeedForward, MoE, MHA tested independently without gradient chaining through multiple layers.
+    - **Component in single chain** (e.g., MHA inside TransformerBlock with single residual): `rtol=1e-3, atol=1e-3` — one level of gradient accumulation.
+    - **Full transformer backward chains** (e.g., `blocks.0` params when gradient flows through `lm_head → block.1 → block.0`): `rtol=1e-2, atol=1e-2` — gradient compound through 2+ layers, float64 precision limits accumulate to ~0.001–0.01 drift.
 
 3. All Python code must be free of `pyright` and `ruff` issues. After any
-   code change, use `ruff` to reorganize imports and format the code.
+    code change, use `ruff` to reorganize imports and format the code.
 
 4. If any request is unclear or has alternative approaches, confirm with the
-   user before making changes.
+    user before making changes.
 
 5. Do not make technical or business assumptions.
 
 6. Follow Python best practices and existing patterns in the repository.
-   Prefer short and clean code and avoid unnecessary complexity.
+    Prefer short and clean code and avoid unnecessary complexity.
 
 7. All unit tests must have a reasonable timeout using `pytest-timeout` to
-   prevent hung tests and ensure performance.
+    prevent hung tests and ensure performance.
 
 8. All code need be well documented and comment, especially for code related
-   to math need intuitive explanations, and for matrix calculation should put
-   with comments to indicate the dimension shape of the matrix.
+    to math need intuitive explanations, and for matrix calculation should put
+    with comments to indicate the dimension shape of the matrix.
 
 9. All code need to be using strict type hint to indicate the interfaces.
 
-10. All dictionary keys for parameter names (e.g., dict["gamma"], dict["lm_head"]) must use constants from `src/model/parameters.py` — never use raw string literals like `"gamma"`, `"lm_head"`, `"blocks.0.ln1.gamma"`. This prevents typos, ensures consistency across NumPy/PyTorch implementations and tests, and makes refactoring trivial. Common constants: `LayerNorm.NP_GAMMA`, `Transformer.LM_HEAD`, `block_param(0, "ln1", LayerNorm.NP_GAMMA)`, `expert_param(0, 0, Expert.NP_W1)`.
+10. All dictionary keys for parameter names (e.g., dict["gamma"], dict["lm_head"]) must use constants from `shared/` or the backend implementation (e.g., `LayerNorm.NP_GAMMA`, `Transformer.LM_HEAD`, `block_param(0, "ln1", LayerNorm.NP_GAMMA)`, `expert_param(0, 0, Expert.NP_W1)`) — never use raw string literals like `"gamma"`, `"lm_head"`, `"blocks.0.ln1.gamma"`. This prevents typos, ensures consistency across NumPy/PyTorch implementations and tests, and makes refactoring trivial.
 
 11. When using `edit`, ensure `oldString` is unique and matches the file content exactly, including whitespace and indentation. If `edit` fails, use `write` to overwrite the file.

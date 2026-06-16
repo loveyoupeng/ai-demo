@@ -656,11 +656,12 @@ class TestTorchInference:
 
 #### C12.1: CLI interface
 
-**What it does:** `uv run impl/_torch/cli.py --prompt "hello" --max_new_tokens 10`
+**What it does:** `uv run python -m impl._torch.cli --prompt "hello" --max_new_tokens 10`
 
 ```python
 # Simple argparse: --prompt, --max_new_tokens, --temperature, --model_dir, --checkpoint_name
 # Uses TorchModel instead of NumPyModel
+# Entry point registered in pyproject.toml: torch-infer = "impl._torch.cli:main"
 ```
 
 ```python
@@ -791,14 +792,14 @@ PYTHONPATH=shared PYTHONPATH=impl uv run pytest tests/unit/_torch/ -v --timeout=
 PYTHONPATH=shared PYTHONPATH=impl uv run pytest tests/cross_backend/ -v --timeout=300
 
 # 3. Ruff + pyright clean on PyTorch code
-PYTHONPATH=shared ruff check impl/_torch/ tests/unit/_torch/ tests/cross_backend/
-PYTHONPATH=shared pyright impl/_torch/ tests/unit/_torch/ tests/cross_backend/
+PYTHONPATH=shared PYTHONPATH=impl ruff check impl/_torch/ tests/unit/_torch/ tests/cross_backend/
+PYTHONPATH=shared PYTHONPATH=impl pyright impl/_torch/ tests/unit/_torch/ tests/cross_backend/
 
 # 4. All existing tests still pass
-PYTHONPATH=shared uv run pytest tests/unit/ -v --timeout=300
+PYTHONPATH=shared PYTHONPATH=impl uv run pytest tests/unit/ -v --timeout=300
 
 # 5. Tiny model trains and generates text
-PYTHONPATH=shared PYTHONPATH=impl uv run impl/_torch/cli.py --prompt "The" --max_new_tokens 5
+PYTHONPATH=shared PYTHONPATH=impl uv run python -m impl._torch.cli --prompt "The" --max_new_tokens 5
 ```
 
 ---
