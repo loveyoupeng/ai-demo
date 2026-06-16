@@ -11,10 +11,10 @@ nn.Parameter for autograd.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import torch
 import torch.nn as nn
-from typing import Any
 
 # pyright: reportAttributeAccessIssue=false
 
@@ -919,3 +919,93 @@ class TorchModel(nn.Module):
         # PyTorch Linear output_proj has weight and bias (matches NumPy)
         load("output_proj_w", self.output_proj.weight)
         load("output_proj_b", self.output_proj.bias)
+
+
+# ============================================================================
+# AdamW Optimizer
+# ============================================================================
+
+
+class AdamW:
+    """AdamW optimizer with bias correction and decoupled weight decay.
+
+    Parameters
+    ----------
+    lr : float, default 3e-4
+        Learning rate.
+    beta1 : float, default 0.9
+        Exponential decay rate for the first moment estimates.
+    beta2 : float, default 0.999
+        Exponential decay rate for the second moment estimates.
+    eps : float, default 1e-8
+        Term added for numerical stability.
+    weight_decay : float, default 0.0
+        Weight decay coefficient (L2 regularization, decoupled).
+
+    Usage
+    -----
+    >>> optimizer = AdamW(lr=1e-3, weight_decay=0.01)
+    >>> optimizer.step(model.state_dict())
+    """
+
+    def __init__(
+        self,
+        lr: float = 3e-4,
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        eps: float = 1e-8,
+        weight_decay: float = 0.0,
+    ) -> None:
+        self.lr = lr
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.eps = eps
+        self.weight_decay = weight_decay
+
+        # Internal state: first and second moment estimates per parameter
+        self.m: dict[str, torch.Tensor] = {}
+        self.v: dict[str, torch.Tensor] = {}
+        self._count: int = 0
+
+    def step(self, params: dict[str, torch.Tensor], grads: dict[str, torch.Tensor]) -> None:
+        """Perform one optimization step.
+
+        Parameters
+        ----------
+        params : dict[str, torch.Tensor]
+            Model parameters to update (modified in-place).
+            Each key maps to a PyTorch tensor of arbitrary shape.
+        grads : dict[str, torch.Tensor]
+            Gradients for each parameter (must have same keys as params).
+            Each key maps to a tensor of the same shape as the
+            corresponding parameter.
+        """
+        self._count += 1
+
+        # Pre-compute bias correction denominators once per step
+        bias_correction_1 = 1.0 - self.beta1**self._count
+        bias_correction_2 = 1.0 - self.beta2**self._count
+
+        for name, grad in grads.items():
+            param = params[name]
+
+            # Initialize moment estimates on first visit
+            if name not in self.m:
+                self.m[name] = torch.zeros_like(param, dtype=torch.float64)
+                self.v[name] = torch.zeros_like(param, dtype=torch.float64)
+
+            # Step 1: Update biased first moment estimate
+            self.m[name] = self.beta1 * self.m[name] + (1.0 - self.beta1) * grad
+
+            # Step 2: Update biased second moment estimate
+            self.v[name] = self.beta2 * self.v[name] + (1.0 - self.beta2) * grad**2
+
+            # Step 3: Compute bias-corrected moment estimates
+            m_hat = self.m[name] / bias_correction_1
+            v_hat = self.v[name] / bias_correction_2
+
+            # Step 4: Parameter update with Adam + decoupled weight decay
+            adam_step = m_hat / (torch.sqrt(v_hat) + self.eps)
+            decay_step = self.weight_decay * param
+
+            params[name] -= self.lr * (adam_step + decay_step)
