@@ -70,7 +70,9 @@ class TestDecoderStackForward:
             for name, param in block.mha.named_parameters():  # pyright: ignore
                 assert param.grad is not None, f"layer {layer_idx} mha {name} has no gradient"
                 grad_norm = param.grad.norm().item()
-                assert grad_norm > 1e-9, f"layer {layer_idx} mha {name} grad norm {grad_norm} too small"
+                # Wk.bias is zero by mathematical property of softmax attention
+                if name != "Wk.bias":
+                    assert grad_norm > 1e-9, f"layer {layer_idx} mha {name} grad norm {grad_norm} too small"
 
             # At least some MoE params must have gradients
             for name, param in block.moe.named_parameters():  # pyright: ignore

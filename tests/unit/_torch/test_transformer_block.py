@@ -97,10 +97,19 @@ class TestTransformerBlockForward:
         loss = output.sum()
         loss.backward()
 
-        # MHA: all weights should have non-zero gradients
+        # MHA: all weights should have non-zero gradients.
+        # Note: Wk.bias gradient is exactly zero for self-attention with
+        # softmax due to the mathematical cancellation of the bias term
+        # in the attention score computation (known property of
+        # self-attention — the K-bias gradient is zero because softmax
+        # attention weights sum to 1 for each query position, making all
+        # parallel shifts in K cancel out).
         for name, param in block.mha.named_parameters():
             assert param.grad is not None, f"{name} has no gradient"
             grad_norm = param.grad.norm().item()
+            # Wk.bias is zero by mathematical property of softmax attention
+            if name == "Wk.bias":
+                continue
             assert grad_norm > 1e-9, f"{name} gradient norm {grad_norm} too small"
 
         # MoE: router always gets gradients (softmax over all experts)
@@ -112,7 +121,6 @@ class TestTransformerBlockForward:
         # At least one expert should have non-zero gradients
         # (the top-k selected experts fire; router always fires on all)
         assert any(n > 1e-9 for n in moe_grad_norms), "At least one MoE param must have gradient"
-
 
     def test_deterministic(self) -> None:
         """TransformerBlock forward with same input → same output."""

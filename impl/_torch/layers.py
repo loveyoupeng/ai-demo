@@ -14,6 +14,9 @@ import math
 
 import torch
 import torch.nn as nn
+from typing import Any
+
+# pyright: reportAttributeAccessIssue=false
 
 
 class Embedding(nn.Module):
@@ -93,7 +96,6 @@ class RMSNorm(nn.Module):
         eps: float = 1e-6  # prevent divide-by-zero
         rms = torch.sqrt(torch.mean(x * x, dim=-1, keepdim=True)) + eps
         return x / rms * self.gamma
-
 
 
 class SiLULayer(nn.Module):
@@ -252,10 +254,7 @@ class RoPE(nn.Module):
         # Compute rotation frequencies: use full head_dim in denominator
         # (same as NumPy: freqs for the first pair_dim pairs)
         # (pair_dim,) = 1 / 10000^(2k / head_dim)
-        freqs = 1.0 / (
-            10000.0
-            ** (torch.arange(pair_dim, device=x.device) * 2.0 / head_dim)
-        )
+        freqs = 1.0 / (10000.0 ** (torch.arange(pair_dim, device=x.device) * 2.0 / head_dim))
 
         # For each position and each pair: angle = pos * freq
         # positions: (S,)
@@ -389,11 +388,11 @@ class MultiHeadAttention(nn.Module):
         # Q projection: D → H * head_dim (one projection per query head)
         self.Wq = Linear(embed_dim, n_heads * self.head_dim)
 
-        # K projection: D → G * head_dim (shared across G groups) — no bias
-        self.Wk = Linear(embed_dim, self.n_groups * self.head_dim, bias=False)
+        # K projection: D → G * head_dim (shared across G groups)
+        self.Wk = Linear(embed_dim, self.n_groups * self.head_dim)
 
-        # V projection: D → G * head_dim (shared across G groups) — no bias
-        self.Wv = Linear(embed_dim, self.n_groups * self.head_dim, bias=False)
+        # V projection: D → G * head_dim (shared across G groups)
+        self.Wv = Linear(embed_dim, self.n_groups * self.head_dim)
 
         # Output projection: H * head_dim → D
         self.Wo = Linear(n_heads * self.head_dim, embed_dim)
@@ -481,7 +480,9 @@ class MultiHeadAttention(nn.Module):
 
         # Output projection
         # context: (B, H, S, hd) → (B, S, H*hd) → O_proj → (B, S, D)
-        context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, self.n_heads * head_dim)  # (B, S, H*hd)
+        context = (
+            context.transpose(1, 2).contiguous().view(batch_size, seq_len, self.n_heads * head_dim)
+        )  # (B, S, H*hd)
         output = self.Wo(context)  # (B, S, D)
 
         return output, attn_weights
@@ -526,9 +527,7 @@ class MixtureOfExperts(nn.Module):
 
         # Experts: each expert is a SwiGLU FFN
         # Each expert: input embed_dim → output embed_dim
-        self.experts = nn.ModuleList(
-            [SwiGLUFFN(embed_dim, ff_dim) for _ in range(n_experts)]
-        )
+        self.experts = nn.ModuleList([SwiGLUFFN(embed_dim, ff_dim) for _ in range(n_experts)])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Mixture of Experts forward pass.
@@ -733,3 +732,190 @@ class DecoderStack(nn.Module):
         for block in self.layers:
             out = block(out)
         return out
+
+
+class TorchModel(nn.Module):
+    """Complete decoder-only transformer with embedding + SwiGLU output.
+
+    Forward: tokens → embedding → DecoderStack → RMSNorm → SwiGLU → Linear → logits
+
+    Architecture:
+        Input:  tokens [batch, seq_len] (int64)
+        │
+        ├→ Embedding table lookup       [batch, seq_len, embed_dim]
+        ├→ DecoderStack (n_layers)     [batch, seq_len, embed_dim]
+        ├→ RMSNorm (final_ln)          [batch, seq_len, embed_dim]
+        ├→ SwiGLU (output)             [batch, seq_len, embed_dim]
+        └→ Linear (output_proj)        [batch, seq_len, vocab_size]
+
+    Parameters:
+        vocab_size: Vocabulary size.
+        embed_dim: Hidden dimension.
+        n_layers: Number of transformer blocks.
+        n_heads: Number of attention heads per block.
+        n_experts: Number of MoE experts per block.
+        ff_dim: Feed-forward hidden dimension per expert.
+        k: Number of top experts per token.
+        rope_dim: Rotary position embedding dimension (0 = disabled).
+        seed: Random seed for initialization.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        embed_dim: int,
+        n_layers: int,
+        n_heads: int,
+        n_experts: int,
+        ff_dim: int,
+        k: int = 2,
+        rope_dim: int = 0,
+        seed: int = 0,
+    ) -> None:
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
+        self.n_layers = n_layers
+        self.n_heads = n_heads
+        self.n_experts = n_experts
+        self.k = k
+        self.seed = seed
+
+        # Embedding layer
+        self.embedding = Embedding(vocab_size, embed_dim)
+
+        # Decoder stack
+        self.stack = DecoderStack(
+            n_layers=n_layers,
+            embed_dim=embed_dim,
+            n_heads=n_heads,
+            n_experts=n_experts,
+            ff_dim=ff_dim,
+            k=k,
+            rope_dim=rope_dim,
+        )
+
+        # Final layer normalization
+        self.final_ln = RMSNorm(embed_dim)
+
+        # Output projection — SwiGLU → Linear
+        # SwiGLU maps D → D via hidden (D*2), then linear projects D → V
+        ff_dim_out = embed_dim * 2  # output projection hidden dim
+        self.output = SwiGLUFFN(embed_dim, ff_dim_out)
+        self.output_proj = Linear(embed_dim, vocab_size, bias=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through the complete model.
+
+        Args:
+            x: Token IDs. Shape [batch_size, seq_len], dtype int64.
+
+        Returns:
+            Predicted logits. Shape [batch_size, seq_len, vocab_size].
+        """
+        # Embedding: [B,S] → [B,S,D]
+        x = self.embedding(x)  # (B, S, D)
+
+        # Decoder stack: [B,S,D] → [B,S,D]
+        x = self.stack(x)
+
+        # Final layer normalization: [B,S,D] → [B,S,D]
+        x = self.final_ln(x)
+
+        # SwiGLU output projection: [B,S,D] → [B,S,D]
+        x = self.output(x)
+
+        # Linear projection to vocab: [B,S,D] → [B,S,V]
+        logits = self.output_proj(x)
+
+        return logits
+
+    def load_from_numpy(self, np_model: Any) -> None:  # pyright: ignore
+        """Load parameters from a NumPyModel.
+
+        Maps NumPyModel parameter keys to the corresponding nn.Parameter
+        attributes in this PyTorch model. Both models must have the same
+        architecture.
+
+        Args:
+            np_model: A NumPyModel instance with loaded parameters.
+        """
+        from impl._np.model import NumPyModel
+
+        if not isinstance(np_model, NumPyModel):
+            raise TypeError("Expected NumPyModel instance")
+
+        params = np_model.get_all_parameters()
+
+        def load(np_key: str, tensor: Any) -> None:  # pyright: ignore[reportUnknownParameterType]
+            """Copy numpy array to tensor in-place.
+
+            NumPy Linear: out = x @ W + b, W is (in, out)
+            PyTorch Linear: W is stored as (out, in) — transpose needed.
+            SwiGLU: W1, W2, W3 use (in, ff), (ff, out), (in, ff) in both backends — no transpose.
+            """
+            np_array = params[np_key]
+            loaded = torch.from_numpy(np_array).to(tensor.dtype)
+            # Transpose Linear weight matrices: NumPy uses (in, out)
+            # but PyTorch Linear stores (out, in).
+            # Do NOT transpose SwiGLU (W1, W2, W3) or embedding — both backends
+            # use the same (in, out) convention for these.
+            if (
+                tensor.dim() == 2
+                and np_key not in ("embedding_weights",)
+                and all(s not in np_key for s in ("W1", "W2", "W3"))
+            ):
+                loaded = loaded.T.contiguous()
+            tensor.data.copy_(loaded)
+
+        # ── Embedding ──────────────────────────────────────────────
+        load("embedding_weights", self.embedding.weight)
+
+        # ── DecoderStack ───────────────────────────────────────────
+        for layer_idx, block in enumerate(self.stack.layers):
+            prefix = f"blocks.{layer_idx}"
+
+            # Layer norm gamma
+            load(f"{prefix}.ln1_gamma", block.ln1.gamma)
+            load(f"{prefix}.ln2_gamma", block.ln2.gamma)
+
+            # MHA Q (weight + bias)
+            load(f"{prefix}.mha.Wq", block.mha.Wq.weight)
+            load(f"{prefix}.mha.bq", block.mha.Wq.bias)
+
+            # MHA K (weight + bias)
+            load(f"{prefix}.mha.Wk", block.mha.Wk.weight)
+            load(f"{prefix}.mha.bk", block.mha.Wk.bias)
+
+            # MHA V (weight + bias)
+            load(f"{prefix}.mha.Wv", block.mha.Wv.weight)
+            load(f"{prefix}.mha.bv", block.mha.Wv.bias)
+
+            # MHA O (weight + bias)
+            load(f"{prefix}.mha.Wo", block.mha.Wo.weight)
+            load(f"{prefix}.mha.bo", block.mha.Wo.bias)
+
+            # MoE router (PyTorch Linear: router has weight only, no bias)
+            load(f"{prefix}.moe.router", block.moe.router.weight)
+
+            # MoE experts
+            for expert_idx, expert in enumerate(
+                block.moe.experts  # pyright: ignore[reportArgumentType]
+            ):
+                expert_prefix = f"{prefix}.moe.experts.{expert_idx}"
+                load(f"{expert_prefix}.W1", expert.W1)
+                load(f"{expert_prefix}.W2", expert.W2)
+                load(f"{expert_prefix}.W3", expert.W3)
+
+        # ── Final RMSNorm ──────────────────────────────────────────
+        load("final_gamma", self.final_ln.gamma)
+
+        # ── Output SwiGLU ──────────────────────────────────────────
+        load("output.W1", self.output.W1)
+        load("output.W2", self.output.W2)
+        load("output.W3", self.output.W3)
+
+        # ── Output projection ──────────────────────────────────────
+        # PyTorch Linear output_proj has weight and bias (matches NumPy)
+        load("output_proj_w", self.output_proj.weight)
+        load("output_proj_b", self.output_proj.bias)

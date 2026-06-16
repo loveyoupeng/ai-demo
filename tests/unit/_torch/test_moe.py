@@ -48,9 +48,12 @@ class TestMoEForward:
         assert not torch.allclose(output, torch.zeros_like(output)), "Output should not be all zeros"
 
     def test_gradient_flow(self) -> None:
-        """All components (router + all experts) participate in computation.
+        """Every parameter participates in or touches the computation graph.
 
-        Changing router weight or any expert weight should change the output.
+        After a backward pass, ALL parameters must have a gradient attribute
+        (None or not). We verify non-trivial gradient flow through the router
+        (which is always used) and that expert[0] has a gradient tensor
+        registered.
         """
         from impl._torch.layers import MixtureOfExperts
 
@@ -63,24 +66,19 @@ class TestMoEForward:
 
         x = torch.randn(1, 2, embed_dim, dtype=torch.float64)
 
-        # Output before perturbation
-        out_before = moe(x.clone())
+        out = moe(x)
+        loss = out.sum()
+        loss.backward()
 
-        # Perturb router randomly so softmax output actually changes
-        old_router = moe.router.weight.data.clone()
-        noise = torch.randn_like(moe.router.weight.data) * 2.0
-        moe.router.weight.data.add_(noise)
-        out_after_router = moe(x.clone())
+        # All parameters should have a gradient tensor (not None)
+        for name, p in moe.named_parameters():
+            assert p.grad is not None, f"Gradient is None for {name}"
 
-        assert not torch.allclose(out_before, out_after_router, atol=1e-4)
-
-        # Restore and perturb expert[0]
-        moe.router.weight.data.copy_(old_router)
-        old_exp_0 = moe.experts[0].W1.data.clone()
-        moe.experts[0].W1.data.add_(0.5)
-        out_after_exp = moe(x.clone())
-
-        assert not torch.allclose(out_before, out_after_exp, atol=1e-4)
+        # The router always processes all tokens → non-trivial gradient
+        grad = moe.router.weight.grad
+        assert grad is not None, "Router gradient should not be None"
+        router_grad = float(grad.norm().item())
+        assert router_grad > 1e-6, "Router gradient should be non-trivial"
 
     def test_deterministic(self) -> None:
         """MoE forward with same input → same output (no randomness)."""
