@@ -671,3 +671,65 @@ class TransformerBlock(nn.Module):
         out = h + moe_out  # (B, S, D)
 
         return out
+
+
+class DecoderStack(nn.Module):
+    """Stack of TransformerBlocks — chains n_layers of decoder blocks.
+
+    Architecture:
+        Input:  x [B, S, D]
+        │
+        └→ block_0 → block_1 → ... → block_{n_layers-1} → output [B, S, D]
+
+        Each block:
+          h = x + MHA(RMSNorm(x)) + MoE(RMSNorm(x + MHA(RMSNorm(x))))
+
+    Parameters:
+        n_layers: Number of transformer blocks.
+        embed_dim: Input/output dimension.
+        n_heads: Number of attention heads per block.
+        n_experts: Number of MoE experts per block.
+        ff_dim: Feed-forward hidden dimension per expert.
+        k: Number of top experts per token.
+        rope_dim: Rotary position embedding dimension (0 = disabled).
+    """
+
+    def __init__(
+        self,
+        n_layers: int,
+        embed_dim: int,
+        n_heads: int,
+        n_experts: int,
+        ff_dim: int,
+        k: int = 2,
+        rope_dim: int = 0,
+    ) -> None:
+        super().__init__()
+        self.n_layers = n_layers
+        self.layers = nn.ModuleList(
+            [
+                TransformerBlock(
+                    embed_dim=embed_dim,
+                    n_heads=n_heads,
+                    n_experts=n_experts,
+                    ff_dim=ff_dim,
+                    k=k,
+                    rope_dim=rope_dim,
+                )
+                for _ in range(n_layers)
+            ]
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through all stacked blocks.
+
+        Args:
+            x: Input tensor. Shape [batch, seq_len, embed_dim].
+
+        Returns:
+            Output tensor. Shape [batch, seq_len, embed_dim].
+        """
+        out = x
+        for block in self.layers:
+            out = block(out)
+        return out
