@@ -577,3 +577,97 @@ class MixtureOfExperts(nn.Module):
         output = torch.einsum("bse,ebsd->bsd", routing_weights, expert_outs)
 
         return output
+
+
+class TransformerBlock(nn.Module):
+    """Decoder-only transformer block.
+
+    Composes multi-head attention and mixture-of-experts with residual
+    connections and RMS normalization.
+
+        h = x + MHA(RMSNorm(x)) + MoE(RMSNorm(x + MHA(RMSNorm(x))))
+
+    Architecture:
+        Input:  x [B, S, D]
+        │
+        ├→ RMSNorm (ln1)       [B, S, D]
+        ├→ MHA (Q/K/V proj)   [B, S, D]
+        ├→ Residual add        [B, S, D]
+        ├→ RMSNorm (ln2)       [B, S, D]
+        ├→ MoE (router + kWExperts) [B, S, D]
+        └→ Residual add        [B, S, D]
+
+    Parameters:
+        embed_dim: Input/output dimension.
+        n_heads: Number of attention heads.
+        n_experts: Number of MoE experts.
+        ff_dim: Feed-forward hidden dimension per expert.
+        k: Number of top experts per token.
+        rope_dim: Rotary position embedding dimension (0 = disabled).
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        n_heads: int,
+        n_experts: int,
+        ff_dim: int,
+        k: int = 2,
+        rope_dim: int = 0,
+    ) -> None:
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.n_heads = n_heads
+        self.n_experts = n_experts
+        self.k = k
+
+        # RMSNorm layers
+        self.ln1 = RMSNorm(embed_dim)
+        self.ln2 = RMSNorm(embed_dim)
+
+        # Multi-head attention (standard MHA — no GQA)
+        self.mha = MultiHeadAttention(
+            embed_dim=embed_dim,
+            n_heads=n_heads,
+            n_groups=n_heads,  # standard MHA (no GQA)
+            rope_dim=rope_dim,
+        )
+
+        # Mixture of Experts
+        self.moe = MixtureOfExperts(
+            embed_dim=embed_dim,
+            n_experts=n_experts,
+            ff_dim=ff_dim,
+            k=k,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through the transformer block.
+
+        Args:
+            x: Input tensor. Shape [batch, seq_len, embed_dim].
+
+        Returns:
+            Output tensor. Shape [batch, seq_len, embed_dim].
+        """
+        # ── Stream 1: Attention ─────────────────────────────────────
+        # ln1: (B, S, D) → (B, S, D)
+        ln1_out = self.ln1(x)  # (B, S, D)
+
+        # MHA: (B, S, D) → (B, S, D) — attention output
+        attn_out, _ = self.mha(ln1_out)  # (B, S, D), (B, H, S, S)
+
+        # Residual: x + attn_out
+        h = x + attn_out  # (B, S, D)
+
+        # ── Stream 2: MoE ──────────────────────────────────────────
+        # ln2: (B, S, D) → (B, S, D) — norm of residual
+        ln2_out = self.ln2(h)  # (B, S, D)
+
+        # MoE: (B, S, D) → (B, S, D)
+        moe_out = self.moe(ln2_out)  # (B, S, D)
+
+        # Residual: h + moe_out
+        out = h + moe_out  # (B, S, D)
+
+        return out
