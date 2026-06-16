@@ -73,7 +73,8 @@ examples:
 
     # -- Backend (required) --
     parser.add_argument(
-        "-b", "--backend",
+        "-b",
+        "--backend",
         default="torch",
         choices=["numpy", "torch"],
         help="Backend implementation (default: torch)",
@@ -81,11 +82,21 @@ examples:
 
     # -- Architecture --
     parser.add_argument("--vocab_size", default=256, type=int, help="Token vocabulary size (default: 256)")
-    parser.add_argument("--ctx", "-c", default=128, type=int, help="Context length in tokens (default: 128)")
-    parser.add_argument("--embed", "-e", default=256, type=int, help="Embedding dimension (default: 256)")
-    parser.add_argument("--layers", "-l", default=4, type=int, help="Number of transformer blocks (default: 4)")
-    parser.add_argument("--heads", "-H", default=8, type=int, help="Number of attention heads (default: 8)")
-    parser.add_argument("--groups", "-g", default=8, type=int, help="KV query groups (default: 8 = self-attn)")
+    parser.add_argument(
+        "--ctx", "-c", "--context_length", default=128, type=int, help="Context length in tokens (default: 128)"
+    )
+    parser.add_argument(
+        "--embed", "-e", "--embed_dim", default=256, type=int, help="Embedding dimension (default: 256)"
+    )
+    parser.add_argument(
+        "--layers", "-l", "--n_layers", default=4, type=int, help="Number of transformer blocks (default: 4)"
+    )
+    parser.add_argument(
+        "--heads", "-H", "--n_heads", default=8, type=int, help="Number of attention heads (default: 8)"
+    )
+    parser.add_argument(
+        "--groups", "-g", "--n_groups", default=8, type=int, help="KV query groups (default: 8 = self-attn)"
+    )
     parser.add_argument("--rope_dim", default=0, type=int, help="RoPE dimension — 0=full (default: 0)")
     parser.add_argument("--n_experts", default=4, type=int, help="Number of MoE experts (default: 4)")
     parser.add_argument("--top_k", default=2, type=int, help="Number of experts activated per token (default: 2)")
@@ -100,7 +111,9 @@ examples:
     parser.add_argument("--save_steps", default=100, type=int, help="Save checkpoint every N steps (default: 100)")
     parser.add_argument("--eval_steps", default=50, type=int, help="Evaluate every N steps (default: 50)")
     parser.add_argument("--dataset_path", default="resource/tinystories/", help="Path to cached dataset")
-    parser.add_argument("--synthetic", action="store_true", default=False, help="Use synthetic data instead of TinyStories")
+    parser.add_argument(
+        "--synthetic", action="store_true", default=False, help="Use synthetic data instead of TinyStories"
+    )
     parser.add_argument("--save_dir", default="resource/models/", help="Directory to save checkpoints")
 
     return parser
@@ -123,9 +136,23 @@ def build_config(args: argparse.Namespace, backend: str) -> dict:
 
     # Architecture
     for key in [
-        "vocab_size", "ctx", "context_length", "embed", "embed_dim", "layers",
-        "n_layers", "heads", "n_heads", "groups", "n_groups", "rope_dim",
-        "n_experts", "top_k", "expert_dim", "max_length", "seed",
+        "vocab_size",
+        "ctx",
+        "context_length",
+        "embed",
+        "embed_dim",
+        "layers",
+        "n_layers",
+        "heads",
+        "n_heads",
+        "groups",
+        "n_groups",
+        "rope_dim",
+        "n_experts",
+        "top_k",
+        "expert_dim",
+        "max_length",
+        "seed",
     ]:
         val = getattr(args, key, None)
         if val is not None:
@@ -242,13 +269,14 @@ def get_dataset(dataset_path: str, synthetic: bool, vocab_size: int, context_len
         rng = np.random.default_rng(42)
         num_samples = 1000
         data = []
+        max_len = max(10, context_length)
         for _ in range(num_samples):
-            length = rng.integers(10, context_length + 1)
+            length = rng.integers(5, min(20, max_len + 1))
             tokens = rng.integers(0, vocab_size, size=(length,))
             data.append(tokens)
         return data
 
-    # Load from file
+    # Load from file — each .npy file is one training sample
     dataset_files = sorted(Path(dataset_path).glob("*.npy"))
     if not dataset_files:
         print(f"Error: No dataset files found in {dataset_path}", file=sys.stderr)
@@ -257,8 +285,7 @@ def get_dataset(dataset_path: str, synthetic: bool, vocab_size: int, context_len
     data = []
     for f in dataset_files:
         arr = np.load(f)
-        for i in range(len(arr)):
-            data.append(arr[i])
+        data.append(arr)
     return data
 
 
@@ -290,15 +317,31 @@ def run_training_numpy(model, optimizer, loss_fn, config: dict, dataset) -> list
 
         for i in range(0, len(dataset), batch_size):
             batch = dataset[i : i + batch_size]
-            batch_input = np.stack([b[:max_seq] for b in batch]).astype(np.int32)
-            batch_target = np.stack([b[1 : max_seq + 1] for b in batch]).astype(np.int32)
+            # Pad all arrays to max_seq for stacking
+            padded = []
+            for b in batch:
+                if len(b) < max_seq:
+                    padded.append(np.pad(b, (0, max_seq - len(b)), constant_values=0))
+                else:
+                    padded.append(b[:max_seq])
+            batch_input = np.stack(padded).astype(np.int32)
+            # For targets: shift left by 1 and pad last position, also pad to max_seq if shorter
+            batch_targets_padded = []
+            for p in padded:
+                if len(p) < max_seq:
+                    target = np.append(p[1:], 0)
+                    target = np.pad(target, (0, max_seq - len(target)), constant_values=0)
+                else:
+                    target = np.append(p[1:], 0)
+                batch_targets_padded.append(target)
+            batch_target = np.stack(batch_targets_padded).astype(np.int32)
 
             loss = float(numpy_train_step(model, batch_input, batch_target, loss_fn, optimizer))
             epoch_losses.append(loss)
-            total_batches += 1
+            total_batches += 1  # noqa: SIM113
 
             # Log progress
-            if total_batches % max(1, total_batches // 5) == 0 or total_batches == 1:  # noqa: SIM113
+            if total_batches % max(1, total_batches // 5) == 0 or total_batches == 1:
                 current_loss = float(np.mean(epoch_losses))
                 total_steps = epoch * total_batches + total_batches
                 print(f"  Step {total_steps}: loss={current_loss:.4f}")
@@ -341,19 +384,28 @@ def run_training_torch(model, optimizer, loss_fn, config: dict, dataset) -> list
 
         for i in range(0, len(dataset), batch_size):
             batch = dataset[i : i + batch_size]
-            batch_input = torch.stack([torch.tensor(b[:max_seq]) for b in batch])
-            batch_target = torch.stack([torch.tensor(b[1 : max_seq + 1]) for b in batch])
-
+            # Pad all arrays to max_seq for stacking
+            padded = []
+            for b in batch:
+                if len(b) < max_seq:
+                    padded.append(np.pad(b, (0, max_seq - len(b)), constant_values=0))
+                else:
+                    padded.append(b[:max_seq])
+            batch_input = torch.stack([torch.tensor(p) for p in padded])
+            # For targets: shift left by 1 and pad last position
+            targets = []
+            for p in padded:
+                t = np.append(p[1:], 0)
+                if len(t) < max_seq:
+                    t = np.pad(t, (0, max_seq - len(t)), constant_values=0)
+                targets.append(t)
+            batch_target = torch.stack([torch.tensor(t) for t in targets])
 
             # Use detach to prevent gradient through targets
             batch_target = batch_target.long()
-            loss = float(
-                torch_train_step(
-                    model, batch_input, batch_target, optimizer, loss_fn
-                )
-            )
+            loss = float(torch_train_step(model, batch_input, batch_target, optimizer, loss_fn))
             epoch_losses.append(loss)
-            total_batches += 1
+            total_batches += 1  # noqa: SIM113
 
             # Log progress
             if total_batches % max(1, total_batches // 5) == 0 or total_batches == 1:
