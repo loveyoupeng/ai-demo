@@ -243,6 +243,8 @@ def weight_diff(params_a: dict, params_b: dict) -> float:
             continue
         va_arr = np.asarray(va)
         vb_arr = np.asarray(vb)
+        if va_arr.size == 0 or vb_arr.size == 0:
+            continue
         diff = np.abs(va_arr - vb_arr).max()
         max_diff = max(max_diff, diff)
     return max_diff
@@ -396,7 +398,7 @@ def _train_model(model, config: dict, steps: int = 5) -> dict:
             dummy_input = torch.randint(0, config["vocab_size"], (2, config["context_length"]))
             model.forward(dummy_input)
 
-        return {name: param.cpu().numpy() for name, param in model.state_dict().items()}
+        return model.save_as_numpy()
 
 
 # ─── Scenario runner ──────────────────────────────────────────────────────────
@@ -439,6 +441,7 @@ def run_scenario(scenario: Scenario, fast_mode: bool = False) -> dict:
     try:
         np_model = _import_numpy_model(np_config)
         torch_model = _import_torch_model(torch_config)
+        torch_model.load_from_numpy(np_model)
         details["models_created"] = True
     except Exception as e:
         return {
@@ -473,13 +476,15 @@ def run_scenario(scenario: Scenario, fast_mode: bool = False) -> dict:
             next_token = np.argmax(out[0, -1]).reshape(1, 1)
             np_tokens = np.concatenate([np_tokens, next_token], axis=1)
 
-        # PyTorch greedy inference: forward pass → argmax
-        torch_tokens = _torch.tensor([prompt_tokens], dtype=_torch.long)
-        for _ in range(3):
-            x = torch_tokens[:, -64:]
-            out = torch_model.forward(x)
-            next_token = _torch.argmax(out[0, -1]).reshape(1, 1)
-            torch_tokens = _torch.cat([torch_tokens, next_token], dim=1)
+        # PyTorch greedy inference: forward pass → argmax (deterministic)
+        with _torch.no_grad():
+            torch_model.eval()
+            torch_tokens = _torch.tensor([prompt_tokens], dtype=_torch.long)
+            for _ in range(3):
+                x = torch_tokens[:, -64:]
+                out = torch_model.forward(x)
+                next_token = _torch.argmax(out[0, -1]).reshape(1, 1)
+                torch_tokens = _torch.cat([torch_tokens, next_token], dim=1)
 
         np_tok_list = np_tokens.flatten().tolist()
         torch_tok_list = torch_tokens.flatten().detach().cpu().tolist()
@@ -503,10 +508,12 @@ def run_scenario(scenario: Scenario, fast_mode: bool = False) -> dict:
         np_logits = np_model.forward(np_inp)  # (1, seq_len, vocab_size)
         np_probs = np.exp(np_logits[0, -1]) / np.exp(np_logits[0, -1]).sum()
 
-        # PyTorch: forward pass → softmax on last token
-        torch_inp = _torch.tensor([prompt_tokens], dtype=_torch.long)
-        torch_logits = torch_model.forward(torch_inp)
-        torch_probs = _torch.softmax(torch_logits[0, -1], dim=0).numpy()
+        # PyTorch: forward pass → softmax on last token (deterministic)
+        with _torch.no_grad():
+            torch_model.eval()
+            torch_inp = _torch.tensor([prompt_tokens], dtype=_torch.long)
+            torch_logits = torch_model.forward(torch_inp)
+        torch_probs = _torch.softmax(torch_logits.detach()[0, -1], dim=0).numpy()
 
         dist_ok, kl_val = distribution_check(np_probs, torch_probs, threshold=5.0)
         details["distribution_match"] = dist_ok
@@ -541,9 +548,11 @@ def format_report(results: list[dict]) -> str:
     Returns:
         Formatted report string.
     """
-    lines = ["  ╔═══════════════════════════════════════════════════╗  ",
-             "║           verify_equivalence.py  Results          ║  ",
-             "╠═══════════════════════════════════════════════════╣  "]
+    lines = [
+        "  ╔═══════════════════════════════════════════════════╗  ",
+        "║           verify_equivalence.py  Results          ║  ",
+        "╠═══════════════════════════════════════════════════╣  ",
+    ]
 
     for i, r in enumerate(results):
         status = "PASS" if r["passed"] else "FAIL"
@@ -562,10 +571,7 @@ def format_report(results: list[dict]) -> str:
         if kl is not None:
             metric_info += f"  kl={kl}"
 
-        line = (
-            f"  ║  {i+1:2d}. {status:4s} {r['name'][:45]:45s} ║  "
-            f"{status_box}  {metric_info:<20s}"
-        )
+        line = f"  ║  {i + 1:2d}. {status:4s} {r['name'][:45]:45s} ║  {status_box}  {metric_info:<20s}"
         lines.append(line[:80].ljust(82) + "║")
 
     total = len(results)
@@ -593,9 +599,11 @@ def main(args: list[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(
         prog="verify_equivalence",
-        description=("Automated equivalence testing between NumPy and PyTorch "
-                     "backends. Compares weights, greedy inference, and "
-                     "sampling distributions across 6 configuration scenarios."),
+        description=(
+            "Automated equivalence testing between NumPy and PyTorch "
+            "backends. Compares weights, greedy inference, and "
+            "sampling distributions across 6 configuration scenarios."
+        ),
         epilog=(
             "  # Run all scenarios\n"
             "  python -m scripts.verify_equivalence\n\n"

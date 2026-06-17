@@ -137,6 +137,35 @@ See `docs/phase_c_plus2_plan.md` for detailed plan.
 | C (PyTorch) | 129 | 36 (c0-c36) | ✅ Complete |
 | C+ (E2E) | 90 | 8 (c37-c44) | ✅ Complete |
 | **C++ (Norm)** | **21** | **3 (d0-d2)** | **✅ Complete** |
-| **Total** | **421** | **78+** | **All pass, ruff/pyright clean** |
+| **D (Equivalence)** | **0** | **1 (e0)** | **✅ Complete** |
+| **Total** | **421** | **79+** | **All pass, ruff/pyright clean** |
+
+---
+
+## Phase D: Cross-Backend Equivalence Verification
+
+**Issue:** `scripts/verify_equivalence.py` reported 0/6 scenarios passed with `weight_diff ≈ 0.42`
+
+**Root causes identified and fixed:**
+1. PyTorch MoE router had `bias=False` but NumPy had bias → `load_from_numpy()` skipped bias
+2. `verify_equivalence.py` never called `torch_model.load_from_numpy()` → models differed
+3. `verify_equivalence.py` used `state_dict()` (nested keys) instead of `save_as_numpy()` (flat keys)
+4. `weight_diff()` crashed on zero-size expert arrays → added skip for `size == 0`
+5. Greedy inference ran in training mode → dropout made PyTorch output non-deterministic
+6. Distribution check called `.numpy()` on gradient tensor → crashes
+
+**Changes made:**
+- `impl/_torch/layers.py:526` — `Linear(embed_dim, n_experts, bias=True)`
+- `impl/_torch/layers.py:924-925` — Load MoE bias in `load_from_numpy()`
+- `impl/_torch/layers.py:1017-1019` — Save MoE bias in `save_as_numpy()`
+- `impl/_torch/layers.py:1103-1104` — Load MoE bias in `load_from_numpy_dict()`
+- Fixed duplicate `return` + dead code block in `load_from_numpy_dict()` (removed lines 1125-1179)
+- `scripts/verify_equivalence.py:398` — Use `save_as_numpy()` instead of `state_dict()`
+- `scripts/verify_equivalence.py:440` — Add `torch_model.load_from_numpy(np_model)`
+- `scripts/verify_equivalence.py:244-245` — Skip zero-size arrays in `weight_diff()`
+- `scripts/verify_equivalence.py:483-493` — Add `torch.no_grad()` + `eval()` for greedy
+- `scripts/verify_equivalence.py:515-521` — Use `.detach().numpy()` for distribution check
+
+**Result:** All 6/6 scenarios pass with `weight_diff=0.0`, identical tokens, KL=0.0
 
 ---

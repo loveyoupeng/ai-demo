@@ -523,7 +523,7 @@ class MixtureOfExperts(nn.Module):
 
         # Router: linear layer from embed_dim to n_experts
         # Shape: [embed_dim, n_experts]
-        self.router = Linear(embed_dim, n_experts, bias=False)
+        self.router = Linear(embed_dim, n_experts, bias=True)
 
         # Experts: each expert is a SwiGLU FFN
         # Each expert: input embed_dim → output embed_dim
@@ -921,8 +921,9 @@ class TorchModel(nn.Module):
             load(f"{prefix}.mha.Wo", block.mha.Wo.weight)
             load(f"{prefix}.mha.bo", block.mha.Wo.bias)
 
-            # MoE router (PyTorch Linear: router has weight only, no bias)
+            # MoE router — loads weight and bias from NumPy
             load(f"{prefix}.moe.router", block.moe.router.weight)
+            load(f"{prefix}.moe.bias", block.moe.router.bias)
 
             # MoE experts
             for expert_idx, expert in enumerate(
@@ -952,6 +953,9 @@ class TorchModel(nn.Module):
         Returns a dict with the same key structure as NumPyModel.get_all_parameters(),
         enabling cross-backend parameter exchange for parity testing.
 
+        Linear weight matrices are transposed from PyTorch (out, in) to
+        NumPy (in, out) convention for direct cross-backend comparison.
+
         Returns
         -------
         params : dict[str, np.ndarray]
@@ -959,16 +963,25 @@ class TorchModel(nn.Module):
 
         Notes
         -----
-        Linear weight matrices are NOT transposed — stored as (out, in)
-        to match what load_from_numpy reads back. NumPy Linear uses (in, out)
-        convention, so load_from_numpy transposes on the way in.
+        Linear weight matrices are transposed to match NumPy's (in, out)
+        convention. The matching load_from_numpy_dict reverses this transpose.
         """
 
         params: dict[str, Any] = {}
 
-        def save(tensor: Any, np_key: str) -> None:
-            """Copy PyTorch tensor to NumPy array with matching key."""
-            params[np_key] = tensor.detach().cpu().numpy()
+        def save(tensor: Any, np_key: str, transpose: bool = False) -> None:
+            """Copy PyTorch tensor to NumPy array with matching key.
+
+            Args:
+                tensor: PyTorch tensor to save.
+                np_key: NumPy parameter name.
+                transpose: If True, transpose the tensor before saving
+                    (for Linear layers: PyTorch (out, in) → NumPy (in, out)).
+            """
+            array = tensor.detach().cpu().numpy()
+            if transpose:
+                array = array.T
+            params[np_key] = array
 
         # ── Embedding ──────────────────────────────────────────────
         save(self.embedding.weight, "embedding_weights")
@@ -986,23 +999,25 @@ class TorchModel(nn.Module):
             save(block.gate2, f"{prefix}.gate2")
 
             # MHA Q (weight + bias)
-            save(block.mha.Wq.weight, f"{prefix}.mha.Wq")
+            save(block.mha.Wq.weight, f"{prefix}.mha.Wq", transpose=True)
             save(block.mha.Wq.bias, f"{prefix}.mha.bq")
 
             # MHA K (weight + bias)
-            save(block.mha.Wk.weight, f"{prefix}.mha.Wk")
+            save(block.mha.Wk.weight, f"{prefix}.mha.Wk", transpose=True)
             save(block.mha.Wk.bias, f"{prefix}.mha.bk")
 
             # MHA V (weight + bias)
-            save(block.mha.Wv.weight, f"{prefix}.mha.Wv")
+            save(block.mha.Wv.weight, f"{prefix}.mha.Wv", transpose=True)
             save(block.mha.Wv.bias, f"{prefix}.mha.bv")
 
             # MHA O (weight + bias)
-            save(block.mha.Wo.weight, f"{prefix}.mha.Wo")
+            save(block.mha.Wo.weight, f"{prefix}.mha.Wo", transpose=True)
             save(block.mha.Wo.bias, f"{prefix}.mha.bo")
 
-            # MoE router
-            save(block.moe.router.weight, f"{prefix}.moe.router")
+            # MoE router — saves weight and bias to NumPy format
+            save(block.moe.router.weight, f"{prefix}.moe.router", transpose=True)
+            if block.moe.router.bias is not None:
+                save(block.moe.router.bias, f"{prefix}.moe.bias")
 
             # MoE experts
             for expert_idx, expert in enumerate(block.moe.experts):  # pyright: ignore[reportArgumentType]
@@ -1020,7 +1035,7 @@ class TorchModel(nn.Module):
         save(self.output.W3, "output.W3")
 
         # ── Output projection ──────────────────────────────────────
-        save(self.output_proj.weight, "output_proj_w")
+        save(self.output_proj.weight, "output_proj_w", transpose=True)
         save(self.output_proj.bias, "output_proj_b")
 
         return params  # type: ignore[return-value]
@@ -1033,17 +1048,25 @@ class TorchModel(nn.Module):
         the values into this model's parameters. The keys match the output
         of save_as_numpy(), so save→dict→load is a no-op.
 
+        Linear weight matrices are transposed from NumPy (in, out) to
+        PyTorch (out, in) layout since save_as_numpy() stores them in
+        NumPy convention.
+
         Args:
             params_dict: Dictionary mapping parameter names to array-like values.
-                         Keys match those from save_as_numpy() (not transposed).
+                         Keys match those from save_as_numpy() (NumPy format,
+                         Linear weights are transposed to (in, out)).
         """
 
-        def load(tensor: Any, np_key: str) -> None:
+        def load(tensor: Any, np_key: str, transpose: bool = False) -> None:
             """Copy numpy array to tensor in-place.
-            Matches save_as_numpy() convention — do NOT transpose because
-            saved weights are already in PyTorch (out, in) layout.
+
+            Matches save_as_numpy() convention — transpose Linear weights
+            from NumPy (in, out) back to PyTorch (out, in).
             """
             loaded = torch.from_numpy(params_dict[np_key]).to(tensor.dtype)
+            if transpose:
+                loaded = loaded.T.contiguous()
             tensor.data.copy_(loaded)
 
         # ── Embedding ──────────────────────────────────────────────
@@ -1062,23 +1085,24 @@ class TorchModel(nn.Module):
             load(block.gate2, f"{prefix}.gate2")
 
             # MHA Q (weight + bias)
-            load(block.mha.Wq.weight, f"{prefix}.mha.Wq")
+            load(block.mha.Wq.weight, f"{prefix}.mha.Wq", transpose=True)
             load(block.mha.Wq.bias, f"{prefix}.mha.bq")
 
             # MHA K (weight + bias)
-            load(block.mha.Wk.weight, f"{prefix}.mha.Wk")
+            load(block.mha.Wk.weight, f"{prefix}.mha.Wk", transpose=True)
             load(block.mha.Wk.bias, f"{prefix}.mha.bk")
 
             # MHA V (weight + bias)
-            load(block.mha.Wv.weight, f"{prefix}.mha.Wv")
+            load(block.mha.Wv.weight, f"{prefix}.mha.Wv", transpose=True)
             load(block.mha.Wv.bias, f"{prefix}.mha.bv")
 
             # MHA O (weight + bias)
-            load(block.mha.Wo.weight, f"{prefix}.mha.Wo")
+            load(block.mha.Wo.weight, f"{prefix}.mha.Wo", transpose=True)
             load(block.mha.Wo.bias, f"{prefix}.mha.bo")
 
             # MoE router
-            load(block.moe.router.weight, f"{prefix}.moe.router")
+            load(block.moe.router.weight, f"{prefix}.moe.router", transpose=True)
+            load(block.moe.router.bias, f"{prefix}.moe.bias")
 
             # MoE experts
             for expert_idx, expert in enumerate(block.moe.experts):  # pyright: ignore[reportArgumentType]
@@ -1096,13 +1120,8 @@ class TorchModel(nn.Module):
         load(self.output.W3, "output.W3")
 
         # ── Output projection ──────────────────────────────────────
-        load(self.output_proj.weight, "output_proj_w")
+        load(self.output_proj.weight, "output_proj_w", transpose=True)
         load(self.output_proj.bias, "output_proj_b")
-
-
-# ============================================================================
-# AdamW Optimizer
-# ============================================================================
 
 
 class AdamW:
