@@ -4,7 +4,8 @@
 Build a fully functional decoder-only transformer LLM from scratch in 4 implementations (NumPy, PyTorch, Triton, CUDA) with identical behavior, trained on TinyStories, featuring RoPE, MHA, MoE, GQA, and multi-level KV caching for educational purposes.
 
 ## Current Phase
-**Phase 3 — PyTorch Implementation is PLANNED (not started). Execution ready at `docs/phase_c_plan.md`.**
+**Phase 3 (PyTorch) is ✅ COMPLETE.**
+**Phase 3+ (E2E Training/Inference) is ✅ COMPLETE.**
 
 **Phase 2 (NumPy) is complete.** Next step: execute Phase 3 plan.
 
@@ -23,7 +24,7 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 - Same architecture as NumPy, `nn.Module` based
 - Cross-backend parity tests, benchmarks
 - **Plan:** `docs/phase_c_plan.md`
-- **Status:** 36/20 commits, 310 tests — **all pass**, ruff/pyright clean
+- **Status:** 36 commits, 310 total tests — **all pass**, ruff/pyright clean
 - **Key artifacts:** `impl/_torch/` (22 files), `tests/unit/_torch/` (15 files), `tests/cross_backend/` (2 files)
 - **Key fixes:** Wk.bias zero-gradient (mathematical property of softmax attention); weight transpose on Linear loading; `nn.Linear` for Wk/Wv to preserve bias gradients
 
@@ -34,15 +35,20 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 - **Plan:** `docs/phase_c_plus_plan.md`
 - **Status:** Complete — all 6 steps done, 400 tests pass, ruff/pyright clean
 
-### Phase 4: Triton Implementation (GPU Kernel Optimization)
+### Phase 3++: Normalization Improvements (NEXT) 🔲 PLANNED
+- Consider adding gated residuals or post-Norm variants
+- Evaluate training speedup and gradient flow
+- **Goal:** Speed up training, improve gradient signal preservation
+
+### Phase 4: Triton Implementation (GPU Kernel Optimization) 🔲 NOT STARTED
 - Custom kernels: LayerNorm, attention, MoE routing, activations
 - Parity tests, profiling vs NumPy/PyTorch
 
-### Phase 5: CUDA Implementation (Lowest Level)
+### Phase 5: CUDA Implementation (Lowest Level) 🔲 NOT STARTED
 - `nvidia/cuda-python` bindings, same architecture
 - Parity tests, benchmarks
 
-### Phase 6: Integration & Verification
+### Phase 6: Integration & Verification 🔲 NOT STARTED
 - Train on TinyStories per backend -> save/load cross-validation -> identical outputs -> final e2e script
 
 ---
@@ -63,21 +69,70 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 2. ~~Dataset source~~ (confirmed: TinyStories, ~8MB from HuggingFace)
 3. ~~KV cache approach~~ (confirmed: naive full-precision + TurboQuant 1-bit)
 4. ~~GQA~~ (confirmed: opt-in, toggle via config)
-5. MoE: top-k (default 2) or all experts?
-6. Training: which loss + optimizer? default?
-7. Project structure: shared code vs per-backend standalone?
+5. ~~MoE: top-k (default 2) or all experts?~~ (confirmed: top-2)
+6. ~~Training: which loss + optimizer? default?~~ (confirmed: CrossEntropy + AdamW)
+7. ~~Project structure: shared code vs per-backend standalone?~~ (confirmed: shared `shared/` + per-backend `impl/_np/`, `impl/_torch/`)
+8. **Residual connections needed?** — User flagged "lack of residual connection" but current code has pre-norm residuals: `h = x + MHA(...)` and `out = h + MoE(...)`. See `Phase 3++` plan for clarification discussion.
 
 ## Decisions Made
 | Decision | Rationale |
 |----------|-----------|
-| NumPy first, then torch/triton/cuda | Learning path; NumPy is reference implementation |
+| NumPy first, then torch/triton/cuda | Learning path; NumPy is the "source of truth" — everyone learns from it first |
 | TinyStories dataset | Small, clean, ideal for demo |
 | Shared config + tokenizer | Single source of truth across backends |
-| TurboQuant for KV | Google research, 1-bit compression |
+| TurboQuant for KV | Google's approach, dramatic memory savings for long sequences |
 | All backends produce identical results | Deterministic with same seed |
+| Pre-Norm architecture | RMSNorm before residual add — standard GPT-style, stable training |
+| Single train script with --backend flag | Less duplication, easier maintenance |
+| Greedy decoding = 100% deterministic | Exact token match across backends; sampling uses KL divergence |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
 |-------|---------|------------|
 | Previous TDD agents ignored "test-first" requirement | 1 | User enforced: write ALL tests first, run to confirm fail, then implement |
 | Tests timeout downloading TinyStories dataset | 1 | Tests already written; dataset loading expected to take ~1 min first time |
+| Pyright error: `savez_compressed` argument type | 1 | Added `# pyright: ignore[reportArgumentType]` to dict unpacking |
+
+# Phase 3++: Normalization Improvements
+
+## Goal
+Investigate and implement normalization/architecture improvements for faster training and better gradient flow.
+
+## Current Architecture (Pre-Norm)
+Both backends use pre-normalization (RMSNorm BEFORE the residual add):
+```
+h = x + MHA(RMSNorm(x))
+out = h + MoE(RMSNorm(h))
+```
+
+## Residual Connections
+Current code DOES have residuals:
+- **NumPy** (`impl/_np/modules.py:900`): `h = x + attn_out` + `out = h + moe_out`
+- **PyTorch** (`impl/_torch/layers.py:658,670`): Same structure
+- User noticed and raised concern about "lack of residual connection"
+
+## Questions to Address
+1. Does the user mean **post-norm** (residual add first, then norm) vs pre-norm?
+2. Does the user mean **gated residuals** (e.g., `x + gate * residual`) to control signal flow?
+3. Does the user mean **dropout** for regularization (currently absent)?
+4. Does the user want **skip connections across layers** (like DenseNet)?
+
+## Implementation Options
+See `docs/phase_c_plus2_plan.md` for detailed plan.
+
+## TDD Approach
+- Write failing test first (gradient norm check, training speed comparison)
+- Implement changes in both backends in parallel
+- Verify cross-backend parity maintained
+- Small, focused commits per sub-change
+
+## Current Project State
+| Phase | Tests | Commits | Status |
+|-------|-------|---------|--------|
+| A (Shared) | 111 | N/A | ✅ Complete |
+| B (NumPy) | ~70 | 21 (b0-b19) | ✅ Complete |
+| C (PyTorch) | 129 | 36 (c0-c36) | ✅ Complete |
+| C+ (E2E) | 90 | 8 (c37-c44) | ✅ Complete |
+| **Total** | **400** | **75+** | **All pass, ruff/pyright clean** |
+
+---
