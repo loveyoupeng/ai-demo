@@ -19,11 +19,20 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 - CLI, unit tests, cross-backend reference tests
 - **Result:** 21 commits (b0–b19), TDD-style re-implementation, all tests pass 📍 `docs/phase_b_plan.md`
 
-### Phase 3: PyTorch Implementation (Production-Ready) ⏳ PLANNED (Not Started)
+### Phase 3: PyTorch Implementation (Production-Ready) ✅ COMPLETE
 - Same architecture as NumPy, `nn.Module` based
 - Cross-backend parity tests, benchmarks
 - **Plan:** `docs/phase_c_plan.md`
-- **Status:** 0/20 commits, 0/65 tests — execution ready
+- **Status:** 36/20 commits, 310 tests — **all pass**, ruff/pyright clean
+- **Key artifacts:** `impl/_torch/` (22 files), `tests/unit/_torch/` (15 files), `tests/cross_backend/` (2 files)
+- **Key fixes:** Wk.bias zero-gradient (mathematical property of softmax attention); weight transpose on Linear loading; `nn.Linear` for Wk/Wv to preserve bias gradients
+
+### Phase 3+: E2E Training, Inference & Equivalence ✅ COMPLETE
+- Unified training/inference scripts (NumPy + PyTorch)
+- Interactive inference CLI with context status
+- 8-combination automated equivalence matrix
+- **Plan:** `docs/phase_c_plus_plan.md`
+- **Status:** Complete — all 6 steps done, 400 tests pass, ruff/pyright clean
 
 ### Phase 4: Triton Implementation (GPU Kernel Optimization)
 - Custom kernels: LayerNorm, attention, MoE routing, activations
