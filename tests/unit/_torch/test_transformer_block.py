@@ -123,7 +123,7 @@ class TestTransformerBlockForward:
         assert any(n > 1e-9 for n in moe_grad_norms), "At least one MoE param must have gradient"
 
     def test_deterministic(self) -> None:
-        """TransformerBlock forward with same input → same output."""
+        """TransformerBlock forward with same input → same output in eval mode."""
         from impl._torch.layers import TransformerBlock
 
         embed_dim = 32
@@ -143,7 +143,9 @@ class TestTransformerBlockForward:
 
         x = torch.randn(1, 4, embed_dim, dtype=torch.float64)
 
+        block.eval()  # Disable dropout for deterministic behavior
+
         out1 = block(x.clone())
         out2 = block(x.clone())
 
-        assert torch.allclose(out1, out2), "Forward must be deterministic"
+        assert torch.allclose(out1, out2), "Forward must be deterministic in eval mode"

@@ -87,9 +87,10 @@
 | Checkpoint shared format | Any backend trains → any backend infers |
 | Strict TDD: test file first, then implementation | User explicitly required this; all agents must follow |
 | Smaller test cases for debugging | When tests fail, isolate the issue with minimal test case — don't over-reason |
-| Pre-Norm architecture | RMSNorm before residual add — stable training, standard GPT-style |
+| Post-Norm + Gated Residuals | RMSNorm after residual add for better gradient flow; sigmoid gates for controlled signal; dropout for regularization |
 | Single train/infer scripts | Less duplication, unified entry point with --backend flag |
 | Greedy = deterministic | Exact token match across backends; sampling uses KL divergence |
+| eval() mode required for inference | Dropout must be disabled for deterministic output; both backends support this |
 
 ## Validation Strategy
 
@@ -157,45 +158,49 @@
 - PyTorch returns Tensor — different shape handling in inference scripts
 - `np.savez_compressed` with dict unpack triggers pyright error — requires `# pyright: ignore`
 
-## Phase 3++: Residual Connection Discussion (IN PROGRESS)
+## Phase 3++: Residual Connection Discussion (✅ COMPLETE)
 
-### Current Architecture: Pre-Norm
-Both backends use **pre-normalization** (RMSNorm BEFORE the residual add):
+### Architecture Change: Pre-Norm → Post-Norm + Gated Residuals + Dropout
+All three improvements were implemented in both backends:
 
+**Post-Norm Architecture:**
 ```python
-# Current (NumPy: modules.py:900, PyTorch: layers.py:658,670)
-l_normed = RMSNorm().forward(x, gamma)      # normalize input first
-attn_out = self.mha.forward(l_normed)        # compute attention
-h = x + attn_out                             # add residual
-moe_out = self.moe.forward(ln2.forward(h))  # MoE output
-out = h + moe_out                            # add second residual
+# New (NumPy: modules.py, PyTorch: layers.py)
+attn_out = MHA(x)                            # compute attention
+h = x + attn_out * sigmoid(gate1)            # residual add FIRST, then scale
+h_normed = RMSNorm(h)                         # normalize residual
+moe_out = MoE(h_normed)                      # MoE output
+moe_out = moe_out * sigmoid(gate2)           # scale by second gate
+out = h + moe_out                            # second residual add
+out = RMSNorm(out)    * sigmoid(gate3)        # final residual + norm
 ```
 
-Mathematical formula (documented in both implementations):
+Mathematical formula:
 ```
-h = x + MHA(RMSNorm(x))
-out = h + MoE(RMSNorm(h))
+h = x + Gate1(MHA(x))
+out = h + Gate2(MoE(RMSNorm(h)))
+final = RMSNorm(out)
 ```
 
-### User Concern
-User noticed "we lack of residual connection which could speed up training and avoid signal vanish feature in current model."
+**Gated Residuals:**
+- `gate1` and `gate2`: `nn.Parameter(torch.zeros(1))` in PyTorch, added params in NumPy
+- Sigmoid activation: `sigmoid(0) = 0.5` at init → partial gating from first step
+- Gate gradient is tracked → learned during training to control signal flow
 
-### Observation
-The codebase **already has residual connections**. Both NumPy and PyTorch implementations have:
-- `h = x + attn_out` (first residual: input + attention output)
-- `out = h + moe_out` (second residual: intermediate + MoE output)
+**Dropout:**
+- PyTorch: `nn.Dropout(0.05)` as `dropout1` and `dropout2` attributes
+- NumPy: optional `dropout` and `training=False` parameters in `forward()`
+- Inference always deterministic when `eval()` mode called (PyTorch) or `training=False` (NumPy)
 
-### Possible Interpretations of User's Concern
-1. **Post-Norm vs Pre-Norm**: User may prefer post-norm (residual add first, then norm) which can speed up training but is less stable
-2. **Gated Residuals**: User may want gated residuals (e.g., `x + gate * residual`) to control signal flow — used in some architectures to prevent exploding gradients
-3. **Dropout for Regularization**: Currently no dropout anywhere — user may be confusing "dropout" with "residual" for regularization
-4. **Skip Connections Across Layers**: User may be thinking of DenseNet-style skip connections where all layers receive the same input
+### Test Coverage
+- 21 new tests in `tests/unit/_np/test_architecture_improvements.py`
+- Cross-backend parity tests updated with `eval()` mode
+- Serialization (`save_as_numpy`/`load_from_numpy_dict`) extended to include gate1/gate2
 
-### Recommendation
-- **Ask user for clarification** before implementing — they may be confused about what's already in the code
-- If they want post-norm: swap order to `h = x; h = RMSNorm(h) + MHA(h)`
-- If they want gating: add learnable gate parameter to each residual
-- If they want dropout: add dropout to intermediate activations (not residuals)
+### Known Issues
+- `test_gates_change_after_training` produces a pyright warning about tensor scalar conversion — low priority
+- Zero-element tensor warnings from SwiGLU when `rope_dim=0` and small model dims — cosmetic, no functional impact
+- The gate init at sigmoid(0) = 0.5 means output is scaled by 0.5 at init — this is intentional; gate learns to open during training
 
 ## Resources
 

@@ -100,6 +100,7 @@ def train_step(
     batch_target: np.ndarray,
     loss_fn: CrossEntropyLoss,
     optimizer: AdamW,
+    max_norm: float = 1.0,
 ) -> float:
     """Execute one training step on a single batch.
 
@@ -108,8 +109,9 @@ def train_step(
         1. Forward pass: model(batch_input) → logits (B, S, V)
         2. Loss computation: loss_fn(logits, batch_target) → scalar float
         3. Backward pass: model.backward(logits, targets, input) → grads dict
-        4. Optimizer step: optimizer.step(params, grads) — modifies params in-place
-        5. Return loss value
+        4. Gradient clipping: clip_gradients(grads, max_norm) — in-place
+        5. Optimizer step: optimizer.step(params, grads) — modifies params in-place
+        6. Return loss value
 
     Parameters
     ----------
@@ -123,6 +125,9 @@ def train_step(
         Loss function that computes cross-entropy over logits and targets.
     optimizer : AdamW
         Optimizer that updates model parameters in-place.
+    max_norm : float, default 1.0
+        Maximum allowed L2 norm for gradient clipping.  Pass 0.0 to
+        disable clipping entirely.
 
     Returns
     -------
@@ -169,6 +174,11 @@ def train_step(
     # grads[k] has the same shape as params[k], i.e. the gradient of the
     # scalar loss with respect to each element of the parameter tensor.
     grads = model.backward(logits, batch_target, batch_input)  # dict[str, ndarray]
+
+    # --- 3.5. Gradient clipping ----------------------------------------------
+    # Clip gradients by global L2 norm to stabilise training (especially
+    # with Post-Norm architecture).  Modified in-place.
+    clip_gradients(grads, max_norm=max_norm)
 
     # --- 4. Optimizer step ---------------------------------------------------
     # Gather the current parameter dictionary from the model.  The optimizer

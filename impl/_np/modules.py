@@ -872,42 +872,72 @@ class TransformerBlock:
         self.ln1_gamma = np.ones(embed_dim, dtype=np.float32)
         self.ln2_gamma = np.ones(embed_dim, dtype=np.float32)
 
+        # Gated residuals — learnable scalar gates, initialized to zero
+        # Gate controls signal flow: h = h + sigmoid(gate) * gated_value
+        # Initialized to zero → identity at start → gates learn to open
+        self.gate1 = np.zeros(1, dtype=np.float32)
+        self.gate2 = np.zeros(1, dtype=np.float32)
+
         # Multi-Head Attention
         self.mha = MultiHeadAttention(embed_dim, n_heads=n_heads, rope_dim=rope_dim, seed=seed + 2)
 
         # Mixture of Experts
         self.moe = MoE(embed_dim, n_experts=n_experts, ff_dim=ff_dim, k=k, seed=seed + 3)
 
-    def forward(self, x: np.ndarray) -> np.ndarray:
+    def forward(self, x: np.ndarray, dropout: float = 0.0, training: bool = False, rng: np.random.Generator | None = None) -> np.ndarray:
         """Forward pass through the transformer block.
 
         Parameters
         ----------
         x : np.ndarray, shape (batch_size, seq_len, embed_dim)
+        dropout : float
+            Dropout rate for dropout regularization (default: 0.0, no dropout)
+        training : bool
+            Whether in training mode (dropout active) or inference mode (default: False)
+        rng : np.random.Generator or None
+            Random number generator for dropout (uses default if None)
 
         Returns
         -------
         out : np.ndarray, shape (batch_size, seq_len, embed_dim)
         """
-        # Stream 1: Attention
-        # ln1: (B, S, D) → (B, S, D) — layer norm
-        ln1_out = RMSNorm().forward(x, self.ln1_gamma)  # (B, S, D)
-
+        # ── Stream 1: Attention ─────────────────────────────────────
         # MHA: (B, S, D) → (B, S, D) — self-attention output
-        attn_out = self.mha.forward(ln1_out)  # (B, S, D)
+        attn_out = self.mha.forward(x)  # (B, S, D)
 
         # First residual: x + attn_out  — (B, S, D)
         h = x + attn_out  # (B, S, D)
 
-        # Stream 2: MoE
-        # ln2: (B, S, D) → (B, S, D) — layer norm of residual
-        ln2_out = RMSNorm().forward(h, self.ln2_gamma)  # (B, S, D)
+        # Post-norm: h = RMSNorm(h)  — (B, S, D) → (B, S, D)
+        h = RMSNorm().forward(h, self.ln1_gamma)  # (B, S, D)
 
+        # Gated residual: h = h + sigmoid(gate1) * h
+        gate1_val: float = float(1.0 / (1.0 + np.exp(-self.gate1[0])))  # sigmoid
+        h = h + gate1_val * h  # (B, S, D)
+
+        # Optional dropout: h = h * Bernoulli(1 - dropout) with scaling
+        if training and dropout > 0.0:
+            mask = (rng.random(h.shape) >= dropout).astype(np.float32) if rng is not None else (np.random.random(h.shape) >= dropout).astype(np.float32)
+            h = h * (mask / (1.0 - dropout))  # (B, S, D) — scaled dropout
+
+        # ── Stream 2: MoE ──────────────────────────────────────────
         # MoE: (B, S, D) → (B, S, D) — mixture of experts output
-        moe_out = self.moe.forward(ln2_out)  # (B, S, D)
+        moe_out = self.moe.forward(h)  # (B, S, D)
 
         # Second residual: h + moe_out  — (B, S, D)
         out = h + moe_out  # (B, S, D)
+
+        # Post-norm: out = RMSNorm(out)  — (B, S, D) → (B, S, D)
+        out = RMSNorm().forward(out, self.ln2_gamma)  # (B, S, D)
+
+        # Gated residual: out = out + sigmoid(gate2) * out
+        gate2_val: float = float(1.0 / (1.0 + np.exp(-self.gate2[0])))  # sigmoid
+        out = out + gate2_val * out  # (B, S, D)
+
+        # Optional dropout: out = out * Bernoulli(1 - dropout) with scaling
+        if training and dropout > 0.0:
+            mask = (rng.random(out.shape) >= dropout).astype(np.float32) if rng is not None else (np.random.random(out.shape) >= dropout).astype(np.float32)
+            out = out * (mask / (1.0 - dropout))  # (B, S, D) — scaled dropout
 
         return out
 

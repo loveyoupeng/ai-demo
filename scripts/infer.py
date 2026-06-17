@@ -104,7 +104,6 @@ def load_model_from_checkpoint(model_path: str, backend: str):
 
     # Import and use shared checkpoint loading
     from shared.checkpoint import load_checkpoint
-    from shared.config import TransformerConfig
 
     # load_checkpoint returns (params_dict, config)
     params, cfg = load_checkpoint(str(model_dir))

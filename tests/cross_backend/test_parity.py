@@ -62,9 +62,10 @@ class TestForwardParity:
         # Load NumPy weights into PyTorch
         torch_model.load_from_numpy(np_model_)
 
-        # Run forward pass
+        # Run forward pass in eval mode for deterministic behavior (dropout disabled)
         input_ids = torch.tensor([[0, 1, 2, 3, 4]], dtype=torch.int64)
         np_logits = np_model_.forward(input_ids.numpy())
+        torch_model.eval()
         with torch.no_grad():
             torch_logits = torch_model(input_ids).numpy()
 
@@ -142,6 +143,7 @@ class TestForwardParity:
         )
 
         np_logits = np_model_.forward(input_ids.numpy())
+        torch_model.eval()  # Disable dropout for deterministic comparison
         with torch.no_grad():
             torch_logits = torch_model(input_ids).numpy()
 

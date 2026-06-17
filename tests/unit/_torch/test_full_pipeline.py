@@ -94,7 +94,8 @@ class TestModelSerialization:
         )
         input_ids = torch.tensor([[0, 1, 2, 3]], dtype=torch.int64)
 
-        # Get initial logits (no grad)
+        # Get initial logits (eval mode for deterministic inference, no grad)
+        model.eval()
         with torch.no_grad():
             initial_logits = model(input_ids).clone()
 
@@ -114,6 +115,7 @@ class TestModelSerialization:
             seed=0,
         )
         model2.load_from_numpy_dict(saved_params)
+        model2.eval()
 
         # Forward pass should produce identical logits
         with torch.no_grad():

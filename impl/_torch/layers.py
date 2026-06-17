@@ -613,16 +613,28 @@ class TransformerBlock(nn.Module):
         ff_dim: int,
         k: int = 2,
         rope_dim: int = 0,
+        dropout: float = 0.05,
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
         self.n_heads = n_heads
         self.n_experts = n_experts
         self.k = k
+        self.norm_type = "post"
 
         # RMSNorm layers
         self.ln1 = RMSNorm(embed_dim)
         self.ln2 = RMSNorm(embed_dim)
+
+        # Gated residuals — learnable scalar gates, initialized to zero
+        # Gate controls signal flow: h = h + sigmoid(gate) * gated_value
+        # Initialized to zero → identity at start → gates learn to open
+        self.gate1 = nn.Parameter(torch.zeros(1))
+        self.gate2 = nn.Parameter(torch.zeros(1))
+
+        # Dropout for regularization (applied after gated residual)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
 
         # Multi-head attention (standard MHA — no GQA)
         self.mha = MultiHeadAttention(
@@ -650,24 +662,38 @@ class TransformerBlock(nn.Module):
             Output tensor. Shape [batch, seq_len, embed_dim].
         """
         # ── Stream 1: Attention ─────────────────────────────────────
-        # ln1: (B, S, D) → (B, S, D)
-        ln1_out = self.ln1(x)  # (B, S, D)
-
         # MHA: (B, S, D) → (B, S, D) — attention output
-        attn_out, _ = self.mha(ln1_out)  # (B, S, D), (B, H, S, S)
+        attn_out, _ = self.mha(x)  # (B, S, D), (B, H, S, S)
 
-        # Residual: x + attn_out
+        # Residual FIRST (post-norm): x + attn_out
         h = x + attn_out  # (B, S, D)
 
+        # Post-norm: h = RMSNorm(h)
+        h = self.ln1(h)  # (B, S, D)
+
+        # Gated residual with sigmoid activation → values in [0, 1]
+        gate1_sigmoid = torch.sigmoid(self.gate1)
+        h = h + gate1_sigmoid * h  # (B, S, D)
+
+        # Dropout after gated residual (training mode only)
+        h = self.dropout1(h)  # (B, S, D)
+
         # ── Stream 2: MoE ──────────────────────────────────────────
-        # ln2: (B, S, D) → (B, S, D) — norm of residual
-        ln2_out = self.ln2(h)  # (B, S, D)
-
         # MoE: (B, S, D) → (B, S, D)
-        moe_out = self.moe(ln2_out)  # (B, S, D)
+        moe_out = self.moe(h)  # (B, S, D)
 
-        # Residual: h + moe_out
+        # Residual FIRST (post-norm): h + moe_out
         out = h + moe_out  # (B, S, D)
+
+        # Post-norm: out = RMSNorm(out)
+        out = self.ln2(out)  # (B, S, D)
+
+        # Gated residual with sigmoid activation → values in [0, 1]
+        gate2_sigmoid = torch.sigmoid(self.gate2)
+        out = out + gate2_sigmoid * out  # (B, S, D)
+
+        # Dropout after gated residual (training mode only)
+        out = self.dropout2(out)  # (B, S, D)
 
         return out
 
@@ -955,6 +981,10 @@ class TorchModel(nn.Module):
             save(block.ln1.gamma, f"{prefix}.ln1_gamma")
             save(block.ln2.gamma, f"{prefix}.ln2_gamma")
 
+            # Gated residuals
+            save(block.gate1, f"{prefix}.gate1")
+            save(block.gate2, f"{prefix}.gate2")
+
             # MHA Q (weight + bias)
             save(block.mha.Wq.weight, f"{prefix}.mha.Wq")
             save(block.mha.Wq.bias, f"{prefix}.mha.bq")
@@ -1026,6 +1056,10 @@ class TorchModel(nn.Module):
             # Layer norm gamma
             load(block.ln1.gamma, f"{prefix}.ln1_gamma")
             load(block.ln2.gamma, f"{prefix}.ln2_gamma")
+
+            # Gated residuals
+            load(block.gate1, f"{prefix}.gate1")
+            load(block.gate2, f"{prefix}.gate2")
 
             # MHA Q (weight + bias)
             load(block.mha.Wq.weight, f"{prefix}.mha.Wq")

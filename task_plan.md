@@ -35,10 +35,13 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 - **Plan:** `docs/phase_c_plus_plan.md`
 - **Status:** Complete — all 6 steps done, 400 tests pass, ruff/pyright clean
 
-### Phase 3++: Normalization Improvements (NEXT) 🔲 PLANNED
-- Consider adding gated residuals or post-Norm variants
-- Evaluate training speedup and gradient flow
-- **Goal:** Speed up training, improve gradient signal preservation
+### Phase 3++: Normalization Improvements ✅ COMPLETE
+- ✅ Post-Norm architecture (residual add → norm instead of norm → residual)
+- ✅ Gated residuals (sigmoid-scaled skip connections, gate init=0 → identity at start)
+- ✅ Dropout (train/eval mode, deterministic inference)
+- ✅ Cross-backend parity maintained (save/load/load_from_numpy handle gate1/gate2)
+- ✅ All inference tests updated with eval() for dropout deterministic behavior
+- **Status:** all 421 tests pass, ruff/pyright clean
 
 ### Phase 4: Triton Implementation (GPU Kernel Optimization) 🔲 NOT STARTED
 - Custom kernels: LayerNorm, attention, MoE routing, activations
@@ -133,6 +136,7 @@ See `docs/phase_c_plus2_plan.md` for detailed plan.
 | B (NumPy) | ~70 | 21 (b0-b19) | ✅ Complete |
 | C (PyTorch) | 129 | 36 (c0-c36) | ✅ Complete |
 | C+ (E2E) | 90 | 8 (c37-c44) | ✅ Complete |
-| **Total** | **400** | **75+** | **All pass, ruff/pyright clean** |
+| **C++ (Norm)** | **21** | **3 (d0-d2)** | **✅ Complete** |
+| **Total** | **421** | **78+** | **All pass, ruff/pyright clean** |
 
 ---

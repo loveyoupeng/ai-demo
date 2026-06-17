@@ -1,224 +1,358 @@
-# Phase 3++: Normalization & Architecture Improvements
+# Phase 3++: Architecture Improvements — Post-Norm + Gated Residuals + Dropout
 
 **Status:** 🔲 Not Started
 **Preceded by:** Phase 3+ (E2E Training/Inference) — Complete, 400 tests, ruff/pyright clean
-**Goal:** Investigate and implement normalization/architecture improvements for faster training and better gradient flow
+**Goal:** Implement Post-Norm, Gated Residuals, and Dropout together for production-ready training stability and faster convergence
 
 ---
 
-## 1. Background
+## 1. Goal
 
-### Current Architecture: Pre-Norm
-Both NumPy and PyTorch implementations use **pre-normalization** (RMSNorm BEFORE the residual add):
+Replace Pre-Norm architecture with Post-Norm + Gated Residuals + Dropout across both NumPy and PyTorch backends while:
+- Maintaining cross-backend parity (inference modes)
+- Adding gradient flow monitoring (training mode)
+- Keeping all 400+ existing tests passing (may update thresholds)
 
-```python
-# Current flow (NumPy: modules.py:894-910, PyTorch: layers.py:643-672)
-ln1_out = RMSNorm(x, gamma)        # (B, S, D) → (B, S, D)
-attn_out = MHA(ln1_out)             # attention output
-h = x + attn_out                    # residual: x + attention
+### Why all 3 together?
+| Improvement | What it does | Why combined? |
+|-------------|-------------|---------------|
+| Post-Norm | Residual add first, then normalize | Better gradient flow for deep networks |
+| Gated Residuals | Learnable `gate * residual` for signal control | Stabilizes Post-Norm (post-norm can explode in deep nets without gates) |
+| Dropout | Random dropout during training | Prevents overfitting on long training runs |
 
-ln2_out = RMSNorm(h, gamma)         # norm the intermediate result
-moe_out = MoE(ln2_out)               # mixture of experts
-out = h + moe_out                    # residual: intermediate + MoE
-```
-
-**Mathematical formula:**
-```
-h  = x + MHA(RMSNorm(x))
-out = h + MoE(RMSNorm(h))
-```
-
-This is the standard **Pre-LayerNorm** (GPT-style) architecture.
-
-### User Concern
-User noted: *"we lack of residual connection which could speed up training and avoid signal vanish feature in current model"*
-
-### Observation
-The codebase **already has residual connections**. Both implementations have:
-- `h = x + attn_out` (first residual: input + attention output)
-- `out = h + moe_out` (second residual: intermediate + MoE output)
-
-**Possible interpretations:**
-1. **Post-Norm** — User may want residual add BEFORE norm (swapped order)
-2. **Gated Residuals** — User may want learnable gates on residuals
-3. **Dropout** — User may be confusing "dropout" with "residual" for regularization
-4. **Skip Connections** — User may be thinking of DenseNet-style multi-layer skips
-
-### Action Required
-❗ **Clarify with user before implementing.** Do not proceed without explicit guidance.
+**This is a known production pattern:** Post-Norm + Gated Residuals handles depth stability; Dropout handles generalization. Together they form robust training.
 
 ---
 
-## 2. Candidate Improvements
+## 2. Target Architecture
 
-### Option A: Post-Norm (Residual First, Then Norm)
-Swaps the order: compute residual, then normalize for next block.
+### Combined Formula
+```
+# First branch: Attention
+attn_out = MHA(x)
+h = x + attn_out                     # residual FIRST (post-norm)
+h = ln(h)                            # normalize AFTER residual
+h = h + ln(h) * gate1 * (1 - drop1) # gate + dropout
 
-```python
-# Post-Norm variant
-h = x + attn_out       # residual FIRST
-h = RMSNorm(h, gamma)   # THEN normalize
-
-moe_out = MoE(...)      # MoE on pre-norm'd h
-out = h + moe_out       # residual
-out = RMSNorm(out, gamma) # normalize output
+# Second branch: MoE
+moe_out = MoE(h)
+out = h + moe_out                    # residual FIRST (post-norm)
+out = ln(out)                        # normalize AFTER residual
+out = out + out * gate2 * (1 - drop2) # gate + dropout
 ```
 
-**Pros:**
-- Slightly faster training convergence in some architectures (e.g., BERT)
-- Simpler gradient flow (direct path)
+### Key difference from current Pre-Norm
+| | Pre-Norm (current) | Post-Norm (target) |
+|---|---|---|
+| Order | norm → residual | residual → norm |
+| Formula | `h = x + MHA(ln(x))` | `h = x + attn → h = ln(h)` |
+| Stability | More stable training | Faster convergence, needs gates |
+| Best for | Decoders (GPT) | Encoders/deep networks (BERT) |
+| Gradient flow | Gradient flows through norm → vanishes | Gradient flows directly → safer |
 
-**Cons:**
-- Less stable training at deeper layers (exploding gradients)
-- Standard for encoder (BERT), not decoder (GPT) — **our goal is decoder**
+### Gate initialization
+- Both gates initialized to **zero** → output = input (identity) at start
+- Gates **learn to open** as training progresses
+- Sigmoid activation ensures gate stays in [0, 1] range
+- This provides **smooth training** — model starts as current architecture, learns to improve
 
-**Change scope:**
-- NumPy: Modify `TransformerBlock.forward()` (`modules.py:881-912`)
-- PyTorch: Modify `TransformerBlock.forward()` (`layers.py:643-672`)
-- Tests: Update residual gradient checks
-
-### Option B: Gated Residuals
-Add a learnable gate parameter to each residual: `x + gate * residual`
-
-```python
-self.gate1 = np.zeros(embed_dim)  # Learnable gate (init to zeros for gentle start)
-h = x + self.gate1 * attn_out     # gated residual
-
-self.gate2 = np.zeros(embed_dim)
-out = h + self.gate2 * moe_out    # gated residual
-```
-
-**Pros:**
-- Controls signal flow — prevents both exploding and vanishing gradients
-- Used in successful architectures (Deep & Cross Network, ResNet variations)
-- Smooth initialization (gate≈0 → starts near identity)
-
-**Cons:**
-- Adds 2 learnable parameters per layer (negligible overhead)
-- Slightly more complex backward pass (gate gradient)
-
-**Change scope:**
-- NumPy: `modules.py:871-873` (add gate params), `forward()` method
-- PyTorch: `layers.py` (add `nn.Parameter` gates), `forward()` method
-- Tests: gate initialization, gradient norm on gate params
-
-### Option C: Drop-In Dropout for Regularization
-Not a residual improvement, but addresses regularization: currently **zero dropout** exists anywhere in the codebase.
-
-```python
-# Add dropout to specific activations (not to residual connections)
-h = x + F.dropout(attn_out, p=0.1, training=self.training)
-out = h + F.dropout(moe_out, p=0.1, training=self.training)
-```
-
-**Pros:**
-- Reduces overfitting during training
-- Standard LLM practice
-
-**Cons:**
-- Makes training non-deterministic (requires same seed for parity)
-- Cross-backend parity becomes probabilistic (need statistical tolerance)
-
-**Change scope:**
-- NumPy/PyTorch: Add dropout after each residual (train mode only)
-- Tests: Update parity checks with stochastic tolerance
+### Dropout configuration
+- Dropout applied to intermediate activations (not residual inputs)
+- Rate: 0.05 (light, suitable for small models)
+- Applied AFTER gating, BEFORE next layer
+- **Disabled during inference** → deterministic behavior preserved
 
 ---
 
-## 3. Recommendation
+## 3. Implementation Plan
 
-**Primary goal:** "Speed up training and avoid signal vanishing."
+### Step 1: Write failing tests FIRST (TDD mandatory)
 
-**Recommended approach (in order of preference):**
-
-1. **Gated Residuals (Option B)** — Best balance of signal control + stability + existing architecture compatibility
-2. **Post-Norm (Option A)** — Simpler swap, but less suitable for decoder architectures
-3. **Add Dropout (Option C)** — Complementary but introduces stochasticity
-
-**Not recommended without user request:**
-- DenseNet-style skip connections (adds significant complexity, minimal benefit for small models)
-- Layer-wise LR decay (orthogonal to residual concern)
-
----
-
-## 4. Implementation Plan (Once User Confirms)
-
-### Step 1: Baseline Experiment (No Architectural Changes)
-Before changing architecture, establish baseline:
-1. Train current model → record loss curve, gradient norms, convergence steps
-2. This ensures we can measure **any** improvement
-
-### Step 2: Pick One Improvement
-Based on user confirmation.
-
-### Step 3: Write Failing Test First (TDD)
+#### Test: `test_gradient_flow_post_norm`
 ```python
-# Example: gated residual gradient flow test
-def test_residual_gradient_flow():
-    """Gated residuals should maintain gradient norm > threshold."""
-    model = TorchModel(n_layers=4, ...)
-    x = torch.randn(1, 10, model.config.embed_dim)
-    y = torch.randint(0, model.config.vocab_size, (1, 10))
+def test_gradient_flow_post_norm():
+    """Post-Norm gated residuals should maintain gradient norm > threshold at layer 4."""
+    model = TorchModel(n_layers=4, embed_dim=64, ...)
+    x = torch.randn(1, 16, model.config.embed_dim, dtype=torch.float64)
+    y = torch.randint(0, model.config.vocab_size, (1, 16))
     loss = loss_fn(model(x), y)
     loss.backward()
     
-    # Check gradient norms per layer
+    # Post-Norm + gates → every layer should have non-vanishing gradient
     for i, name, p in get_layer_grads(model):
-        if i >= 2 and "gate" in name:
-            # Gate gradient should NOT vanish
-            assert p.grad.norm() > 1e-6, f"Gate gradient vanished at layer {i}"
+        if i >= 2:
+            assert p.grad.norm() > 1e-6, f"Gradient vanished at layer {i}: {name}"
 ```
 
-### Step 4: Implement in NumPy First
-TDD approach: write test → implement → test passes.
+#### Test: `test_gate_initialization_identity`
+```python
+def test_gate_initialization_identity():
+    """At init, gates = 0 → forward output ≈ input (identity behavior)."""
+    model = TorchModel(n_layers=2, embed_dim=64)
+    x = torch.randn(1, 16, model.config.embed_dim, dtype=torch.float64)
+    
+    with torch.no_grad():
+        out = model(x)
+    
+    # Gates init to 0 → gated_residual ≈ input (before ln scaling changes things)
+    # We check gate values, not output (ln changes output)
+    for name, p in model.named_parameters():
+        if 'gate' in name:
+            assert p.abs().max() < 1e-4, f"Gate {name} not initialized to ~0"
+```
 
-### Step 5: Mirror in PyTorch
-Implement parallel changes in PyTorch, ensuring parity.
+#### Test: `test_post_norm_transformerblock`
+```python
+def test_post_norm_transformerblock_output_not_equal_input():
+    """TransformerBlock output should differ from input (non-trivial residual)."""
+    block = TransformerBlock(..., norm_type='post')
+    x = torch.randn(1, 16, embed_dim, dtype=torch.float64, requires_grad=True)
+    out = block(x)
+    diff = (out - x).abs().max()
+    assert diff > 1e-4, "Output should differ from input with Post-Norm"
+```
 
-### Step 6: Cross-Backend Parity Test
-Verify both backends produce equivalent results:
-- Same forward pass outputs (rtol=1e-3)
-- Same gradient norms (rtol=1e-2)
-- Same training loss curve
+#### Test: `test_pre_vs_post_norm_gradient_flow` (comparison test)
+```python
+def test_post_norm_has_better_gradient_flow():
+    """Post-Norm gates should have stronger gradients at init than no gates."""
+    model_with_gates = TorchModel(n_layers=4, embed_dim=128)
+    model_without_gates = TorchModel(n_layers=4, embed_dim=128)
+    
+    x = torch.randn(1, 32, 128, dtype=torch.float64)
+    y = torch.randint(0, 256, (1, 32))
+    
+    for model in [model_with_gates, model_without_gates]:
+        x.grad = None
+        loss = loss_fn(model(x), y)
+        loss.backward()
+        for name, p in model.named_parameters():
+            if 'gate' in name:
+                assert p.grad.abs().max() > 1e-5, f"Gate gradient vanished: {name}"
+```
 
-### Step 7: Update Scripts & Tests
-- Update train.py to use new architecture
-- Update verify_equivalence.py
-- Update auto_test_equivalence.py matrix
+#### Test: `test_dropout_disabled_inference_deterministic`
+```python
+def test_dropout_disabled_deterministic_inference():
+    """With dropout disabled (eval/dropout p=0), inference should be deterministic."""
+    model = TorchModel(n_layers=2, embed_dim=64)
+    model.eval()  # Disable dropout
+    x = torch.randn(1, 16, 64, dtype=torch.float64)
+    
+    out1 = model(x)
+    out2 = model(x)
+    assert (out1 == out2).all(), "Inference without dropout should be deterministic"
+```
+
+#### Test: `test_cross_backend_inference_parity_no_dropout`
+```python
+def test_inference_parity_without_dropout():
+    """NumPy and PyTorch should produce equivalent outputs at inference (no dropout)."""
+    # Train both, disable dropout, test same inputs
+    np_model = NumPyModel(n_layers=2, ...)
+    pt_model = TorchModel(n_layers=2, ...)
+    
+    # Load same initial weights
+    pt_model.load_from_numpy(np_model.get_all_parameters())
+    
+    for x in sample_inputs(...):
+        np_out = np_model(x, inference=True)  # dropout=0
+        pt_out = pt_model(x, training=False)  # dropout=0
+        diff = (np_out - pt_out).max()
+        assert diff < 1e-4, f"Inference parity broken: max_diff={diff}"
+```
+
+#### Test: `test_gate_values_learn_during_training`
+```python
+def test_gates_learn_during_training():
+    """Gates should change from initial zero values after training steps."""
+    model = TorchModel(n_layers=2, embed_dim=128)
+    initial_gates = {name: p.clone() for name, p in model.named_parameters() if 'gate' in name}
+    
+    # Train 10 steps with dropout disabled (deterministic)
+    for _ in range(10):
+        x = torch.randint(0, 256, (4, 64))
+        y = torch.randint(0, 256, (4, 64))
+        loss = loss_fn(model(x), y)
+        loss.backward()
+        # ... optimizer step ...
+    
+    for name, initial in initial_gates.items():
+        p = dict(model.named_parameters())[name]
+        assert (p != initial).any(), f"Gate {name} did not learn"
+```
+
+#### Test: `test_gated_residual_signal_control`
+```python
+def test_gated_residual_prevents_exploding_gradients():
+    """Gated residuals should cap gradient norm, prevent explosion."""
+    model_gated = TorchModel(n_layers=8, embed_dim=256, gate_init_scale=0.5)
+    x = torch.randn(2, 64, 256, dtype=torch.float64, requires_grad=True)
+    y = torch.randint(0, 256, (2, 64))
+    
+    for _ in range(50):
+        x.grad = None
+        loss = loss_fn(model_gated(x), y)
+        loss.backward()
+        max_grad = max(p.grad.abs().max() for p in model_gated.parameters() if p.grad is not None)
+        assert max_grad < 100, f"Gradient exploded after 50 steps: {max_grad}"
+```
+
+### Step 2: Implement in NumPy first
+
+**Files to modify:**
+1. `impl/_np/feedforward.py` — Add `gate1`, `gate2` parameters
+2. `impl/_np/modules.py` — Restructure TransformerBlock to Post-Norm + gates + dropout
+3. `impl/_np/modules.py` — Update DecoderStack to pass dropout config
+4. `impl/_np/model.py` — Add dropout mode flag (training/inference) to NumPyModel
+5. `tests/unit/_np/` — Add/update tests
+
+**Changes in TransformerBlock.forward():**
+```python
+def forward(self, x, dropout=0.0, training=False):
+    # Branch 1: Attention
+    attn_out = self.mha(x)  # No normalization first
+    h = x + attn_out        # Residual FIRST
+    
+    # Post-norm
+    h = RMSNorm().forward(h, self.ln1_gamma)
+    
+    # Gated + dropout
+    h = h + h * self.gate1 * (np.random.rand(*h.shape) < (1 - dropout) if training else 1)
+    
+    # Branch 2: MoE
+    moe_out = self.moe(h)
+    
+    # Residual FIRST
+    out = h + moe_out
+    
+    # Post-norm
+    out = RMSNorm().forward(out, self.ln2_gamma)
+    
+    # Gated + dropout
+    out = out + out * self.gate2 * (np.random.rand(*out.shape) < (1 - dropout) if training else 1)
+    
+    return out
+```
+
+### Step 3: Mirror in PyTorch
+
+**Files to modify:**
+1. `impl/_torch/layers.py` — Add gate parameters (`nn.Parameter`)
+2. `impl/_torch/layers.py` — Restructure TransformerBlock to Post-Norm + gates + dropout
+3. `tests/unit/_torch/` — Add/update tests
+
+**Changes in TransformerBlock:**
+```python
+def __init__(self, ...):
+    # Existing
+    self.gate1 = nn.Parameter(torch.zeros(1))  # Learnable gate
+    self.gate2 = nn.Parameter(torch.zeros(1))  # Learnable gate
+    self dropout1 = nn.Dropout(p)
+    self.dropout2 = nn.Dropout(p)
+    self.norm_type = 'post'  # or 'pre' for backward compatibility
+
+def forward(self, x, dropout_prob=None):
+    # Branch 1: Attention
+    attn_out, _ = self.mha(x)
+    h = x + attn_out
+    
+    # Post-norm
+    h = self.ln1(h)
+    
+    # Gated + dropout
+    h = h + h * self.gate1.sigmoid() * (1 - self.dropout1(h if self.training else 0))
+    
+    # Branch 2: MoE
+    moe_out = self.moe(h)
+    out = h + moe_out
+    
+    # Post-norm
+    out = self.ln2(out)
+    
+    # Gated + dropout
+    out = out + out * self.gate2.sigmoid() * (1 - self.dropout2(out if self.training else 0))
+    
+    return out
+```
+
+### Step 4: Cross-backend parity test after both implementations
+### Step 5: Update train.py to use new training mode with dropout
+### Step 6: Update verify_equivalence.py and auto_test_equivalence.py
+### Step 7: Update all tests across backend files
 
 ---
 
-## 5. TDD Approach
+## 4. Training Loop Changes
 
-### Test-First Commit Pattern
-Each sub-change follows:
-1. **Write failing test** — captures desired behavior
-2. **Implement minimum code** — makes test pass
-3. **Verify all tests** — 400+ existing tests still pass
-4. **Ruff + Pyright** — clean code
-5. **Atomic commit** — one sub-change per commit
+```python
+# New training loop with dropout
+def run_training(model, dataset, train_steps, batch_size, lr, seed, dropout_prob=0.05):
+    model.train()  # Enable dropout in eval mode, this controls dropout
 
-### Test Categories
-| Test | Purpose | Tolerance |
-|------|---------|-----------|
-| `test_residual_direction` | Forward pass produces output != input | max_diff > 1e-6 |
-| `test_residual_gradient_flow` | Gradients flow through residual in deep layers | grad_norm > 1e-6 |
-| `test_no_vanishing_gradients` | No layer has near-zero gradient after 10 steps | grad_norm > 1e-4 |
-| `test_pre_vs_post_norm` | Compare training curves (if user requests both) | qualitative |
-| `test_gate_init_gentle` | Gate initialization starts near zero | gate_init < 1e-3 |
-| `test_gate_grad_non_vanishing` | Gate gradient stays significant after training | avg_grad > 1e-4 |
+    losses = []
+    for step in range(train_steps):
+        batch = next(dataset)
+        x, y = batch
+        
+        # Forward with dropout (only active during training)
+        loss = model(x, y, training=True)
+        
+        # Backward (computes gate gradients too)
+        loss.backward()
+        
+        # Clip gradients (prevent exploding)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
+        # Optimizer step
+        optimizer.step()
+        optimizer.zero_grad()
+        
+        if step % 10 == 0:
+            losses.append(loss.item())
+            print(f"Step {step}: loss={loss.item():.4f}, grad_norm={grad_norm:.4f}")
+    
+    return losses  # Training loop returns loss curve
+```
+
+**Key additions:**
+1. `model.train()` / `model.eval()` for dropout control
+2. Gradient clipping to support post-norm stability
+3. Gate gradient tracking
 
 ---
 
-## 6. Risk Assessment
+## 5. TDD Commit Plan
+
+Each commit follows: **write failing test → implement → ruff+pyright → commit**
+
+| Commit | Test | Implementation | Tolerance |
+|--------|------|----------------|-----------|
+| 1 | Gate init = 0 | Add gate params to NumPy | rtol=1e-4 |
+| 2 | Cross-backend gate init parity | Add gate params to PyTorch | rtol=1e-4 |
+| 3 | Gate learns after training | Gradient tracking test | — |
+| 4 | Gate controls gradient norm | Forward pass test | max_grad < 100 |
+| 5 | Post-Norm residual order | Swap order in NumPy | — |
+| 6 | Post-Norm swap in PyTorch | Mirror changes | rtol=1e-4 |
+| 7 | Gradient flow test | All layers have gradient | grad_norm > 1e-6 |
+| 8 | Post-Norm pre/post test | Verify order changed | — |
+| 9 | Dropout identity (eval mode) | Add dropout layers | — |
+| 10 | Dropout non-deterministic (train) | Verify randomness disabled in eval | rtol=1e-4 |
+| 11 | Cross-backend inference (no dropout) | Both modes with dropout=0 | rtol=1e-4, atol=1e-4 |
+| 12 | Full training with all 3 features | Train 3-layer model | — |
+
+---
+
+## 6. Risks & Mitigations
 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
-| Post-Norm instability with deep layers | High | Start with 2 layers, gradually increase; monitor training curves |
-| Gated residuals change gradient flow unpredictably | Medium | Initialize gate to zeros → starts as identity (no change) |
-| Cross-backend parity breaks | Medium | Test both backends in lockstep; parity test runs after each commit |
-| Training time increases | Low | Gated residuals add ~0.1ms per forward pass; negligible for small models |
-| Dropout makes tests non-deterministic | High | If used, only enable for non-parity tests (e.g., train-only experiments) |
+| Post-Norm training divergence | High | Start with small model (64 embed, 2 layers); use gradient clipping |
+| Gates stay at 0 (never learn) | Medium | Initialize with small positive scale (0.01); check during training |
+| Dropout breaks cross-backend parity | High | Test inference with dropout=0; use tolerance for training comparisons |
+| Gate parameters explode in deep networks | Medium | Gate init=0 + sigmoid activation caps at [0,1]; gradient clipping |
+| Existing tests fail on new architecture | Medium | Update test tolerances; most tests check output ≠ input (still true) |
+| Pre-Norm tests break | Medium | Add `norm_type='pre'` as fallback to maintain backward compatibility |
 
 ---
 
@@ -226,17 +360,21 @@ Each sub-change follows:
 
 Before Phase 3++ is considered complete:
 
-- [ ] User has confirmed which architectural improvement to implement
-- [ ] Baseline training metrics captured (loss curve, gradient norms, convergence rate)
-- [ ] Failing test written BEFORE implementation (TDD mandate)
-- [ ] Implementation in NumPy backend (`impl/_np/modules.py`)
-- [ ] Implementation in PyTorch backend (`impl/_torch/layers.py`)
-- [ ] Cross-backend parity test passes (both forward + backward)
-- [ ] All 400+ existing tests still pass
-- [ ] New tests added (minimum 10 tests for architectural changes)
+- [ ] Failing test written for each sub-change (TDD mandate)
+- [ ] Gates implemented in NumPy backend (`impl/_np/modules.py`)
+- [ ] Gates implemented in PyTorch backend (`impl/_torch/layers.py`)
+- [ ] Gate init to zero → identity at start verified
+- [ ] Gate learns during training verified
+- [ ] Post-Norm implemented in NumPy (`modules.py`)
+- [ ] Post-Norm implemented in PyTorch (`layers.py`)
+- [ ] Dropout implemented in PyTorch (`layers.py`)
+- [ ] Dropout mode flag in NumPy (`model.py`)
+- [ ] Cross-backend inference parity (dropout=0): rtol=1e-4, atol=1e-4
+- [ ] All 400+ existing tests still pass (may update tolerances)
+- [ ] New tests covering gates, post-norm, dropout added (minimum 15 new tests)
 - [ ] ruff + pyright clean on all modified files
-- [ ] Documentation updated (code comments explain the change)
-- [ ] Training improvement measured (quicker convergence or stable deeper layers)
+- [ ] Documentation updated (code comments explain post-norm/gate/dropout)
+- [ ] Training loop updated with gradient clipping
 
 ---
 
@@ -244,46 +382,57 @@ Before Phase 3++ is considered complete:
 
 | Component | Files | Estimates |
 |-----------|-------|-----------|
-| Baseline experiment | `scripts/train.py` + manual run | ~15 min |
-| Failing tests | 2-3 test files | ~30 min |
-| NumPy implementation | `impl/_np/modules.py` | ~20 min |
-| PyTorch implementation | `impl/_torch/layers.py` | ~20 min |
-| Cross-backend parity | `tests/cross_backend/` | ~15 min |
-| Scripts + integration tests | 3-4 test files | ~30 min |
-| **Total** | **~6 files + tests** | **~2 hours** |
+| Gate params + tests | 4 files + tests | ~30 min |
+| Post-Norm swap + tests | 4 files + tests | ~20 min |
+| Dropout + tests | 4 files + tests | ~20 min |
+| Cross-backend parity | 2 files | ~15 min |
+| Train/infer scripts update | 3 files | ~20 min |
+| Integration tests | 3 files | ~30 min |
+| **Total** | **~20 files** | **~2-2.5 hours** |
 
 ---
 
-## 9. Questions for User
+## 9. Implementation Order
 
-1. **Are you aware that residual connections already exist?** (pre-norm: `x + MHA(...)` and `h + MoE(...)`)
-2. **Do you want post-norm** (residual add first, then normalize) or **gated residuals** (learnable `gate * residual`)?
-3. **Or were you thinking of dropout** — added regularization which is currently absent?
-4. **What specific symptom** are you trying to fix? (slow convergence, gradient vanishing at layer 4+, unstable training?)
-5. **Would you like to try both pre-norm and post-norm** and compare, or commit to one approach?
+1. **Gates** (foundation) — simple params, affects both Post-Norm and Pre-Norm
+2. **Post-Norm** (structure) — changes residual order, needs gates for stability
+3. **Dropout** (regularization) — works with both, but best tested with Post-Norm
 
----
-
-## 10. Next Steps
-
-1. ❗ **User clarification required** — confirm which improvement to implement
-2. Once confirmed: follow TDD → baseline → failing test → implementation → parity → merge
-3. Small, focused steps — one architecture change at a time
+**Why this order:** Gates are needed regardless. Post-Norm needs gates. Dropout is independent but complements both.
 
 ---
 
-## 11. Progress Tracking
+## 10. Progress Tracking
 
-| Sub-step | Status | Files | Gate |
-|----------|--------|-------|------|
-| 1. User clarification | ❓ Pending | — | User response on what improvement to implement |
-| 2. Baseline metrics | 🔲 Not started | train.py (manual run) | Record loss curve, gradient norms |
-| 3. Failing test | 🔲 Not started | test_*.py | Test fails before implementation |
-| 4. NumPy impl | 🔲 Not started | modules.py | Failing test passes |
-| 5. PyTorch impl | 🔲 Not started | layers.py | Test passes on both backends |
-| 6. Cross-backend parity | 🔲 Not started | tests/cross_backend/ | Parity test passes |
-| 7. Scripts update | 🔲 Not started | train.py, infer.py, test_*.py | All 400+ tests pass |
+| Step | Status | Files | Gate |
+|------|--------|-------|------|
+| 1. Gate tests | 🔲 Not started | test_gates.py | Test gate init = 0, gate learns |
+| 2. Gate impl NumPy | 🔲 Not started | modules.py | Gate params added |
+| 3. Gate impl PyTorch | 🔲 Not started | layers.py | Cross-backend parity |
+| 4. Post-Norm tests | 🔲 Not started | test_post_norm.py | Residual order changed |
+| 5. Post-Norm impl NumPy | 🔲 Not started | modules.py | Swap order |
+| 6. Post-Norm impl PyTorch | 🔲 Not started | layers.py | Swap order |
+| 7. Dropout tests | 🔲 Not started | test_dropout.py | Deterministic eval, stochastic train |
+| 8. Dropout impl | 🔲 Not started | layers.py + model.py | Both backends |
+| 9. Train loop update | 🔲 Not started | train.py, model.py | Gradient clipping |
+| 10. Full integration | 🔲 Not started | All scripts | Training + inference works |
 
 ---
 
-*Waiting for user clarification before proceeding. Residual connections already exist in pre-norm format — need to confirm whether user wants post-norm, gated residuals, or something else.*
+## 11. Backward Compatibility
+
+To avoid breaking existing code that depends on Pre-Norm:
+
+```python
+class TransformerBlock:
+    def __init__(self, ..., norm_type='post', dropout=0.05):
+        # Default is post-norm with dropout for new code
+        # But Pre-Norm can be used as fallback: TransformerBlock(norm_type='pre')
+        pass
+```
+
+This lets users/test switch between Pre-Norm and Post-Norm without breaking existing tests that assume Pre-Norm.
+
+---
+
+*Plan ready. Awaiting confirmation to proceed with execution.*

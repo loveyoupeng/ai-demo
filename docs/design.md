@@ -304,11 +304,15 @@ def set_global_seed(seed: int):
 | Test | NumPy vs PyTorch | NumPy vs Triton | NumPy vs CUDA | PyTorch vs Triton | PyTorch vs CUDA | Triton vs CUDA |
 |------|:---:|:---:|:---:|:---:|:---:|:---:|
 | Standalone Layer | ✅ | — | — | — | — | — |
-| Model Forward | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| Model Forward | ✅ | — | — | — | — | — |
 | Model Backward | ✅ | — | — | — | — | — |
 | Training Step | ✅ | — | — | — | — | — |
-| Inference Output | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| Inference Output | ✅ | — | — | — | — | — |
 | Training Convergence | ✅ | — | — | — | — | — |
+| **Checkpoint Round-trip** | ✅ | — | — | — | — | — |
+| **E2E Equivalence (Phase C+)** | 🔲 | — | — | — | — | — |
+
+**Phase C status:** All NumPy vs PyTorch rows marked ✅ — 128+7=135 tests pass. Cross-backend parity verified at `rtol=1e-3, atol=1e-3` for float64.
 
 **Tolerances (following AGENTS.md tiered policy):**
 - Standalone layer (tested in isolation): `rtol=1e-4, atol=1e-4`
@@ -361,19 +365,34 @@ Phase F: Integration & E2E 🔲 Not Started
 16. Unit tests for each component
 17. Cross-backend reference tests (numpy is the baseline)
 
-### Phase C: PyTorch Implementation ⏳ PLANNED (Not Started)
+### Phase C: PyTorch Implementation ✅ COMPLETE
 **Goal:** Production-ready, mirrors NumPy behavior exactly
-**Status:** Plan exists at `docs/phase_c_plan.md` — execution ready
+**Status:** 14/14 sub-phases complete, 36 commits, 128 PyTorch tests + 7 cross_backend tests
 
 1. nn.Module equivalents of all layers
 2. Same model construction with same parameter mapping
 3. Automatic backward (torch.autograd) replaces manual gradients
-
 4. Same training loop (uses torch.optim, torch.utils.data)
 5. Same inference engine (torch-based KV cache)
 6. Same CLI interface
-7. Cross-backend parity tests (numpy vs torch)
-8. Performance comparison (optional)
+7. Cross-backend parity tests (numpy vs torch) — rtol=1e-3, atol=1e-3
+8. Save/load (save_as_numpy, load_from_numpy_dict)
+
+**Key findings:**
+- Wk.bias gradient is mathematically zero (softmax attention weights sum to 1); skip in gradient tests
+- Load/transpose only 2D Linear weights where NumPy convention is (in, out) vs PyTorch (out, in)
+- Wk/Wv require `bias=True` in PyTorch to match NumPy's `bk`/`bv` biases
+
+### Phase C+: E2E Training, Inference & Equivalence 🔲 PLANNED
+**Goal:** Unified training/inference scripts, interactive CLI, 8-test equivalence matrix
+**Plan:** `docs/phase_c_plus_plan.md`
+
+1. Unified config system (CLI > env vars > file)
+2. Single `scripts/train.py` entry point (backend flag: numpy/torch)
+3. `scripts/infer.py` with interactive mode + context status
+4. `scripts/verify_equivalence.py` — 6 scenario prompts
+5. `scripts/auto_test_equivalence.py` — 8-combination matrix
+6. `resource/models/` gitignore for trained checkpoints
 
 ### Phase D: Triton Implementation 🔲 Not Started
 **Goal:** GPU kernels for compute-heavy operations
@@ -609,17 +628,37 @@ B15: CLI + Inference
 ```
 *Acceptance:* 100% unit tests pass. Model trains on TinyStories. Generates coherent text.
 
-### Phase C: PyTorch ⏳ PLANNED (Not Started)
-**Status:** Execution ready in `docs/phase_c_plan.md` — 14 sub-phases (C0-C14), 20+ commits, ~65-70 tests
+### Phase C: PyTorch ✅ COMPLETE
+**Status:** 36 commits (c0-c36), 128 PyTorch tests, 7 cross_backend tests — all pass, ruff/pyright clean
 ```
-C1: Layer wrappers (nn.Module)
-C2: Full model construction
-C3: Cross-backend parity tests
-C4: Training loop (automatic diff)
-C5: Inference engine
-C6: CLI integration
+C0: Project scaffolding — c0
+C1: Embedding + RMSNorm + SiLU + SwiGLU — c1-c1
+C2: RoPE — c2
+C3: MHA/GQA — c3
+C4: MoE — c4
+C5: TransformerBlock — c5
+C6: DecoderStack — c6
+C7: TorchModel full — c7
+C8: CrossEntropyLoss + AdamW — c8
+C9: Training Loop — c9
+C10: Naive KV Cache + TurboQuant KV Cache — c10
+C11: Inference Engine — c11
+C12: CLI — c12
+C13: Full training pipeline — c13
+C14: Cross-backend parity — c14
 ```
-*Acceptance:* PyTorch matches NumPy on all parity tests.
+*Acceptance:* All 310 tests pass, cross-backend parity verified (rtol=1e-3, atol=1e-3).
+
+### Phase C+: E2E Training/Inference 🔲 PLANNED
+**Plan:** `docs/phase_c_plus_plan.md`
+```
+C+: Unified config system — CLi > env > config file
+C+: scripts/train.py — single entry point, --backend numpy/torch
+C+: scripts/infer.py — interactive mode with context status
+C+: scripts/verify_equivalence.py — 6 scenario equivalence check
+C+: scripts/auto_test_equivalence.py — 8-combination matrix test
+```
+*Acceptance:* Same input → same output for all 8 backend combinations.
 
 ### Phase D: Triton 🔲 Not Started
 ```
@@ -639,6 +678,16 @@ E4: Cross-backend parity tests
 E5: Training + Inference
 ```
 *Acceptance:* CUDA matches NumPy/PyTorch/Triton on parity tests.
+
+### Phase C+: E2E Training & Equivalence 🔲 Not Started
+**Plan:** `docs/phase_c_plus_plan.md`
+1. Unified config system (`shared/config_utils.py`)
+2. `scripts/train.py` — single entry, `--backend numpy/torch`
+3. `scripts/infer.py` — interactive CLI with context status
+4. `scripts/verify_equivalence.py` — 6-prompt equivalence check
+5. `scripts/auto_test_equivalence.py` — 8-combination matrix
+6. `resource/models/` gitignored trained checkpoints
+*Acceptance:* 8/8 equivalence tests pass (greedy exact match, weight diff < tolerance).
 
 ### Phase F: Integration 🔲 Not Started
 ```

@@ -50,6 +50,7 @@ def train_step(
     batch_target: torch.Tensor,
     optimizer: torch.optim.Optimizer,
     loss_fn: nn.Module,
+    max_norm: float = 1.0,
 ) -> float:
     """Execute one training step with PyTorch autograd.
 
@@ -65,6 +66,9 @@ def train_step(
         An optimizer with a `.step()` method.
     loss_fn : nn.Module or callable
         A callable that takes (logits, targets) and returns scalar loss.
+    max_norm : float, default 1.0
+        Maximum allowed L2 norm for gradient clipping.  Pass 0.0 to
+        disable clipping entirely.
 
     Returns
     -------
@@ -80,10 +84,17 @@ def train_step(
     # 3. Backward pass: autograd computes all gradients
     loss.backward()
 
-    # 4. Optimizer step: apply gradients
+    # 4. Clip gradients to stabilize training (especially with Post-Norm)
+    grads: dict[str, torch.Tensor] = {}
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            grads[name] = param.grad
+    clip_gradients(grads, max_norm=max_norm)
+
+    # 5. Optimizer step: apply gradients
     optimizer.step()
 
-    # 5. Clear gradients for next step
+    # 6. Clear gradients for next step
     optimizer.zero_grad()
 
     return loss.item()

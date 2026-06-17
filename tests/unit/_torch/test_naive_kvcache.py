@@ -25,7 +25,7 @@ class TestTorchNaiveKVCache:
 
         assert len(k_result) == 3
         assert len(v_result) == 3
-        for ki, vi in zip(k_result, v_result):
+        for ki, vi in zip(k_result, v_result, strict=False):
             assert ki.shape == (B, H, 1, D)
             assert vi.shape == (B, H, 1, D)
 
@@ -98,7 +98,7 @@ class TestTorchNaiveKVCache:
         assert cache.current_length() == 0
 
         k_result, v_result = cache.get()
-        for ki, vi in zip(k_result, v_result):
+        for ki, vi in zip(k_result, v_result, strict=False):
             assert ki.shape == (B, H, 0, D)
             assert vi.shape == (B, H, 0, D)
 
