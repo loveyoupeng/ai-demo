@@ -15,11 +15,11 @@ optional-dependencies = {triton = ["triton>=2.2"], cuda = ["cuda-python>=12.0"]}
 dev = ["pyright>=1.1", "pytest>=7.0", "pytest-timeout>=2.0", "ruff>=0.4"]
 
 [[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
+name = "pytorch-jetson"
+url = "https://pypi.jetson-ai-lab.io/jp6/cu126"
 
 [tool.uv.sources]
-torch = { index = "pytorch-cpu" }
+torch = { index = "pytorch-jetson" }
 
 [project.scripts]
 train = "impl._np.cli:main"
