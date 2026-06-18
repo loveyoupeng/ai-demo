@@ -9,7 +9,7 @@
 - GQA (Grouped-Query Attention) – opt-in config toggle
 - MoE (Mixture of Experts) – configurable num_experts
 - KV Cache: Naive (full precision) + TurboQuant (1-bit compressed)
-- **Residual connections – Pre-Norm architecture** (see Phase 3++ section below)
+- **Post-Norm architecture with gated residuals + dropout** (see Phase 3++ below)
 
 ### Implementations (4 backends, equivalent behavior)
 1. **NumPy** – Learning-focused, heavy comments, mathematical explanations
@@ -86,11 +86,13 @@
 | TurboQuant: 1-bit KV | Google's approach, dramatic memory savings for long sequences |
 | Checkpoint shared format | Any backend trains → any backend infers |
 | Strict TDD: test file first, then implementation | User explicitly required this; all agents must follow |
-| Smaller test cases for debugging | When tests fail, isolate the issue with minimal test case — don't over-reason |
-| Post-Norm + Gated Residuals | RMSNorm after residual add for better gradient flow; sigmoid gates for controlled signal; dropout for regularization |
+| Smaller test cases for debugging | When tests fail, isolate the issue with minimal test case |
+| Post-Norm + 2 Gates | RMSNorm after residual add, then sigmoid gate per stream (attention + MoE) |
+| Dropout (0.05) | Regularization, disabled in eval mode for deterministic inference |
+| Gradient clipping | Training stability in both backends |
 | Single train/infer scripts | Less duplication, unified entry point with --backend flag |
 | Greedy = deterministic | Exact token match across backends; sampling uses KL divergence |
-| eval() mode required for inference | Dropout must be disabled for deterministic output; both backends support this |
+| eval() mode required for inference | Dropout must be disabled for deterministic output |
 
 ## Validation Strategy
 
@@ -158,39 +160,43 @@
 - PyTorch returns Tensor — different shape handling in inference scripts
 - `np.savez_compressed` with dict unpack triggers pyright error — requires `# pyright: ignore`
 
-## Phase 3++: Residual Connection Discussion (✅ COMPLETE)
+## Phase 3++: Normalization Improvements — ✅ IMPLEMENTED
 
-### Architecture Change: Pre-Norm → Post-Norm + Gated Residuals + Dropout
-All three improvements were implemented in both backends:
+### Architecture: Post-Norm with 2 Gates + Dropout
+Both backends implement the same architecture:
 
 **Post-Norm Architecture:**
 ```python
-# New (NumPy: modules.py, PyTorch: layers.py)
-attn_out = MHA(x)                            # compute attention
-h = x + attn_out * sigmoid(gate1)            # residual add FIRST, then scale
-h_normed = RMSNorm(h)                         # normalize residual
-moe_out = MoE(h_normed)                      # MoE output
-moe_out = moe_out * sigmoid(gate2)           # scale by second gate
-out = h + moe_out                            # second residual add
-out = RMSNorm(out)    * sigmoid(gate3)        # final residual + norm
-```
+# Stream 1: Attention
+attn_out = MHA(x)                          # compute attention
+h = x + attn_out                           # residual add FIRST
+h = RMSNorm(h)                             # post-norm
+h = h + sigmoid(gate1) * h                 # gated residual
+h = dropout(h)                             # dropout (training only)
 
-Mathematical formula:
-```
-h = x + Gate1(MHA(x))
-out = h + Gate2(MoE(RMSNorm(h)))
-final = RMSNorm(out)
+# Stream 2: MoE
+moe_out = MoE(h)                           # MoE output
+out = h + moe_out                          # residual add
+out = RMSNorm(out)                        # post-norm
+out = out + sigmoid(gate2) * out          # gated residual
+out = dropout(out)                        # dropout (training only)
 ```
 
 **Gated Residuals:**
-- `gate1` and `gate2`: `nn.Parameter(torch.zeros(1))` in PyTorch, added params in NumPy
+- `gate1`: controls attention stream flow, `nn.Parameter(torch.zeros(1))` in PyTorch
+- `gate2`: controls MoE stream flow, same initialization
 - Sigmoid activation: `sigmoid(0) = 0.5` at init → partial gating from first step
 - Gate gradient is tracked → learned during training to control signal flow
 
 **Dropout:**
+- Default rate: 0.05
 - PyTorch: `nn.Dropout(0.05)` as `dropout1` and `dropout2` attributes
 - NumPy: optional `dropout` and `training=False` parameters in `forward()`
 - Inference always deterministic when `eval()` mode called (PyTorch) or `training=False` (NumPy)
+
+**Gradient Clipping:**
+- Added to both backends for training stability
+- Applied after `loss.backward()` before optimizer step
 
 ### Test Coverage
 - 21 new tests in `tests/unit/_np/test_architecture_improvements.py`
@@ -198,9 +204,8 @@ final = RMSNorm(out)
 - Serialization (`save_as_numpy`/`load_from_numpy_dict`) extended to include gate1/gate2
 
 ### Known Issues
-- `test_gates_change_after_training` produces a pyright warning about tensor scalar conversion — low priority
-- Zero-element tensor warnings from SwiGLU when `rope_dim=0` and small model dims — cosmetic, no functional impact
 - The gate init at sigmoid(0) = 0.5 means output is scaled by 0.5 at init — this is intentional; gate learns to open during training
+- Zero-element tensor warnings from SwiGLU when `rope_dim=0` and small model dims — cosmetic, no functional impact
 
 ## Resources
 
@@ -209,5 +214,5 @@ final = RMSNorm(out)
 - GQA: "GQA: Generalized Query Attention" (Du et al. 2022)
 - MoE: "Mixtral of Experts" (Jiang et al. 2024), Switch Transformer (Fedus et al. 2021)
 - TurboQuant: Google research on KV cache quantization (1-bit compression)
-- Pre-Norm vs Post-Norm: "Layer Normalization" (Ba et al. 2016), "Attention Is All You Need" (Vaswani et al. 2017)
+- Post-Norm: "Layer Normalization" (Ba et al. 2016), "Attention Is All You Need" (Vaswani et al. 2017)
 - Gated Residuals: Deep & Cross Network (Wang et al. 2017), or DenseNet (Huang et al. 2017)

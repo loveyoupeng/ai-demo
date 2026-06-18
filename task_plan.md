@@ -6,8 +6,10 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 ## Current Phase
 **Phase 3 (PyTorch) is ✅ COMPLETE.**
 **Phase 3+ (E2E Training/Inference) is ✅ COMPLETE.**
+**Phase 3++ (Normalization Improvements) is ✅ COMPLETE.**
+**Phase D (Cross-Backend Equivalence) is ✅ COMPLETE.**
 
-**Phase 2 (NumPy) is complete.** Next step: execute Phase 3 plan.
+**Phase 3++ (Normalization) is complete.** Next step: Phase 4 (Triton GPU implementation).
 
 ---
 
@@ -18,7 +20,7 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 - Loss functions, optimizers, KV Cache (Naive + TurboQuant)
 - Training loop, inference engine, checkpoint save/load
 - CLI, unit tests, cross-backend reference tests
-- **Result:** 21 commits (b0–b19), TDD-style re-implementation, all tests pass 📍 `docs/phase_b_plan.md`
+- **Result:** 21 commits (b0–b19), TDD-style re-implementation, all tests pass
 
 ### Phase 3: PyTorch Implementation (Production-Ready) ✅ COMPLETE
 - Same architecture as NumPy, `nn.Module` based
@@ -36,9 +38,10 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 - **Status:** Complete — all 6 steps done, 400 tests pass, ruff/pyright clean
 
 ### Phase 3++: Normalization Improvements ✅ COMPLETE
-- ✅ Post-Norm architecture (residual add → norm instead of norm → residual)
+- ✅ Post-Norm architecture (residual add → norm → gate)
 - ✅ Gated residuals (sigmoid-scaled skip connections, gate init=0 → identity at start)
 - ✅ Dropout (train/eval mode, deterministic inference)
+- ✅ Gradient clipping in both backends
 - ✅ Cross-backend parity maintained (save/load/load_from_numpy handle gate1/gate2)
 - ✅ All inference tests updated with eval() for dropout deterministic behavior
 - **Status:** all 421 tests pass, ruff/pyright clean
@@ -75,7 +78,8 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 5. ~~MoE: top-k (default 2) or all experts?~~ (confirmed: top-2)
 6. ~~Training: which loss + optimizer? default?~~ (confirmed: CrossEntropy + AdamW)
 7. ~~Project structure: shared code vs per-backend standalone?~~ (confirmed: shared `shared/` + per-backend `impl/_np/`, `impl/_torch/`)
-8. **Residual connections needed?** — User flagged "lack of residual connection" but current code has pre-norm residuals: `h = x + MHA(...)` and `out = h + MoE(...)`. See `Phase 3++` plan for clarification discussion.
+8. **Residual connections needed?** — User flagged "lack of residual connection" but current code has post-norm residuals with gating.
+9. **Post-Norm vs Pre-Norm?** — Implemented in Phase 3++: post-norm (residual add → norm → gate)
 
 ## Decisions Made
 | Decision | Rationale |
@@ -85,9 +89,12 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 | Shared config + tokenizer | Single source of truth across backends |
 | TurboQuant for KV | Google's approach, dramatic memory savings for long sequences |
 | All backends produce identical results | Deterministic with same seed |
-| Pre-Norm architecture | RMSNorm before residual add — standard GPT-style, stable training |
+| **Post-Norm architecture** | Residual add → RMSNorm → gated residual + dropout — standard for stable training |
+| Gated residuals | Learnable `sigmoid(gate)` scaling on each residual, initialized to 0.5 |
+| Dropout | 0.05 rate by default, disabled in eval mode for deterministic inference |
 | Single train script with --backend flag | Less duplication, easier maintenance |
 | Greedy decoding = 100% deterministic | Exact token match across backends; sampling uses KL divergence |
+| Gradient clipping | Added for training stability in both backends |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
@@ -99,29 +106,37 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 # Phase 3++: Normalization Improvements
 
 ## Goal
-Investigate and implement normalization/architecture improvements for faster training and better gradient flow.
+Implement architecture improvements for faster training and better gradient flow.
 
-## Current Architecture (Pre-Norm)
-Both backends use pre-normalization (RMSNorm BEFORE the residual add):
+## Current Architecture (Post-Norm with Gated Residuals + Dropout)
+Both backends use post-normalization (RMSNorm AFTER the residual add):
 ```
-h = x + MHA(RMSNorm(x))
-out = h + MoE(RMSNorm(h))
+# Stream 1: Attention
+attn_out = MHA(x)
+h = x + attn_out              # residual add
+h = RMSNorm(h)                 # post-norm
+h = h + sigmoid(gate1) * h     # gated residual
+h = dropout(h)                 # dropout (training only)
+
+# Stream 2: MoE
+moe_out = MoE(h)
+out = h + moe_out              # residual add
+out = RMSNorm(out)             # post-norm
+out = out + sigmoid(gate2) * out  # gated residual
+out = dropout(out)             # dropout (training only)
 ```
 
-## Residual Connections
-Current code DOES have residuals:
-- **NumPy** (`impl/_np/modules.py:900`): `h = x + attn_out` + `out = h + moe_out`
-- **PyTorch** (`impl/_torch/layers.py:658,670`): Same structure
-- User noticed and raised concern about "lack of residual connection"
+Gated residuals:
+- `gate1`, `gate2`: parameters initialized to 0 in both backends
+- Sigmoid activation: `sigmoid(0) = 0.5` at init → partial gating, learns to open during training
 
-## Questions to Address
-1. Does the user mean **post-norm** (residual add first, then norm) vs pre-norm?
-2. Does the user mean **gated residuals** (e.g., `x + gate * residual`) to control signal flow?
-3. Does the user mean **dropout** for regularization (currently absent)?
-4. Does the user want **skip connections across layers** (like DenseNet)?
-
-## Implementation Options
-See `docs/phase_c_plus2_plan.md` for detailed plan.
+## Implementation Status
+All improvements implemented in both backends:
+1. ✅ Post-Norm (residual add → norm → gate)
+2. ✅ Gated residuals (sigmoid-scaled skip connections)
+3. ✅ Dropout (train/eval mode, deterministic inference)
+4. ✅ Gradient clipping (both backends)
+5. ✅ Cross-backend parity maintained (save/load/load_from_numpy handle gate1/gate2)
 
 ## TDD Approach
 - Write failing test first (gradient norm check, training speed comparison)
@@ -138,7 +153,7 @@ See `docs/phase_c_plus2_plan.md` for detailed plan.
 | C+ (E2E) | 90 | 8 (c37-c44) | ✅ Complete |
 | **C++ (Norm)** | **21** | **3 (d0-d2)** | **✅ Complete** |
 | **D (Equivalence)** | **0** | **1 (e0)** | **✅ Complete** |
-| **Total** | **421** | **79+** | **All pass, ruff/pyright clean** |
+| **Total** | **421** | **80+** | **All pass, ruff/pyright clean** |
 
 ---
 
@@ -167,5 +182,3 @@ See `docs/phase_c_plus2_plan.md` for detailed plan.
 - `scripts/verify_equivalence.py:515-521` — Use `.detach().numpy()` for distribution check
 
 **Result:** All 6/6 scenarios pass with `weight_diff=0.0`, identical tokens, KL=0.0
-
----
