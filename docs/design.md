@@ -356,7 +356,8 @@ def set_global_seed(seed: int):
 | Checkpoint Round-trip | ✅ | — | — | — | — | — |
 
 **Status:** All NumPy vs PyTorch rows verified — 5 parity tests pass, `weight_diff=0.0`.
-Triton and CUDA not yet implemented.
+Triton: 🔶 Phase E ready to start (GPU confirmed, plan complete).
+CUDA: 🔲 Not started.
 
 **Tolerances (following AGENTS.md tiered policy):**
 - Standalone layer (tested in isolation): `rtol=1e-4, atol=1e-4`
@@ -414,11 +415,12 @@ Phase G: Integration & E2E 🔲 Not Started
 5. `scripts/auto_test_equivalence.py` — 8-combination matrix
 6. Cross-backend weight diff, token match, distribution check all pass
 
-### Phase E: Triton 🔲 Not Started
-1. Custom kernels (LayerNorm, Attention, MoE, Activation)
-2. Model using Triton kernels
-3. Cross-backend parity tests
-4. Training + Inference
+### Phase E: Triton 🔶 READY TO START
+- **GPU confirmed:** CUDA 12.6, cuDNN 9.3, cuBLAS 12.6, 8x Orin GPU
+- Custom kernels (LayerNorm, Attention, MoE, Activation) — production-quality with detailed learning comments
+- **Goal:** Every kernel documented for learning Triton DSL, memory patterns, numerical stability
+- Full model using Triton kernels + cross-backend parity tests + Training + Inference
+- **Reference:** `docs/phase_e_plan.md` — 12-stage plan (E0–E11), ~60-80 tests, ~15 commits
 
 ### Phase F: CUDA 🔲 Not Started
 1. CUDA kernels (all compute ops)
@@ -671,13 +673,26 @@ Fixed: MoE router bias, weight sync, verify script, zero-size arrays, dropout mo
 Result: All 6/6 scenarios pass with weight_diff=0.0, identical tokens, KL=0.0
 ```
 
-### Phase E: Triton 🔲 Not Started
+### Phase E: Triton 🔶 READY TO START
+**GPU confirmed** — CUDA 12.6, cuDNN 9.3, Orin GPU, 8x GPUs available. Reference: `docs/phase_e_plan.md`
+
 ```
-D1: Custom kernels (LayerNorm, Attention, MoE, Activation)
-D2: Model using Triton kernels
-D3: Cross-backend parity tests
-D4: Training + Inference
+E0: Scaffolding (directories + import test)          — 1 commit
+E1: SiLU kernel (element-wise)                       — 1 commit
+E2: RMSNorm kernel (reduction)                       — 1 commit
+E3: RoPE kernel (trig, indexing)                     — 1 commit
+E4: SwiGLU kernel (SiLU + matmul)                    — 1 commit
+E5: MHA kernel (attention + GQA)                     — 1 commit
+E6: MoE kernel (top-k routing)                       — 1 commit
+E7: TransformerBlock (Python wiring)                 — 1 commit
+E8: DecoderStack (Python wiring)                     — 1 commit
+E9: Full TritonModel (save/load/parity)              — 1 commit
+E10: Inference + Training scripts                     — 1 commit
+E11: Cross-backend parity (NumPy/PyTorch vs Triton)  — 1 commit
 ```
+
+**Execution order:** Sequential by wave (~12 sub-phases, ~15 commits, ~60-80 tests)
+**Goal:** Production-quality Triton code — every kernel documented with math explanations, memory patterns, numerical stability techniques
 
 ### Phase F: CUDA 🔲 Not Started
 ```
@@ -848,10 +863,12 @@ Why PyTorch second?
 ├─ Same API surface, just different backend
 ├─ Easiest cross-backend test (torch ↔ numpy)
 │
-Why Triton third?
+Why Triton third? (🔶 READY — GPU confirmed, plan complete)
 ├─ Requires PyTorch knowledge (uses torch for data)
 ├─ Only replaces compute kernels, not model architecture
 ├─ GPU-only, harder to debug without CPU fallback
+├─ GPU confirmed: CUDA 12.6, Orin 8x, PyTorch 2.11.0 (CUDA)
+└─ Phase E plan ready: 12 stages, ~60-80 tests, production-quality learning focus
 │
 Why CUDA last?
 ├─ Hardest to implement (no framework helpers)

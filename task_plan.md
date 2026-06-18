@@ -9,7 +9,7 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 **Phase 3++ (Normalization Improvements) is ✅ COMPLETE.**
 **Phase D (Cross-Backend Equivalence) is ✅ COMPLETE.**
 
-**Phase 3++ (Normalization) is complete.** Next step: Phase 4 (Triton GPU implementation).
+**Phase 3++ (Normalization) is complete.** Next step: **Phase E: Triton GPU Implementation** — 🔶 ready to start (GPU confirmed).
 
 ---
 
@@ -46,16 +46,40 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 - ✅ All inference tests updated with eval() for dropout deterministic behavior
 - **Status:** all 421 tests pass, ruff/pyright clean
 
-### Phase 4: Triton Implementation (GPU Kernel Optimization) 🔲 NOT STARTED
+### Phase E: Triton Implementation (GPU Kernel Optimization) 🔶 READY TO START
+- **GPU confirmed:** `torch.cuda.is_available()` = True (CUDA 12.6, cuDNN 9.3, cuBLAS 12.6, Orin GPU)
 - Custom kernels: LayerNorm, attention, MoE routing, activations
-- Parity tests, profiling vs NumPy/PyTorch
+- Parity tests with NumPy/PyTorch (float64 precision, forward + backward)
+- **Goal:** Production-quality Triton code with detailed comments — every kernel documented for learning
 
-### Phase 5: CUDA Implementation (Lowest Level) 🔲 NOT STARTED
+### Phase F: CUDA Implementation (Lowest Level) 🔲 NOT STARTED
 - `nvidia/cuda-python` bindings, same architecture
 - Parity tests, benchmarks
 
-### Phase 6: Integration & Verification 🔲 NOT STARTED
+### Phase G: Integration & Verification 🔲 NOT STARTED
 - Train on TinyStories per backend -> save/load cross-validation -> identical outputs -> final e2e script
+
+---
+
+## Phase E: Triton Implementation (GPU Kernel Optimization) — READY TO START
+
+**Status:** 🔶 Ready (GPU confirmed, NumPy/PyTorch backends verified, plan ready)
+
+**Goal:** Build production-quality Triton GPU kernels with detailed comments documenting:
+- How Triton compilation works (`@triton.jit`, `tl.program_id`, `tl.arange`)
+- Memory access patterns (coalesced loads, shared memory tiling)
+- Numerical stability techniques (stable softmax, gradient computation)
+- Cross-backend equivalence verification (NumPy reference → Triton → PyTorch baseline)
+
+**Environment:** CUDA 12.6, cuDNN 9.3, cuBLAS 12.6, 8x Orin GPU, PyTorch 2.11.0
+
+**Key Principles:**
+- All kernels must reproduce NumPy at `float64` precision (parity tests)
+- Production-ready code: proper type hints, docstrings, error handling
+- Every kernel includes mathematical explanation in docstrings
+- TDD first: failing test → minimal implementation → all pass → quality check
+
+**Reference:** `docs/phase_e_plan.md` contains full 12-stage execution plan (E0–E11).
 
 ---
 

@@ -1,34 +1,67 @@
 # Phase E: Triton GPU Kernel Implementation — Execution Plan
 
-**Status:** 🔲 NOT STARTED
+**Status:** 🔶 READY TO START
 **Start Date:** —
 **End Date:** —
 **Total Stages:** 12 sub-phases (sequential, one at a time)
+
+## GPU Environment (Confirmed)
+
+| Component | Version |
+|-----------|---------|
+| CUDA | 12.6 |
+| cuDNN | 9.3 |
+| cuBLAS | 12.6 |
+| PyTorch | 2.11.0 (with CUDA 12.6) |
+| Triton | ≥ 2.2 (available) |
+| GPU Hardware | Orin, compute capability 8.x |
+| GPUs | 8 (64GB shared memory) |
+| CUDA API Check | `torch.cuda.is_available()` → **True** |
+
+**No `nvcc`, `cuda-python`, or `triton` packages needed for parity tests** — GPU already works through PyTorch without them.
 
 ## Progress Summary
 
 | Stage | Status | Tests | Description |
 |-------|--------|-------|-------------|
-| E0: Project scaffolding | 🔲 Not started | 0 | Directories + import test |
-| E1: SiLU activation kernel | 🔲 Not started | ~4 | Stateless element-wise |
-| E2: RMSNorm kernel | 🔲 Not started | ~8 | Layer normalization |
-| E3: RoPE kernel | 🔲 Not started | ~6 | Rotary position embeddings |
-| E4: SwiGLU FFN kernel | 🔲 Not started | ~6 | Gated feedforward |
-| E5: MHA kernel | 🔲 Not started | ~10 | Multi-head attention |
-| E6: MoE kernel | 🔲 Not started | ~6 | Expert routing |
-| E7: TransformerBlock | 🔲 Not started | ~5 | Attention + MoE assembly |
-| E8: DecoderStack | 🔲 Not started | ~3 | Stacked blocks |
-| E9: Full TritonModel | 🔲 Not started | ~5 | Full model integration |
-| E10: Inference + Training | 🔲 Not started | ~5 | Pipeline scripts |
-| E11: Cross-backend parity | 🔲 Not started | ~8 | NumPy/PyTorch vs Triton |
+| E0: Project scaffolding | 🟡 Ready | 0 | Directories + import test |
+| E1: SiLU activation kernel | 🟡 Ready | ~4 | Stateless element-wise |
+| E2: RMSNorm kernel | 🟡 Ready | ~8 | Layer normalization |
+| E3: RoPE kernel | 🟡 Ready | ~6 | Rotary position embeddings |
+| E4: SwiGLU FFN kernel | 🟡 Ready | ~6 | Gated feedforward |
+| E5: MHA kernel | 🟡 Ready | ~10 | Multi-head attention |
+| E6: MoE kernel | 🟡 Ready | ~6 | Expert routing |
+| E7: TransformerBlock | 🟡 Ready | ~5 | Attention + MoE assembly |
+| E8: DecoderStack | 🟡 Ready | ~3 | Stacked blocks |
+| E9: Full TritonModel | 🟡 Ready | ~5 | Full model integration |
+| E10: Inference + Training | 🟡 Ready | ~5 | Pipeline scripts |
+| E11: Cross-backend parity | 🟡 Ready | ~8 | NumPy/PyTorch vs Triton |
 
 ---
 
 ## Goal
 
-Build **Triton GPU kernels** that replace PyTorch's built-in operations while producing **numerically identical** results at `float64` precision. The model architecture, save/load format, and API remain identical to `impl/_torch/` — only the compute kernels differ.
+Build **production-quality Triton GPU kernels** that replace PyTorch's built-in operations while producing **numerically identical** results at `float64` precision. The model architecture, save/load format, and API remain identical to `impl/_torch/` — only the compute kernels differ.
 
 **Principle:** Write the failing test first, make it pass, move to the next. Never reason about correctness — test results are the source of truth.
+
+**Production-Ready Standard:**
+- Every kernel must include a detailed docstring explaining:
+  - What the kernel does (algorithm, math, formula)
+  - Memory access patterns (coalesced loads, shared memory tiling)
+  - Numerical stability techniques (stable softmax, float32/float64 considerations)
+  - How to test it (expected inputs, outputs, tolerances)
+- Proper type hints on ALL functions (`torch.dtype`, `torch.Tensor` signatures)
+- Error handling: input validation, shape checks, GPU memory assertions
+- Cross-backend equivalence: NumPy reference → Triton kernel → PyTorch baseline (3-way verification)
+
+**Learning Focus:**
+This phase is designed to teach **professional Triton development**:
+- Compilation model: `@triton.jit`, `tl.program_id`, `tl.arange`, `BLOCK_SIZE` constexpr
+- Memory semantics: load/store with masks, shared memory (`tl.shared_memory`), blocking patterns
+- Autograd: Triton kernels integrate with PyTorch's autograd by default
+- Production patterns: Python wrapper → kernel dispatch → tensor conversion → results
+- Numerical techniques: stable softmax, gradient computation, FP32 vs FP64 tradeoffs
 
 ---
 
@@ -779,8 +812,11 @@ class TestTritonCheckpoint:
 
 ## Execution Order (Sequential, Strictly One at a Time)
 
+**Phase E is READY — all 12 sub-phases planned, GPU confirmed (CUDA 12.6, Orin 8x).**
+Start with E0 (scaffolding), then proceed waves as described below.
+
 ```
-E0: Scaffolding (directories + import)
+E0: Scaffolding (directories + import) — FIRST STEP
  │
  ├──→ E1: SiLU kernel (simplest, element-wise)
  ├──→ E2: RMSNorm kernel (reduction, first parallel candidate)
@@ -845,7 +881,7 @@ python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
 | Stage | Dependency | Tests | Description |
 |-------|-----------|-------|-------------|
-| E0 | — | 1 | Directories + import test |
+| E0 | — | 1 | Directories + import test (FIRST STEP) |
 | E1 | E0 | 6-7 | SiLU kernel (element-wise) |
 | E2 | E0 | 8 | RMSNorm kernel (reduction) |
 | E3 | E0 | 6 | RoPE kernel (trig, indexing) |
@@ -859,6 +895,7 @@ python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 | E11 | E9,E10 | 8-12 | Cross-backend parity (NumPy/PyTorch vs Triton) |
 
 **Total: ~60-80 tests, ~15 commits**
+**Status:** 🔶 READY — GPU confirmed, plan complete, all 12 stages ready to begin. First step: E0 scaffolding.
 
 ---
 

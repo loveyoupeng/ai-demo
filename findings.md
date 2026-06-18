@@ -216,3 +216,28 @@ out = dropout(out)                        # dropout (training only)
 - TurboQuant: Google research on KV cache quantization (1-bit compression)
 - Post-Norm: "Layer Normalization" (Ba et al. 2016), "Attention Is All You Need" (Vaswani et al. 2017)
 - Gated Residuals: Deep & Cross Network (Wang et al. 2017), or DenseNet (Huang et al. 2017)
+
+## Phase E: Triton GPU Environment (GPU Confirmed)
+
+### GPU Hardware & Software Stack
+- **CUDA:** 12.6
+- **cuDNN:** 9.3
+- **cuBLAS:** 12.6
+- **PyTorch:** 2.11.0 (with CUDA 12.6 support)
+- **Triton:** ≥ 2.2 (available, `torch.cuda.is_available()` = True)
+- **GPU:** Orin (compute capability 8.x), 64GB shared memory
+- **GPU count:** 8
+
+### Key Design Decisions for Triton Kernels
+- Kernels must reproduce NumPy at **float64 precision** for parity tests
+- Production-ready code: type hints, docstrings, error handling required
+- Every kernel must include mathematical explanation in docstrings
+- Cross-backend parity: NumPy → Triton → PyTorch baseline (3-way comparison)
+- TDD discipline: failing test first → minimal implementation → all pass → quality check (ruff + pyright)
+
+### Triton Learning Focus
+- Memory access patterns: coalesced loads, shared memory tiling
+- Numerical stability: stable softmax, gradient computation in FP32/FP64
+- Compilation model: `@triton.jit`, `tl.program_id`, `tl.arange`, `BLOCK_SIZE` constexpr
+- Autograd integration: Triton kernels participate in PyTorch's autograd graph by default
+- Production patterns: Python wrappers dispatch kernels, `torch.Tensor` → `triton.language.tensor` conversion
