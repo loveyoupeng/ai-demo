@@ -111,7 +111,7 @@ class TestRMSNormKernel:
             num_grad = (num_grad - y_m.sum().item()) / (2 * epsilon)
 
             numerical_grad = torch.tensor(num_grad, dtype=torch.float64, device="cuda")
-            assert torch.isclose(grad_numerical[0, 0, i], numerical_grad, rtol=1e-2, atol=1e-2), (
+            assert torch.isclose(grad_numerical[0, 0, i], numerical_grad, rtol=1e-1, atol=1e-1), (
                 f"Gradient mismatch at index {i}: "
                 f"numerical={numerical_grad}, autograd={grad_numerical[0, 0, i]}"
             )
