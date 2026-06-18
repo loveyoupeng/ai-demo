@@ -251,6 +251,9 @@ class RoPE(nn.Module):
         # pair_dim = half of the actual rotated dimensions (not full head_dim)
         pair_dim = x_rot.shape[-1] // 2
 
+        # Ensure positions is on the same device as input tensor
+        positions = positions.to(x.device)
+
         # Compute rotation frequencies: use full head_dim in denominator
         # (same as NumPy: freqs for the first pair_dim pairs)
         # (pair_dim,) = 1 / 10000^(2k / head_dim)
