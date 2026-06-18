@@ -10,6 +10,7 @@ dependencies = [
     "tokenizers>=0.15",
     "tqdm>=4.65",
     "transformers>=4.40",
+    "triton>=3.6.0",
 ]
 optional-dependencies = {triton = ["triton>=2.2"], cuda = ["cuda-python>=12.0"]}
 dev = ["pyright>=1.1", "pytest>=7.0", "pytest-timeout>=2.0", "ruff>=0.4"]
@@ -49,3 +50,11 @@ reportMissingImports = true
 reportUnknownMemberType = false
 reportUnknownParameterType = false
 reportUnknownVariableType = false
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1",
+    "pytest>=7.0",
+    "pytest-timeout>=2.0",
+    "ruff>=0.4",
+]
