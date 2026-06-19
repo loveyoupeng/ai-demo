@@ -30,21 +30,20 @@ where:
   W1 ∈ R^{D×ff_dim}, W3 ∈ R^{D×ff_dim}, W2 ∈ R^{ff_dim×D}
   SiLU(x) = x / (1 + exp(-x))  — smooth gating between 0 and x
 
-
 Why SiLU gating?
 ----------------
 Compared to ReLU gating (used in some architectures) or ELU gating:
 
   1. Smooth: SiLU is C^1 continuous everywhere (no hard zero)
      → Better gradient flow, no dead neurons
-  
+
   2. Learned gating: The gate signal comes from x itself (xW1),
      not from a learnable threshold (as in ReLU)
      → Adaptive: different dimensions gate differently based on input
-  
+
   3. Bounded below: SiLU(x) ≥ 0 for x ≥ 0, and for x < 0,
      SiLU(x) → 0 with a soft decay (not hard zero cut-off)
-  
+
   4. Near-identity for large x: SiLU(x) ≈ x when x is large
      → Gradients don't vanish for high-magnitude activations
 
@@ -61,7 +60,6 @@ element-wise, then projected to output. This gives:
   - Better expressivity (the gate is input-dependent, not fixed)
   - Improved gradient flow through multiple paths
 
-
 Memory access pattern (PyTorch + cuBLAS)
 ----------------------------------------
 Each matmul is a GEMM (General Matrix Multiply):
@@ -73,7 +71,6 @@ cuBLAS loads weight matrices into shared memory (L2 cache), then
 computes in a tiled fashion for maximum throughput. The activation
 (silu) is element-wise and runs on the host (CPU) or as a simple
 GPU kernel with coalesced memory access.
-
 
 Why NOT a Triton kernel?
 ------------------------

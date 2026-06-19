@@ -145,8 +145,8 @@ class TestTritonModel:
                 tb.moe.experts[j].W3.data.copy_(tblock.moe.experts[j].W3.data)
 
             # Normalization
-            tb.ln1_gamma.data.copy_(tblock.ln1.gamma.data)
-            tb.ln2_gamma.data.copy_(tblock.ln2.gamma.data)
+            tb.ln1.weight.data.copy_(tblock.ln1.gamma.data)
+            tb.ln2.weight.data.copy_(tblock.ln2.gamma.data)
             tb.gate1.data.copy_(tblock.gate1.data)
             tb.gate2.data.copy_(tblock.gate2.data)
 

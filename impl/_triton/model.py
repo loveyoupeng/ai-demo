@@ -61,7 +61,7 @@ class TritonModel(nn.Module):
         # Embedding layer (PyTorch native — no Triton optimization needed)
         self.embedding = nn.Embedding(vocab_size, embed_dim)
 
-        # Decoder stack (Triton kernels)
+        # Decoder stack (Triton kernels) — named 'layers' to match _torch
         self.stack = TritonDecoderStack(
             n_layers=n_layers,
             embed_dim=embed_dim,
@@ -71,7 +71,7 @@ class TritonModel(nn.Module):
             k=k,
         )
 
-        # Final layer normalization — learnable gamma
+        # Final layer normalization — learnable gamma (raw param, not instance)
         self.final_ln_gamma = nn.Parameter(torch.ones(embed_dim))
 
         # Output projection — SwiGLU -> Linear
@@ -149,42 +149,86 @@ class TritonModel(nn.Module):
         """
         if key == Transformer.EMBEDDING_WEIGHTS:
             return self.embedding.weight
-        elif key.startswith(f"{Block.PREFIX}."):
-            # Handle stack layer parameters
-            layer_idx = int(key.split(".")[1])
-            prefix = key[len(f"{Block.PREFIX}."):]
-            if "mha.Wq" in prefix:
-                return self.stack.layers[layer_idx].mha.Wq
-            elif "mha.bq" in prefix:
-                return self.stack.layers[layer_idx].mha.bq
-            elif "mha.Wk" in prefix:
-                return self.stack.layers[layer_idx].mha.Wk
-            elif "mha.bk" in prefix:
-                return self.stack.layers[layer_idx].mha.bk
-            elif "mha.Wv" in prefix:
-                return self.stack.layers[layer_idx].mha.Wv
-            elif "mha.bv" in prefix:
-                return self.stack.layers[layer_idx].mha.bv
-            elif "mha.Wo" in prefix:
-                return self.stack.layers[layer_idx].mha.Wo
-            elif "mha.bo" in prefix:
-                return self.stack.layers[layer_idx].mha.bo
-            elif "ln1_gamma" in prefix:
-                return self.stack.layers[layer_idx].ln1_gamma
-            elif "ln2_gamma" in prefix:
-                return self.stack.layers[layer_idx].ln2_gamma
-            elif "router" in prefix:
-                return self.stack.layers[layer_idx].moe.W_router
-            elif "moe.bias" in prefix:
-                return self.stack.layers[layer_idx].moe.b_router
+        elif key.startswith("blocks."):
+            # Handle NumPy/constant-style keys for backwards compatibility
+            # Key format: "blocks.N.attr"  e.g. "blocks.0.ln1_gamma", "blocks.0.moe.W_router"
+            layer_str, rest = key.split(".", 1)
+            parts = rest.split(".", 1)
+            layer_idx = int(parts[0])
+            attr_name = parts[1]
+
+            block = self.stack.layers[layer_idx]
+            first_attr = attr_name.split(".", 1)[0]
+
+            # MoE expert weights: "blocks.N.moe.experts.M.W1"
+            if first_attr == "moe" and "experts" in attr_name:
+                sub_parts = attr_name.split(".")
+                # sub_parts = ['moe', 'experts', 'M', 'W1']
+                expert_idx = int(sub_parts[2])
+                weight_key = sub_parts[3]
+                return getattr(block.moe.experts[expert_idx], weight_key)
+
+            # Direct block attribute mapping
+            if first_attr == "ln1_gamma":
+                return block.ln1.weight
+            elif first_attr == "ln2_gamma":
+                return block.ln2.weight
+            elif first_attr == "moe_bias":
+                return block.moe.b_router  # constant "moe.bias" -> PyTorch "b_router"
+            elif first_attr == "moe":
+                # MoE direct: "moe.W_router", "moe.bias", "moe.router"
+                param_name = attr_name.split(".", 1)[1]
+                key_to_attr = {"W_router": "W_router", "router": "W_router", "bias": "b_router"}
+                return getattr(block.moe, key_to_attr.get(param_name, param_name))
+            elif first_attr == "gate1":
+                return block.gate1
+            elif first_attr == "gate2":
+                return block.gate2
+            elif first_attr == "mha":
+                # Constant key: "WQ", "WK", "WV", "WO", "BQ", "BK", "BV", "BO" (uppercase)
+                param_name = attr_name.split(".", 1)[1]
+                # Map uppercase constant name → Triton attribute name
+                upper = param_name.upper()
+                mapping = {"WQ": "Wq", "WK": "Wk", "WV": "Wv", "WO": "Wo",
+                           "BQ": "bq", "BK": "bk", "BV": "bv", "BO": "bo"}
+                return getattr(block.mha, mapping.get(upper, param_name))
             else:
-                # MoE expert handling: "blocks.N.moe.experts.M.W1"
-                # After stripping "blocks." prefix: "moe.experts.M.W1"
-                sub = prefix.split(".")
-                # sub = ['', 'moe', 'experts', 'M', 'W1']
-                expert_idx = int(sub[3])
-                weight_key = sub[4]
-                return getattr(self.stack.layers[layer_idx].moe.experts[expert_idx], weight_key)
+                # Direct attribute: e.g. "blocks.0.ln1_gamma" if not handled above
+                return getattr(block, first_attr, None)
+
+        elif key.startswith("layers."):
+            # Handle layer parameters — keys are PyTorch-style from named_parameters()
+            parts = key.split(".")
+            # parts[0] = "layers", parts[1] = layer_idx (e.g. "0"), parts[2+] = attribute path
+            layer_idx = int(parts[1])
+            attr_path = ".".join(parts[2:])
+            block = self.stack.layers[layer_idx]
+
+            # Direct attribute access — ln1.weight, mha.Wq, gate1, moe.W_router, etc.
+            part = attr_path.split(".", 1)
+            first_attr = part[0]
+            if first_attr == "ln1":
+                if len(part) == 1:
+                    return None
+                return getattr(getattr(block, first_attr), part[1]) if len(part) > 1 else None
+            elif first_attr in ("mha", "moe"):
+                if len(part) == 1:
+                    return None
+                second_attr = part[1].split(".", 1)[0]  # mha.Wq → Wq, moe.experts → experts
+                sub = part[1]
+                # MoE expert: "moe.experts.0.W1"
+                if second_attr == "experts":
+                    sub_parts = sub.split(".")
+                    # sub_parts = ['moe', 'experts', '0', 'W1']
+                    expert_idx = int(sub_parts[2])
+                    weight_key = sub_parts[3]
+                    return getattr(block.moe.experts[expert_idx], weight_key)
+                else:
+                    # MoE direct: "moe.W_router", "moe.b_router"
+                    return getattr(block.moe, sub)
+            else:
+                # Direct block attribute: gate1, gate2, ln1, ln2
+                return getattr(block, first_attr)
         elif key == Transformer.FINAL_GAMMA:
             return self.final_ln_gamma
         elif key == Transformer.OUTPUT_W1:
@@ -217,9 +261,9 @@ class TritonModel(nn.Module):
         # Stack layers
         for layer_idx, block in enumerate(self.stack.layers):
 
-            # Layer norm gamma
-            result[Block.ln1_gamma(layer_idx)] = block.ln1_gamma.detach().cpu().numpy()
-            result[Block.ln2_gamma(layer_idx)] = block.ln2_gamma.detach().cpu().numpy()
+            # Layer norm gamma (now stored as RMSNorm instance weight)
+            result[Block.ln1_gamma(layer_idx)] = block.ln1.weight.detach().cpu().numpy()
+            result[Block.ln2_gamma(layer_idx)] = block.ln2.weight.detach().cpu().numpy()
 
             # MHA weights (PyTorch stores weight as [out, in], save as [in, out])
             result[Block.mha(layer_idx, Mha.WQ)] = block.mha.Wq.detach().cpu().numpy()
@@ -273,9 +317,9 @@ class TritonModel(nn.Module):
         # Stack layers
         for layer_idx, block in enumerate(self.stack.layers):
 
-            # Layer norm gamma
-            load(Block.ln1_gamma(layer_idx), block.ln1_gamma)
-            load(Block.ln2_gamma(layer_idx), block.ln2_gamma)
+            # Layer norm gamma (now stored as RMSNorm instance weight)
+            load(Block.ln1_gamma(layer_idx), block.ln1.weight)
+            load(Block.ln2_gamma(layer_idx), block.ln2.weight)
 
             # MHA weights
             load(Block.mha(layer_idx, Mha.WQ), block.mha.Wq)

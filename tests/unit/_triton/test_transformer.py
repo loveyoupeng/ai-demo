@@ -188,8 +188,8 @@ class TestTransformerBlockWiring:
             triton_block.moe.experts[i].W3.data.copy_(torch_block.moe.experts[i].W3.data)
 
         # Copy normalization and gate weights
-        triton_block.ln1_gamma.data.copy_(torch_block.ln1.gamma.data)
-        triton_block.ln2_gamma.data.copy_(torch_block.ln2.gamma.data)
+        triton_block.ln1.weight.data.copy_(torch_block.ln1.gamma.data)
+        triton_block.ln2.weight.data.copy_(torch_block.ln2.gamma.data)
         triton_block.gate1.data.copy_(torch_block.gate1.data)
         triton_block.gate2.data.copy_(torch_block.gate2.data)
 
@@ -237,8 +237,8 @@ class TestTransformerBlockWiring:
         assert block.mha.Wk.grad is not None
         assert block.mha.Wv.grad is not None
         assert block.mha.Wo.grad is not None
-        assert block.ln1_gamma.grad is not None
-        assert block.ln2_gamma.grad is not None
+        assert block.ln1.weight.grad is not None
+        assert block.ln2.weight.grad is not None
         assert block.gate1.grad is not None
         assert block.gate2.grad is not None
 

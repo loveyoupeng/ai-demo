@@ -115,13 +115,31 @@
 - Fixed MoE router bias, weight sync, verify script, zero-size arrays
 
 ---
-## Jun 20 - Phase E+ Wave 1
+## Jun 20 - Phase E+ Wave 1 — Complete
 
 - Extended `shared/constants.py` with Block, Mha, Transformer constants for save/load keys
 - Replaced ALL magic strings in impl/_np/model.py, impl/_torch/layers.py, impl/_triton/model.py
 - Fixed transpose logic bug in load_from_numpy (inverted condition)
 - Fixed final_gamma/final_ln_gamma mismatch between backends (standardized to final_ln_gamma)
-- All 317 tests pass (torch + triton + cross + np)
-- Ruff clean, 0 lint errors
-- Remaining: 1 intentional fallback ("final_gamma" for backwards compat in Triton)
+- Ruff auto-fixed: unused imports, sort_imports, unused variables
+- 1 intentional fallback remains: "final_gamma" for backwards compatibility in Triton
+
+## Jun 20 - Phase E+ Wave 2 — Partially Complete
+
+- impl/_triton/activation.py: verified already well-documented (no changes)
+- impl/_triton/layernorm.py: full pydocs (RMSNorm formula, memory access, BLOCK_SIZE rationale, numerical stability, tiled matrix operations)
+- impl/_triton/rope.py: full pydocs (2D rotation matrix, theta formula, odd/even pairing, why row-strided access)
+- impl/_triton/ffn.py: full pydocs (SwiGLU formula, why 3 weight matrices, why not Triton kernel, memory layout, gradient flow)
+- impl/_triton/attn.py: full pydocs (attention pipeline, stable softmax, tiled matmul, grid config, memory access, why PyTorch backward)
+- tests/unit/_np/test_inference.py: fixed Py3.10 annotation bug (added `from __future__ import annotations`)
+
+## Jun 20 - Test Results
+
+| Module | Tests | Status |
+|--------|-------|--------|
+| shared/ + tests/ (unit) | 521 | ✅ all pass |
+| tests/cross_backend/ | 21 | ✅ all pass |
+| **Total** | **542** | **✅ all pass** |
+| Code quality | 0 ruff errors | ✅ clean |
+| Note | 4 pre-existing pyright errors in Triton files (pointer type mismatches) | ⚠️ accepted |
 

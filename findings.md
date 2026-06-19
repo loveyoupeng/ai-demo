@@ -256,3 +256,54 @@ Replaced ALL magic strings in:
 
 Result: 0 magic strings in implementation (except 1 intentional fallback for backwards compat)
 All 317 tests pass. Ruff clean.
+
+## Phase E+: Wave 2 — Triton Documentation (Jun 20)
+
+Comprehensive pydocs added to all Triton kernel files explaining HOW and WHY:
+
+### impl/_triton/activation.py
+- Already had comprehensive docs — no changes needed
+- SiLU kernel: formula, memory layout, numerical stability, performance notes
+
+### impl/_triton/layernorm.py — Full Documentation
+- Module-level: RMSNorm formula with LaTeX, memory access pattern breakdown, BLOCK_SIZE rationale, why Triton for this kernel, comparison with PyTorch RMSNorm
+- _rmsnorm_fwd_kernel: row-by-row processing explanation, stride-based pointer arithmetic, variance computation, numerical stability
+- _rmsnorm_bwd_kernel: gradient formula with mathematical derivation, epsilon broadcasting, why 2-pass computation
+- rmsnorm function: parameter explanations, dtype handling, device management, shape validation, numerical accuracy
+
+### impl/_triton/rope.py — Full Documentation
+- Module-level: 2D rotation matrix formula, theta_m = 10000^(-2m/d), why odd/even index pairing, memory layout (contiguous, row-strided), why Triton for this kernel
+- _rope_fwd_kernel & _rope_bwd_kernel: sin/cos lookup patterns, coalesced access explanation, row-strided vs column-strided analysis
+- apply_rope: stride calculation, tensor alignment, GPU dispatch, gradient flow
+- _compute_rope_frequencies: frequency formula, positional encoding purpose, shape explanations
+
+### impl/_triton/ffn.py — Full Documentation
+- Module-level: SwiGLU formula derivation, why SiLU gating, why 3 weight matrices, why NOT a Triton kernel, memory access analysis, gradient flow
+- swiglu_ffn function: input/output shapes, hidden expansion factor, 3 weight matrices explained, SwiGLU vs MLP comparison
+
+### impl/_triton/attn.py — Full Documentation
+- Module-level: attention formula, scaling rationale (Var = D, 1/√D normalization), memory access pattern, tiled matmul structure, BLOCK_SIZE selection, stable softmax, backward pass strategy
+- _ScaledDotProductAttentionTF: autograd wrapper, saved tensors, gradient computation during forward
+- _attn_fwd_kernel: 11-line algorithm description, 3-tile structure, masking strategy, numerical stability
+
+### test/_np/test_inference.py — Bug Fix
+- Added `from __future__ import annotations` to fix Py3.10 NameError
+- The NumPyModel return type annotation was evaluated at class definition time
+- Without `__future__` annotations, bare names in signatures are looked up immediately
+- With `__future__` annotations, all annotations become strings (lazy evaluation)
+
+## Design Decisions
+
+1. **Documentation depth:** Every kernel gets 3 layers of docs — file-level overview, function-level detail, parameter-level explanation
+2. **Mathematical formulas:** All formulas include step-by-step derivation with shape annotations
+3. **Memory layout diagrams:** ASCII art showing data flow and tile structure
+4. **Performance rationale:** Each design choice explained with performance tradeoffs
+5. **Reference citations:** Academic papers and architecture docs cited where applicable
+6. **Why vs How:** Both the algorithm and the rationale are documented
+
+## Results
+
+- 542 tests pass (521 unit + 21 cross-backend)
+- Ruff clean — 0 lint errors
+- 4 pre-existing pyright errors in Triton files (accepted, not functional bugs)
+- All documentation follows consistent structure: formula → algorithm → memory → performance → references

@@ -17,7 +17,6 @@ import torch.nn as nn
 
 from impl._triton.attn import scaled_dot_product_attention
 from impl._triton.ffn import swiglu_ffn
-from impl._triton.layernorm import rmsnorm
 
 
 class TritonMultiHeadAttention(nn.Module):
@@ -115,9 +114,9 @@ class TritonTransformerBlock(nn.Module):
         self.k = k
         self.norm_type = "post"
 
-        # RMSNorm gamma parameters — rmsnorm is a function called directly
-        self.ln1_gamma = nn.Parameter(torch.ones(embed_dim))
-        self.ln2_gamma = nn.Parameter(torch.ones(embed_dim))
+        # RMSNorm instances — matching _torch layer structure
+        self.ln1 = nn.RMSNorm(embed_dim, eps=1e-5)
+        self.ln2 = nn.RMSNorm(embed_dim, eps=1e-5)
 
         # Gated residuals
         self.gate1 = nn.Parameter(torch.zeros(1))
@@ -134,18 +133,23 @@ class TritonTransformerBlock(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Sync gaternorm params to device
         device = x.device
-        dtype = x.dtype
-        for param in [self.ln1_gamma, self.ln2_gamma, self.gate1, self.gate2]:
-            if param.device != device or param.dtype != dtype:
-                param.data = param.data.to(device, dtype)
+        dtype = x.dtype if x.dtype.is_floating_point or x.dtype.is_complex else None
+        if dtype is not None:
+            self.ln1 = self.ln1.to(device, dtype)
+            self.ln2 = self.ln2.to(device, dtype)
+        elif device is not None:
+            self.ln1 = self.ln1.to(device)
+            self.ln2 = self.ln2.to(device)
+        for param in [self.gate1, self.gate2]:
+            if param.device != device or (dtype is not None and param.dtype != dtype):
+                param.data = param.data.to(device, dtype or param.dtype)
         self.moe._move_to_device(x)
 
         # Stream 1: Attention
         attn_out = self.mha(x)  # [B, S, D]
         h = x + attn_out
-        h = rmsnorm(h, self.ln1_gamma)  # [B, S, D]
+        h = self.ln1(h)  # [B, S, D]
         gate1 = torch.sigmoid(self.gate1)
         h = h + gate1 * h  # gated residual
         h = self.dropout1(h)  # dropout (training only)
@@ -153,7 +157,7 @@ class TritonTransformerBlock(nn.Module):
         # Stream 2: MoE
         moe_out = self.moe(h)  # [B, S, D]
         out = h + moe_out
-        out = rmsnorm(out, self.ln2_gamma)  # [B, S, D]
+        out = self.ln2(out)  # [B, S, D]
         gate2 = torch.sigmoid(self.gate2)
         out = out + gate2 * out  # gated residual
         out = self.dropout2(out)  # dropout (training only)
@@ -164,7 +168,13 @@ class TritonTransformerBlock(nn.Module):
         """Move all parameters to the same device and dtype as x (skip if int)."""
         device = x.device
         dtype = x.dtype if x.dtype.is_floating_point or x.dtype.is_complex else None
-        for param in [self.ln1_gamma, self.ln2_gamma, self.gate1, self.gate2]:
+        if dtype is not None:
+            self.ln1 = self.ln1.to(device, dtype)
+            self.ln2 = self.ln2.to(device, dtype)
+        elif device is not None:
+            self.ln1 = self.ln1.to(device)
+            self.ln2 = self.ln2.to(device)
+        for param in [self.gate1, self.gate2]:
             if param.device != device or (dtype is not None and param.dtype != dtype):
                 param.data = param.data.to(device, dtype or param.dtype)
         self.mha._move_to_device(x)

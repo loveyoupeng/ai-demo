@@ -79,7 +79,7 @@ without knowing the tensor's stride at compile time.
 Numerical stability: Stable Softmax
 ------------------------------------
 The kernel uses the numerically stable softmax formula:
-  
+
   softmax(x_i) = exp(x_i - max(x)) / sum(exp(x_j - max(x)))
 
   Subtracting the maximum per row prevents exp(x_i) from overflowing
@@ -88,7 +88,7 @@ The kernel uses the numerically stable softmax formula:
 
   scores_max = scores.max(axis=1, keep_dims=True)  # (BLOCK_M, 1)
   exp_scores = (scores - scores_max).exp()           # (BLOCK_M, Sk_pad)
-  
+
   This is necessary because attention scores can easily reach ±100+.
 
 BLOCK_SIZE selection
@@ -108,7 +108,7 @@ K and V are zero-padded to Sk_pad × D_pad:
   1. Sk_pad ≥ Sk: padding beyond actual sequence length
      - Masked with tl.where(key_col < Sk) in the score computation
      - Avoids reading out-of-bounds memory (segfault prevention)
-  
+
   2. D_pad ≥ D: padding to power of 2
      - For tl.dot compatibility (hardware alignment)
      - Output cropped to [:, :, :, :D] at the end
@@ -320,10 +320,22 @@ class _ScaledDotProductAttentionTF(torch.autograd.Function):
             k_pad,
             v_pad,
             out,
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-            k_pad.stride(0), k_pad.stride(1), k_pad.stride(2), k_pad.stride(3),
-            v_pad.stride(0), v_pad.stride(1), v_pad.stride(2), v_pad.stride(3),
-            out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),
+            k_pad.stride(0),
+            k_pad.stride(1),
+            k_pad.stride(2),
+            k_pad.stride(3),
+            v_pad.stride(0),
+            v_pad.stride(1),
+            v_pad.stride(2),
+            v_pad.stride(3),
+            out.stride(0),
+            out.stride(1),
+            out.stride(2),
+            out.stride(3),
             H,
             Sq,
             D,
@@ -507,7 +519,6 @@ def _attn_fwd_kernel(
         Number of query positions processed per program. Must be
         power-of-2 (typically 16).
 
-
     Grid configuration
     ------------------
     Block grid: (B, H, ceil(Sq / BLOCK_M))
@@ -517,7 +528,6 @@ def _attn_fwd_kernel(
     ------------------
     For (B=2, H=16, Sq=2048, BLOCK_M=16):
       Grid: (2, 16, 128) = 4096 programs
-
 
     Return type
     -----------
@@ -586,8 +596,6 @@ def _attn_fwd_kernel(
 
     # ---- Store output: [BLOCK_M, D_pad] → [Sq, D] ----
     col_idx = tl.arange(0, D_pad)[None, :]  # [1, D_pad]
-    out_ptrs = (
-        Out + pid_b * stride_ob + pid_h * stride_oh + q_row * stride_os + col_idx * stride_od
-    )
+    out_ptrs = Out + pid_b * stride_ob + pid_h * stride_oh + q_row * stride_os + col_idx * stride_od
     out_mask = (q_row < Sq) & (col_idx < D)
     tl.store(out_ptrs, output, mask=out_mask)
