@@ -49,10 +49,11 @@ class TritonMultiHeadAttention(nn.Module):
         """Move parameters to the same device and dtype as x on first forward pass."""
         if not x.is_cuda:
             return
-        device, dtype = x.device, x.dtype
+        device = x.device
+        dtype = x.dtype if x.dtype.is_floating_point or x.dtype.is_complex else None
         for param in [self.Wq, self.bq, self.Wk, self.bk, self.Wv, self.bv, self.Wo, self.bo]:
-            if param.device != device or param.dtype != dtype:
-                param.data = param.data.to(device, dtype)
+            if param.device != device or (dtype is not None and param.dtype != dtype):
+                param.data = param.data.to(device, dtype or param.dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self._move_to_device(x)
@@ -159,6 +160,16 @@ class TritonTransformerBlock(nn.Module):
 
         return out
 
+    def _move_to_device(self, x: torch.Tensor) -> None:
+        """Move all parameters to the same device and dtype as x (skip if int)."""
+        device = x.device
+        dtype = x.dtype if x.dtype.is_floating_point or x.dtype.is_complex else None
+        for param in [self.ln1_gamma, self.ln2_gamma, self.gate1, self.gate2]:
+            if param.device != device or (dtype is not None and param.dtype != dtype):
+                param.data = param.data.to(device, dtype or param.dtype)
+        self.mha._move_to_device(x)
+        self.moe._move_to_device(x)
+
 
 class TritonExpert(nn.Module):
     """Single SwiGLU expert."""
@@ -200,17 +211,18 @@ class TritonMoE(nn.Module):
         ])
 
     def _move_to_device(self, x: torch.Tensor) -> None:
-        """Move all MoE parameters to the same device/dtype as x."""
+        """Move all MoE parameters to the same device and dtype as x (skip if int)."""
         if not x.is_cuda:
             return
-        device, dtype = x.device, x.dtype
+        device = x.device
+        dtype = x.dtype if x.dtype.is_floating_point or x.dtype.is_complex else None
         for param in [self.W_router, self.b_router]:
-            if param.device != device or param.dtype != dtype:
-                param.data = param.data.to(device, dtype)
+            if param.device != device or (dtype is not None and param.dtype != dtype):
+                param.data = param.data.to(device, dtype or param.dtype)
         for expert in self.experts:
             for p in [expert.W1, expert.W3, expert.W2]:
-                if p.device != device or p.dtype != dtype:
-                    p.data = p.data.to(device, dtype)
+                if p.device != device or (dtype is not None and p.dtype != dtype):
+                    p.data = p.data.to(device, dtype or p.dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self._move_to_device(x)
@@ -289,3 +301,7 @@ class TritonDecoderStack(nn.Module):
         for block in self.layers:
             out = block(out)
         return out
+
+    def _move_to_device(self, x: torch.Tensor) -> None:
+        for block in self.layers:
+            block._move_to_device(x)
