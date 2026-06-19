@@ -1,0 +1,244 @@
+"""E7: TransformerBlock — Python wiring of Triton kernels.
+
+Assembles multi-head attention (TritonMHA), MoE (TritonMoE),
+and RMSNorm (TritonRMSNorm) into a complete decoder-only transformer block.
+
+Architecture (same as _torch TransformerBlock):
+    Stream 1: x → MHA(x) → h = x + attn → rmsnorm(h) →
+              gate1 = sigmoid(gate1) * h → dropout(h)
+    Stream 2: h → MoE(h) → out = h + moe → rmsnorm(out) →
+              gate2 = sigmoid(gate2) * out → dropout(out)
+
+No new Triton kernels — this is pure PyTorch module wiring.
+"""
+
+import torch
+import torch.nn as nn
+
+from impl._triton.attn import scaled_dot_product_attention
+from impl._triton.ffn import swiglu_ffn
+from impl._triton.layernorm import rmsnorm
+
+
+class TritonMultiHeadAttention(nn.Module):
+    """Multi-head attention using Triton scaled-dot-product kernel."""
+
+    def __init__(self, embed_dim: int, n_heads: int) -> None:
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.n_heads = n_heads
+        self.head_dim = embed_dim // n_heads
+        assert embed_dim % n_heads == 0, "embed_dim must be divisible by n_heads"
+        self.Wq = nn.Parameter(torch.empty(embed_dim, embed_dim))
+        self.bq = nn.Parameter(torch.zeros(embed_dim))
+        self.Wk = nn.Parameter(torch.empty(embed_dim, embed_dim))
+        self.bk = nn.Parameter(torch.zeros(embed_dim))
+        self.Wv = nn.Parameter(torch.empty(embed_dim, embed_dim))
+        self.bv = nn.Parameter(torch.zeros(embed_dim))
+        self.Wo = nn.Parameter(torch.empty(embed_dim, embed_dim))
+        self.bo = nn.Parameter(torch.zeros(embed_dim))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(self.Wq, a=0.01)
+        nn.init.kaiming_uniform_(self.Wk, a=0.01)
+        nn.init.kaiming_uniform_(self.Wv, a=0.01)
+        nn.init.kaiming_uniform_(self.Wo, a=0.01)
+
+    def _move_to_device(self, x: torch.Tensor) -> None:
+        """Move parameters to the same device and dtype as x on first forward pass."""
+        if not x.is_cuda:
+            return
+        device, dtype = x.device, x.dtype
+        for param in [self.Wq, self.bq, self.Wk, self.bk, self.Wv, self.bv, self.Wo, self.bo]:
+            if param.device != device or param.dtype != dtype:
+                param.data = param.data.to(device, dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self._move_to_device(x)
+        B, S, D = x.shape
+
+        # Q, K, V projections: [B, S, D] -> [B, S, embed_dim]
+        q = x @ self.Wq + self.bq  # [B, S, D]
+        k = x @ self.Wk + self.bk  # [B, S, D]
+        v = x @ self.Wv + self.bv  # [B, S, D]
+
+        # Reshape for MHA: [B, S, H, head_dim] -> [B, H, S, head_dim]
+        q = q.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+
+        # Attention: [B, H, S, S] x [B, H, S, head_dim] -> [B, H, S, head_dim]
+        attn_out = scaled_dot_product_attention(q, k, v)
+
+        # Reshape back: [B, H, S, head_dim] -> [B, S, D]
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, S, D)
+
+        # Output projection: [B, S, D] -> [B, S, D]
+        out = attn_out @ self.Wo + self.bo  # [B, S, D]
+        return out
+
+
+class TritonTransformerBlock(nn.Module):
+    """TransformerBlock using Triton kernels internally.
+
+    Parameters
+    ----------
+    embed_dim : int
+        Hidden dimension.
+    n_heads : int
+        Number of attention heads.
+    n_experts : int
+        Number of MoE experts.
+    ff_dim : int
+        Feed-forward hidden dimension.
+    k : int
+        Number of top experts to activate.
+    dropout : float
+        Dropout rate (disabled during eval).
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        n_heads: int,
+        n_experts: int,
+        ff_dim: int,
+        k: int = 2,
+        dropout: float = 0.05,
+    ) -> None:
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.n_heads = n_heads
+        self.n_experts = n_experts
+        self.k = k
+        self.norm_type = "post"
+
+        # RMSNorm gamma parameters — rmsnorm is a function called directly
+        self.ln1_gamma = nn.Parameter(torch.ones(embed_dim))
+        self.ln2_gamma = nn.Parameter(torch.ones(embed_dim))
+
+        # Gated residuals
+        self.gate1 = nn.Parameter(torch.zeros(1))
+        self.gate2 = nn.Parameter(torch.zeros(1))
+
+        # Multi-head attention
+        self.mha = TritonMultiHeadAttention(embed_dim, n_heads)
+
+        # MoE
+        self.moe = TritonMoE(embed_dim, n_experts, ff_dim, k)
+
+        # Dropout (training only)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Sync gaternorm params to device
+        device = x.device
+        dtype = x.dtype
+        for param in [self.ln1_gamma, self.ln2_gamma, self.gate1, self.gate2]:
+            if param.device != device or param.dtype != dtype:
+                param.data = param.data.to(device, dtype)
+        self.moe._move_to_device(x)
+
+        # Stream 1: Attention
+        attn_out = self.mha(x)  # [B, S, D]
+        h = x + attn_out
+        h = rmsnorm(h, self.ln1_gamma)  # [B, S, D]
+        gate1 = torch.sigmoid(self.gate1)
+        h = h + gate1 * h  # gated residual
+        h = self.dropout1(h)  # dropout (training only)
+
+        # Stream 2: MoE
+        moe_out = self.moe(h)  # [B, S, D]
+        out = h + moe_out
+        out = rmsnorm(out, self.ln2_gamma)  # [B, S, D]
+        gate2 = torch.sigmoid(self.gate2)
+        out = out + gate2 * out  # gated residual
+        out = self.dropout2(out)  # dropout (training only)
+
+        return out
+
+
+class TritonExpert(nn.Module):
+    """Single SwiGLU expert."""
+
+    def __init__(self, embed_dim: int, ff_dim: int) -> None:
+        super().__init__()
+        self.W1 = nn.Parameter(torch.empty(embed_dim, ff_dim))
+        self.W3 = nn.Parameter(torch.empty(embed_dim, ff_dim))
+        self.W2 = nn.Parameter(torch.empty(ff_dim, embed_dim))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(self.W1, a=0.01)
+        nn.init.kaiming_uniform_(self.W3, a=0.01)
+        nn.init.kaiming_uniform_(self.W2, a=0.01)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return swiglu_ffn(x, self.W1, self.W3, self.W2)
+
+
+class TritonMoE(nn.Module):
+    """Mixture of Experts using Triton kernels."""
+
+    def __init__(
+        self,
+        embed_dim: int,
+        n_experts: int,
+        ff_dim: int,
+        k: int = 2,
+    ) -> None:
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.n_experts = n_experts
+        self.k = k
+        self.W_router = nn.Parameter(torch.empty(embed_dim, n_experts))
+        self.b_router = nn.Parameter(torch.zeros(n_experts))
+        self.experts = nn.ModuleList([
+            TritonExpert(embed_dim, ff_dim) for _ in range(n_experts)
+        ])
+
+    def _move_to_device(self, x: torch.Tensor) -> None:
+        """Move all MoE parameters to the same device/dtype as x."""
+        if not x.is_cuda:
+            return
+        device, dtype = x.device, x.dtype
+        for param in [self.W_router, self.b_router]:
+            if param.device != device or param.dtype != dtype:
+                param.data = param.data.to(device, dtype)
+        for expert in self.experts:
+            for p in [expert.W1, expert.W3, expert.W2]:
+                if p.device != device or p.dtype != dtype:
+                    p.data = p.data.to(device, dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self._move_to_device(x)
+
+        from impl._triton.moe import mixture_of_experts
+
+        # Router scores: [B, S, E]
+        scores = x @ self.W_router + self.b_router
+
+        # Softmax routing weights: [B, S, E]
+        scores_max = scores.max(dim=-1, keepdim=True).values
+        exp_scores = torch.exp(scores - scores_max)
+        routing_weights = exp_scores / exp_scores.sum(dim=-1, keepdim=True)
+
+        # Top-k selection and renormalization
+        n_experts = self.n_experts
+        k = self.k
+        if k < n_experts:
+            top_k_values, _ = torch.topk(routing_weights, k, dim=-1)
+            threshold = top_k_values.min(dim=-1, keepdim=True).values
+            routing_weights = routing_weights * (routing_weights >= threshold).float()
+            renorm_sum = routing_weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+            routing_weights = routing_weights / renorm_sum
+
+        # Compute expert outputs: [E, B, S, D]
+        expert_inputs = x.unsqueeze(0).expand(n_experts, -1, -1, -1)  # [E, B, S, D]
+        expert_outs = torch.stack([expert(expert_inputs[i]) for expert, i in zip(self.experts, range(n_experts))])
+
+        # Weighted sum: [B, S, E] x [E, B, S, D] -> [B, S, D]
+        out = torch.einsum("bse,ebsd->bsd", routing_weights, expert_outs)
+        return out

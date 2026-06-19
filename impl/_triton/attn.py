@@ -44,14 +44,16 @@ class _ScaledDotProductAttentionTF(torch.autograd.Function):
     """
 
     @staticmethod
-    @staticmethod
     def forward(ctx, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         B, H, Sq, D = q.shape
         _, _, Sk, _ = k.shape
 
         # Pad dimensions to meet Triton tl.dot minimum K (sm87: K >= 16)
         D_pad = max(_MIN_KERNEL_DIM, triton.next_power_of_2(D))
+        # Sk_pad must be power of 2 for Triton tl.arange (sm87: K >= 16)
         Sk_pad = max(Sk, _MIN_KERNEL_DIM)
+        if Sk_pad != triton.next_power_of_2(Sk_pad):
+            Sk_pad = triton.next_power_of_2(Sk_pad)
 
         # Zero-pad K/V tensors to (B, H, Sk_pad, D_pad) for Triton tl.dot
         k_pad = torch.zeros((B, H, Sk_pad, D_pad), device=q.device, dtype=q.dtype)
@@ -62,8 +64,9 @@ class _ScaledDotProductAttentionTF(torch.autograd.Function):
         BLOCK_M = 16
         grid = (B, H, triton.cdiv(Sq, BLOCK_M))
 
-        # Output tensor in fp32 then convert to input dtype
-        out = torch.zeros((B, H, Sq, D), device=q.device, dtype=torch.float32)
+        # Output tensor must use D_pad (kernel writes D_pad columns).
+        # Using D would overflow into adjacent row memory when D_pad > D.
+        out = torch.zeros((B, H, Sq, D_pad), device=q.device, dtype=torch.float32)
 
         _attn_fwd_kernel[grid](
             q,
@@ -200,7 +203,8 @@ def _attn_fwd_kernel(
     output = tl.dot(attn_weights, v_block)  # [BLOCK_M, D_pad]
 
     # ---- Store output: [BLOCK_M, D_pad] -> [Sq, D] ----
+    col_idx = tl.arange(0, D_pad)[None, :]  # [1, D_pad]
     out_ptrs = (
-        Out + pid_b * stride_ob + pid_h * stride_oh + q_row * stride_os + tl.arange(0, D_pad)[None, :] * stride_od
+        Out + pid_b * stride_ob + pid_h * stride_oh + q_row * stride_os + col_idx * stride_od
     )
-    tl.store(out_ptrs, output, mask=(q_row < Sq))
+    tl.store(out_ptrs, output, mask=(q_row < Sq) & (col_idx < D))
