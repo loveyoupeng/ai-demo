@@ -13,6 +13,7 @@ import torch.nn as nn
 from impl._triton.ffn import swiglu_ffn
 from impl._triton.layernorm import rmsnorm
 from impl._triton.transformer import TritonDecoderStack
+from shared.constants import Block, Mha, Transformer
 
 
 class TritonModel(nn.Module):
@@ -146,12 +147,12 @@ class TritonModel(nn.Module):
         Returns:
             The corresponding tensor.
         """
-        if key == "embedding_weights":
+        if key == Transformer.EMBEDDING_WEIGHTS:
             return self.embedding.weight
-        elif key.startswith("blocks."):
+        elif key.startswith(f"{Block.PREFIX}."):
             # Handle stack layer parameters
             layer_idx = int(key.split(".")[1])
-            prefix = key[len("blocks."):]
+            prefix = key[len(f"{Block.PREFIX}."):]
             if "mha.Wq" in prefix:
                 return self.stack.layers[layer_idx].mha.Wq
             elif "mha.bq" in prefix:
@@ -184,17 +185,17 @@ class TritonModel(nn.Module):
                 expert_idx = int(sub[3])
                 weight_key = sub[4]
                 return getattr(self.stack.layers[layer_idx].moe.experts[expert_idx], weight_key)
-        elif key == "final_ln_gamma":
+        elif key == Transformer.FINAL_GAMMA:
             return self.final_ln_gamma
-        elif key == "output.W1":
+        elif key == Transformer.OUTPUT_W1:
             return self.output_W1
-        elif key == "output.W2":
+        elif key == Transformer.OUTPUT_W2:
             return self.output_W2
-        elif key == "output.W3":
+        elif key == Transformer.OUTPUT_W3:
             return self.output_W3
-        elif key == "output_proj_w":
+        elif key == Transformer.OUTPUT_PROJ_W:
             return self.output_proj.weight
-        elif key == "output_proj_b":
+        elif key == Transformer.OUTPUT_PROJ_B:
             return self.output_proj.bias
         else:
             raise KeyError(f"Unknown parameter key: {key}")
@@ -211,49 +212,47 @@ class TritonModel(nn.Module):
         result: dict[str, np.ndarray] = {}
 
         # Embedding
-        result["embedding_weights"] = self.embedding.weight.detach().cpu().numpy()
+        result[Transformer.EMBEDDING_WEIGHTS] = self.embedding.weight.detach().cpu().numpy()
 
         # Stack layers
         for layer_idx, block in enumerate(self.stack.layers):
-            prefix = f"blocks.{layer_idx}"
 
             # Layer norm gamma
-            result[f"{prefix}.ln1_gamma"] = block.ln1_gamma.detach().cpu().numpy()
-            result[f"{prefix}.ln2_gamma"] = block.ln2_gamma.detach().cpu().numpy()
+            result[Block.ln1_gamma(layer_idx)] = block.ln1_gamma.detach().cpu().numpy()
+            result[Block.ln2_gamma(layer_idx)] = block.ln2_gamma.detach().cpu().numpy()
 
             # MHA weights (PyTorch stores weight as [out, in], save as [in, out])
-            result[f"{prefix}.mha.Wq"] = block.mha.Wq.detach().cpu().numpy()
-            result[f"{prefix}.mha.bq"] = block.mha.bq.detach().cpu().numpy()
-            result[f"{prefix}.mha.Wk"] = block.mha.Wk.detach().cpu().numpy()
-            result[f"{prefix}.mha.bk"] = block.mha.bk.detach().cpu().numpy()
-            result[f"{prefix}.mha.Wv"] = block.mha.Wv.detach().cpu().numpy()
-            result[f"{prefix}.mha.bv"] = block.mha.bv.detach().cpu().numpy()
-            result[f"{prefix}.mha.Wo"] = block.mha.Wo.detach().cpu().numpy()
-            result[f"{prefix}.mha.bo"] = block.mha.bo.detach().cpu().numpy()
+            result[Block.mha(layer_idx, Mha.WQ)] = block.mha.Wq.detach().cpu().numpy()
+            result[Block.mha(layer_idx, Mha.BQ)] = block.mha.bq.detach().cpu().numpy()
+            result[Block.mha(layer_idx, Mha.WK)] = block.mha.Wk.detach().cpu().numpy()
+            result[Block.mha(layer_idx, Mha.BK)] = block.mha.bk.detach().cpu().numpy()
+            result[Block.mha(layer_idx, Mha.WV)] = block.mha.Wv.detach().cpu().numpy()
+            result[Block.mha(layer_idx, Mha.BV)] = block.mha.bv.detach().cpu().numpy()
+            result[Block.mha(layer_idx, Mha.WO)] = block.mha.Wo.detach().cpu().numpy()
+            result[Block.mha(layer_idx, Mha.BO)] = block.mha.bo.detach().cpu().numpy()
 
             # MoE router and expert weights
-            result[f"{prefix}.moe.router"] = block.moe.W_router.detach().cpu().numpy()
-            result[f"{prefix}.moe.bias"] = block.moe.b_router.detach().cpu().numpy()
+            result[Block.moe_router(layer_idx)] = block.moe.W_router.detach().cpu().numpy()
+            result[Block.moe_bias(layer_idx)] = block.moe.b_router.detach().cpu().numpy()
 
             for expert_idx, expert in enumerate(block.moe.experts):
-                expert_prefix = f"{prefix}.moe.experts.{expert_idx}"
-                result[f"{expert_prefix}.W1"] = expert.W1.detach().cpu().numpy()
-                result[f"{expert_prefix}.W2"] = expert.W2.detach().cpu().numpy()
-                result[f"{expert_prefix}.W3"] = expert.W3.detach().cpu().numpy()
+                result[Block.moe_expert(layer_idx, expert_idx, "W1")] = expert.W1.detach().cpu().numpy()
+                result[Block.moe_expert(layer_idx, expert_idx, "W2")] = expert.W2.detach().cpu().numpy()
+                result[Block.moe_expert(layer_idx, expert_idx, "W3")] = expert.W3.detach().cpu().numpy()
 
         # Final ln
-        result["final_ln_gamma"] = self.final_ln_gamma.detach().cpu().numpy()
+        result[Transformer.FINAL_GAMMA] = self.final_ln_gamma.detach().cpu().numpy()
 
         # Output SwiGLU
-        result["output.W1"] = self.output_W1.detach().cpu().numpy()
-        result["output.W2"] = self.output_W2.detach().cpu().numpy()
-        result["output.W3"] = self.output_W3.detach().cpu().numpy()
+        result[Transformer.OUTPUT_W1] = self.output_W1.detach().cpu().numpy()
+        result[Transformer.OUTPUT_W2] = self.output_W2.detach().cpu().numpy()
+        result[Transformer.OUTPUT_W3] = self.output_W3.detach().cpu().numpy()
 
         # Output projection — transpose to NumPy convention (in, out) for
         # cross-backend compatibility (matches TorchModel.save_as_numpy())
         output_proj_w_t = self.output_proj.weight.detach().cpu().T.numpy()
-        result["output_proj_w"] = output_proj_w_t
-        result["output_proj_b"] = self.output_proj.bias.detach().cpu().numpy()
+        result[Transformer.OUTPUT_PROJ_W] = output_proj_w_t
+        result[Transformer.OUTPUT_PROJ_B] = self.output_proj.bias.detach().cpu().numpy()
 
         return result
 
@@ -269,51 +268,49 @@ class TritonModel(nn.Module):
             tensor.data.copy_(loaded)
 
         # Embedding
-        load("embedding_weights", self.embedding.weight)
+        load(Transformer.EMBEDDING_WEIGHTS, self.embedding.weight)
 
         # Stack layers
         for layer_idx, block in enumerate(self.stack.layers):
-            prefix = f"blocks.{layer_idx}"
 
             # Layer norm gamma
-            load(f"{prefix}.ln1_gamma", block.ln1_gamma)
-            load(f"{prefix}.ln2_gamma", block.ln2_gamma)
+            load(Block.ln1_gamma(layer_idx), block.ln1_gamma)
+            load(Block.ln2_gamma(layer_idx), block.ln2_gamma)
 
             # MHA weights
-            load(f"{prefix}.mha.Wq", block.mha.Wq)
-            load(f"{prefix}.mha.bq", block.mha.bq)
-            load(f"{prefix}.mha.Wk", block.mha.Wk)
-            load(f"{prefix}.mha.bk", block.mha.bk)
-            load(f"{prefix}.mha.Wv", block.mha.Wv)
-            load(f"{prefix}.mha.bv", block.mha.bv)
-            load(f"{prefix}.mha.Wo", block.mha.Wo)
-            load(f"{prefix}.mha.bo", block.mha.bo)
+            load(Block.mha(layer_idx, Mha.WQ), block.mha.Wq)
+            load(Block.mha(layer_idx, Mha.BQ), block.mha.bq)
+            load(Block.mha(layer_idx, Mha.WK), block.mha.Wk)
+            load(Block.mha(layer_idx, Mha.BK), block.mha.bk)
+            load(Block.mha(layer_idx, Mha.WV), block.mha.Wv)
+            load(Block.mha(layer_idx, Mha.BV), block.mha.bv)
+            load(Block.mha(layer_idx, Mha.WO), block.mha.Wo)
+            load(Block.mha(layer_idx, Mha.BO), block.mha.bo)
 
             # MoE router and expert weights
-            load(f"{prefix}.moe.router", block.moe.W_router)
-            load(f"{prefix}.moe.bias", block.moe.b_router)
+            load(Block.moe_router(layer_idx), block.moe.W_router)
+            load(Block.moe_bias(layer_idx), block.moe.b_router)
 
             for expert_idx, expert in enumerate(block.moe.experts):
-                expert_prefix = f"{prefix}.moe.experts.{expert_idx}"
-                load(f"{expert_prefix}.W1", expert.W1)
-                load(f"{expert_prefix}.W2", expert.W2)
-                load(f"{expert_prefix}.W3", expert.W3)
+                load(Block.moe_expert(layer_idx, expert_idx, "W1"), expert.W1)
+                load(Block.moe_expert(layer_idx, expert_idx, "W2"), expert.W2)
+                load(Block.moe_expert(layer_idx, expert_idx, "W3"), expert.W3)
 
         # Final ln — accept both naming conventions (final_gamma from torch, final_ln_gamma from triton)
         try:
-            load("final_ln_gamma", self.final_ln_gamma)
+            load(Transformer.FINAL_GAMMA, self.final_ln_gamma)
         except KeyError:
             load("final_gamma", self.final_ln_gamma)
 
         # Output SwiGLU
-        load("output.W1", self.output_W1)
-        load("output.W2", self.output_W2)
-        load("output.W3", self.output_W3)
+        load(Transformer.OUTPUT_W1, self.output_W1)
+        load(Transformer.OUTPUT_W2, self.output_W2)
+        load(Transformer.OUTPUT_W3, self.output_W3)
 
         # Output projection — transposed from NumPy (in, out) to PyTorch (out, in)
         def load_output_proj(key, tensor):
             return tensor.data.copy_(
                     torch.from_numpy(params[key]).to(tensor.dtype).T
                 )
-        load_output_proj("output_proj_w", self.output_proj.weight)
-        load("output_proj_b", self.output_proj.bias)
+        load_output_proj(Transformer.OUTPUT_PROJ_W, self.output_proj.weight)
+        load(Transformer.OUTPUT_PROJ_B, self.output_proj.bias)

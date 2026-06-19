@@ -115,3 +115,13 @@
 - Fixed MoE router bias, weight sync, verify script, zero-size arrays
 
 ---
+## Jun 20 - Phase E+ Wave 1
+
+- Extended `shared/constants.py` with Block, Mha, Transformer constants for save/load keys
+- Replaced ALL magic strings in impl/_np/model.py, impl/_torch/layers.py, impl/_triton/model.py
+- Fixed transpose logic bug in load_from_numpy (inverted condition)
+- Fixed final_gamma/final_ln_gamma mismatch between backends (standardized to final_ln_gamma)
+- All 317 tests pass (torch + triton + cross + np)
+- Ruff clean, 0 lint errors
+- Remaining: 1 intentional fallback ("final_gamma" for backwards compat in Triton)
+

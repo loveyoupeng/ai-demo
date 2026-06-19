@@ -16,6 +16,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from shared.constants import Block, Mha, Transformer
+
 # pyright: reportAttributeAccessIssue=false
 
 
@@ -891,64 +893,62 @@ class TorchModel(nn.Module):
             # use the same (in, out) convention for these.
             if (
                 tensor.dim() == 2
-                and np_key not in ("embedding_weights",)
-                and all(s not in np_key for s in ("W1", "W2", "W3"))
+                and np_key != Transformer.EMBEDDING_WEIGHTS
+                and not any(np_key.endswith(f".{k}") for k in ("W1", "W2", "W3"))
             ):
                 loaded = loaded.T.contiguous()
             tensor.data.copy_(loaded)
 
         # ── Embedding ──────────────────────────────────────────────
-        load("embedding_weights", self.embedding.weight)
+        load(Transformer.EMBEDDING_WEIGHTS, self.embedding.weight)
 
         # ── DecoderStack ───────────────────────────────────────────
         for layer_idx, block in enumerate(self.stack.layers):
-            prefix = f"blocks.{layer_idx}"
 
             # Layer norm gamma
-            load(f"{prefix}.ln1_gamma", block.ln1.gamma)
-            load(f"{prefix}.ln2_gamma", block.ln2.gamma)
+            load(Block.ln1_gamma(layer_idx), block.ln1.gamma)
+            load(Block.ln2_gamma(layer_idx), block.ln2.gamma)
 
             # MHA Q (weight + bias)
-            load(f"{prefix}.mha.Wq", block.mha.Wq.weight)
-            load(f"{prefix}.mha.bq", block.mha.Wq.bias)
+            load(Block.mha(layer_idx, Mha.WQ), block.mha.Wq.weight)
+            load(Block.mha(layer_idx, Mha.BQ), block.mha.Wq.bias)
 
             # MHA K (weight + bias)
-            load(f"{prefix}.mha.Wk", block.mha.Wk.weight)
-            load(f"{prefix}.mha.bk", block.mha.Wk.bias)
+            load(Block.mha(layer_idx, Mha.WK), block.mha.Wk.weight)
+            load(Block.mha(layer_idx, Mha.BK), block.mha.Wk.bias)
 
             # MHA V (weight + bias)
-            load(f"{prefix}.mha.Wv", block.mha.Wv.weight)
-            load(f"{prefix}.mha.bv", block.mha.Wv.bias)
+            load(Block.mha(layer_idx, Mha.WV), block.mha.Wv.weight)
+            load(Block.mha(layer_idx, Mha.BV), block.mha.Wv.bias)
 
             # MHA O (weight + bias)
-            load(f"{prefix}.mha.Wo", block.mha.Wo.weight)
-            load(f"{prefix}.mha.bo", block.mha.Wo.bias)
+            load(Block.mha(layer_idx, Mha.WO), block.mha.Wo.weight)
+            load(Block.mha(layer_idx, Mha.BO), block.mha.Wo.bias)
 
             # MoE router — loads weight and bias from NumPy
-            load(f"{prefix}.moe.router", block.moe.router.weight)
-            load(f"{prefix}.moe.bias", block.moe.router.bias)
+            load(Block.moe_router(layer_idx), block.moe.router.weight)
+            load(Block.moe_bias(layer_idx), block.moe.router.bias)
 
             # MoE experts
             for expert_idx, expert in enumerate(
                 block.moe.experts  # pyright: ignore[reportArgumentType]
             ):
-                expert_prefix = f"{prefix}.moe.experts.{expert_idx}"
-                load(f"{expert_prefix}.W1", expert.W1)
-                load(f"{expert_prefix}.W2", expert.W2)
-                load(f"{expert_prefix}.W3", expert.W3)
+                load(Block.moe_expert(layer_idx, expert_idx, "W1"), expert.W1)
+                load(Block.moe_expert(layer_idx, expert_idx, "W2"), expert.W2)
+                load(Block.moe_expert(layer_idx, expert_idx, "W3"), expert.W3)
 
         # ── Final RMSNorm ──────────────────────────────────────────
-        load("final_gamma", self.final_ln.gamma)
+        load(Transformer.FINAL_GAMMA, self.final_ln.gamma)
 
         # ── Output SwiGLU ──────────────────────────────────────────
-        load("output.W1", self.output.W1)
-        load("output.W2", self.output.W2)
-        load("output.W3", self.output.W3)
+        load(Transformer.OUTPUT_W1, self.output.W1)
+        load(Transformer.OUTPUT_W2, self.output.W2)
+        load(Transformer.OUTPUT_W3, self.output.W3)
 
         # ── Output projection ──────────────────────────────────────
         # PyTorch Linear output_proj has weight and bias (matches NumPy)
-        load("output_proj_w", self.output_proj.weight)
-        load("output_proj_b", self.output_proj.bias)
+        load(Transformer.OUTPUT_PROJ_W, self.output_proj.weight)
+        load(Transformer.OUTPUT_PROJ_B, self.output_proj.bias)
 
     def save_as_numpy(self) -> dict[str, Any]:  # Returns dict[str, np.ndarray]
         """Save all parameters as a NumPy-compatible dictionary.
@@ -987,59 +987,57 @@ class TorchModel(nn.Module):
             params[np_key] = array
 
         # ── Embedding ──────────────────────────────────────────────
-        save(self.embedding.weight, "embedding_weights")
+        save(self.embedding.weight, Transformer.EMBEDDING_WEIGHTS)
 
         # ── DecoderStack ───────────────────────────────────────────
         for layer_idx, block in enumerate(self.stack.layers):
-            prefix = f"blocks.{layer_idx}"
 
             # Layer norm gamma
-            save(block.ln1.gamma, f"{prefix}.ln1_gamma")
-            save(block.ln2.gamma, f"{prefix}.ln2_gamma")
+            save(block.ln1.gamma, Block.ln1_gamma(layer_idx))
+            save(block.ln2.gamma, Block.ln2_gamma(layer_idx))
 
             # Gated residuals
-            save(block.gate1, f"{prefix}.gate1")
-            save(block.gate2, f"{prefix}.gate2")
+            save(block.gate1, Block.gate1(layer_idx))
+            save(block.gate2, Block.gate2(layer_idx))
 
             # MHA Q (weight + bias)
-            save(block.mha.Wq.weight, f"{prefix}.mha.Wq", transpose=True)
-            save(block.mha.Wq.bias, f"{prefix}.mha.bq")
+            save(block.mha.Wq.weight, Block.mha(layer_idx, Mha.WQ), transpose=True)
+            save(block.mha.Wq.bias, Block.mha(layer_idx, Mha.BQ))
 
             # MHA K (weight + bias)
-            save(block.mha.Wk.weight, f"{prefix}.mha.Wk", transpose=True)
-            save(block.mha.Wk.bias, f"{prefix}.mha.bk")
+            save(block.mha.Wk.weight, Block.mha(layer_idx, Mha.WK), transpose=True)
+            save(block.mha.Wk.bias, Block.mha(layer_idx, Mha.BK))
 
             # MHA V (weight + bias)
-            save(block.mha.Wv.weight, f"{prefix}.mha.Wv", transpose=True)
-            save(block.mha.Wv.bias, f"{prefix}.mha.bv")
+            save(block.mha.Wv.weight, Block.mha(layer_idx, Mha.WV), transpose=True)
+            save(block.mha.Wv.bias, Block.mha(layer_idx, Mha.BV))
 
             # MHA O (weight + bias)
-            save(block.mha.Wo.weight, f"{prefix}.mha.Wo", transpose=True)
-            save(block.mha.Wo.bias, f"{prefix}.mha.bo")
+            save(block.mha.Wo.weight, Block.mha(layer_idx, Mha.WO), transpose=True)
+            save(block.mha.Wo.bias, Block.mha(layer_idx, Mha.BO))
 
             # MoE router — saves weight and bias to NumPy format
-            save(block.moe.router.weight, f"{prefix}.moe.router", transpose=True)
+            save(block.moe.router.weight, Block.moe_router(layer_idx), transpose=True)
             if block.moe.router.bias is not None:
-                save(block.moe.router.bias, f"{prefix}.moe.bias")
+                save(block.moe.router.bias, Block.moe_bias(layer_idx))
 
             # MoE experts
             for expert_idx, expert in enumerate(block.moe.experts):  # pyright: ignore[reportArgumentType]
-                expert_prefix = f"{prefix}.moe.experts.{expert_idx}"
-                save(expert.W1, f"{expert_prefix}.W1")
-                save(expert.W2, f"{expert_prefix}.W2")
-                save(expert.W3, f"{expert_prefix}.W3")
+                save(expert.W1, Block.moe_expert(layer_idx, expert_idx, "W1"))
+                save(expert.W2, Block.moe_expert(layer_idx, expert_idx, "W2"))
+                save(expert.W3, Block.moe_expert(layer_idx, expert_idx, "W3"))
 
         # ── Final RMSNorm ──────────────────────────────────────────
-        save(self.final_ln.gamma, "final_gamma")
+        save(self.final_ln.gamma, Transformer.FINAL_GAMMA)
 
         # ── Output SwiGLU ──────────────────────────────────────────
-        save(self.output.W1, "output.W1")
-        save(self.output.W2, "output.W2")
-        save(self.output.W3, "output.W3")
+        save(self.output.W1, Transformer.OUTPUT_W1)
+        save(self.output.W2, Transformer.OUTPUT_W2)
+        save(self.output.W3, Transformer.OUTPUT_W3)
 
         # ── Output projection ──────────────────────────────────────
-        save(self.output_proj.weight, "output_proj_w", transpose=True)
-        save(self.output_proj.bias, "output_proj_b")
+        save(self.output_proj.weight, Transformer.OUTPUT_PROJ_W, transpose=True)
+        save(self.output_proj.bias, Transformer.OUTPUT_PROJ_B)
 
         return params  # type: ignore[return-value]
 
@@ -1073,58 +1071,56 @@ class TorchModel(nn.Module):
             tensor.data.copy_(loaded)
 
         # ── Embedding ──────────────────────────────────────────────
-        load(self.embedding.weight, "embedding_weights")
+        load(self.embedding.weight, Transformer.EMBEDDING_WEIGHTS)
 
         # ── DecoderStack ───────────────────────────────────────────
         for layer_idx, block in enumerate(self.stack.layers):
-            prefix = f"blocks.{layer_idx}"
 
             # Layer norm gamma
-            load(block.ln1.gamma, f"{prefix}.ln1_gamma")
-            load(block.ln2.gamma, f"{prefix}.ln2_gamma")
+            load(block.ln1.gamma, Block.ln1_gamma(layer_idx))
+            load(block.ln2.gamma, Block.ln2_gamma(layer_idx))
 
             # Gated residuals
-            load(block.gate1, f"{prefix}.gate1")
-            load(block.gate2, f"{prefix}.gate2")
+            load(block.gate1, Block.gate1(layer_idx))
+            load(block.gate2, Block.gate2(layer_idx))
 
             # MHA Q (weight + bias)
-            load(block.mha.Wq.weight, f"{prefix}.mha.Wq", transpose=True)
-            load(block.mha.Wq.bias, f"{prefix}.mha.bq")
+            load(block.mha.Wq.weight, Block.mha(layer_idx, Mha.WQ), transpose=True)
+            load(block.mha.Wq.bias, Block.mha(layer_idx, Mha.BQ))
 
             # MHA K (weight + bias)
-            load(block.mha.Wk.weight, f"{prefix}.mha.Wk", transpose=True)
-            load(block.mha.Wk.bias, f"{prefix}.mha.bk")
+            load(block.mha.Wk.weight, Block.mha(layer_idx, Mha.WK), transpose=True)
+            load(block.mha.Wk.bias, Block.mha(layer_idx, Mha.BK))
 
             # MHA V (weight + bias)
-            load(block.mha.Wv.weight, f"{prefix}.mha.Wv", transpose=True)
-            load(block.mha.Wv.bias, f"{prefix}.mha.bv")
+            load(block.mha.Wv.weight, Block.mha(layer_idx, Mha.WV), transpose=True)
+            load(block.mha.Wv.bias, Block.mha(layer_idx, Mha.BV))
 
             # MHA O (weight + bias)
-            load(block.mha.Wo.weight, f"{prefix}.mha.Wo", transpose=True)
-            load(block.mha.Wo.bias, f"{prefix}.mha.bo")
+            load(block.mha.Wo.weight, Block.mha(layer_idx, Mha.WO), transpose=True)
+            load(block.mha.Wo.bias, Block.mha(layer_idx, Mha.BO))
 
             # MoE router
-            load(block.moe.router.weight, f"{prefix}.moe.router", transpose=True)
-            load(block.moe.router.bias, f"{prefix}.moe.bias")
+            load(block.moe.router.weight, Block.moe_router(layer_idx), transpose=True)
+            load(block.moe.router.bias, Block.moe_bias(layer_idx))
 
             # MoE experts
             for expert_idx, expert in enumerate(block.moe.experts):  # pyright: ignore[reportArgumentType]
-                expert_prefix = f"{prefix}.moe.experts.{expert_idx}"
-                load(expert.W1, f"{expert_prefix}.W1")
-                load(expert.W2, f"{expert_prefix}.W2")
-                load(expert.W3, f"{expert_prefix}.W3")
+                load(expert.W1, Block.moe_expert(layer_idx, expert_idx, "W1"))
+                load(expert.W2, Block.moe_expert(layer_idx, expert_idx, "W2"))
+                load(expert.W3, Block.moe_expert(layer_idx, expert_idx, "W3"))
 
         # ── Final RMSNorm ──────────────────────────────────────────
-        load(self.final_ln.gamma, "final_gamma")
+        load(self.final_ln.gamma, Transformer.FINAL_GAMMA)
 
         # ── Output SwiGLU ──────────────────────────────────────────
-        load(self.output.W1, "output.W1")
-        load(self.output.W2, "output.W2")
-        load(self.output.W3, "output.W3")
+        load(self.output.W1, Transformer.OUTPUT_W1)
+        load(self.output.W2, Transformer.OUTPUT_W2)
+        load(self.output.W3, Transformer.OUTPUT_W3)
 
         # ── Output projection ──────────────────────────────────────
-        load(self.output_proj.weight, "output_proj_w", transpose=True)
-        load(self.output_proj.bias, "output_proj_b")
+        load(self.output_proj.weight, Transformer.OUTPUT_PROJ_W, transpose=True)
+        load(self.output_proj.bias, Transformer.OUTPUT_PROJ_B)
 
 
 class AdamW:

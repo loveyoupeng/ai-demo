@@ -10,7 +10,9 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 **Phase D (Cross-Backend Equivalence) is ✅ COMPLETE.**
 **Phase E (Triton GPU Kernels) is ✅ COMPLETE.** — 538 tests pass
 
-**Next step: Phase F — CUDA Implementation (Lowest Level via `nvidia/cuda-python`)**
+**Next step: Phase E+ — Cleanup & Refinement** (5 goals planned in `docs/phase_e_plus_plan.md`)
+
+- **E+Wave1 (Jun 20):** ✅ COMPLETE — All magic strings eliminated. Extended `shared/constants.py` with `Block`, `Mha`, `Transformer` constants. Replaced all string literals in `impl/_np/model.py`, `impl/_torch/layers.py`, `impl/_triton/model.py` save/load methods. Fixed transpose logic bug. Standardized `final_ln_gamma` across backends. 317 tests pass, ruff clean.
 
 ---
 

@@ -241,3 +241,18 @@ out = dropout(out)                        # dropout (training only)
 - Compilation model: `@triton.jit`, `tl.program_id`, `tl.arange`, `BLOCK_SIZE` constexpr
 - Autograd integration: Triton kernels participate in PyTorch's autograd graph by default
 - Production patterns: Python wrappers dispatch kernels, `torch.Tensor` → `triton.language.tensor` conversion
+
+## Phase E+: Wave 1 — Magic String Elimination (Jun 20)
+
+Extended `shared/constants.py` with constants for ALL save/load keys across all three backends:
+- `Mha` — WQ, BQ, WK, BK, WV, BV, WO, BO (save/load keys)
+- `Block` — `prefix()`, `ln1_gamma()`, `ln2_gamma()`, `mha()`, `moe_router()`, `moe_bias()`, `moe_expert()`, `gate1()`, `gate2()`
+- `Transformer` — `EMBEDDING_WEIGHTS`, `FINAL_GAMMA`, `OUTPUT_W1/W2/W3`, `OUTPUT_PROJ_W`, `OUTPUT_PROJ_B`
+
+Replaced ALL magic strings in:
+- `impl/_np/model.py` — `get_all_parameters()` now uses constants
+- `impl/_torch/layers.py` — `load_from_numpy()`, `save_as_numpy()`, `load_from_numpy_dict()`
+- `impl/_triton/model.py` — `_get_param()`, `save_as_numpy()`, `load_from_numpy_dict()`
+
+Result: 0 magic strings in implementation (except 1 intentional fallback for backwards compat)
+All 317 tests pass. Ruff clean.

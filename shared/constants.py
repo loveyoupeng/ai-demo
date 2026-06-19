@@ -3,9 +3,32 @@
 All parameter names are defined as class-level string constants.
 Helper functions that assemble compound paths use ONLY these constants —
 no magic string literals are permitted.
+
+Naming convention across backends
+=================================
+The keys below define the EXACT save/load format shared by NumPy, PyTorch,
+and Triton backends.  Each backend's save_as_numpy() produces these keys,
+and load_from_numpy_dict() consumes them.
+
+NumPy keys:     impl/_np/model.py → get_all_parameters()
+PyTorch keys:   impl/_torch/layers.py → save_as_numpy() / load_from_numpy()
+Triton keys:    impl/_triton/model.py → save_as_numpy() / load_from_numpy_dict()
 """
 
 from __future__ import annotations
+
+
+class Mha:
+    """Constants for Multi-Head Attention parameter names."""
+
+    WQ: str = "Wq"
+    BQ: str = "bq"
+    WK: str = "Wk"
+    BK: str = "bk"
+    WV: str = "Wv"
+    BV: str = "bv"
+    WO: str = "Wo"
+    BO: str = "bo"
 
 
 class Attention:
@@ -20,6 +43,9 @@ class Attention:
     V_BIAS: str = "v.bias"
     O_BIAS: str = "o.bias"
 
+    # Save/load keys (cross-backend convention)
+    WEIGHTS: str = "mha"
+
 
 class LayerNorm:
     """Constants for LayerNorm parameter names."""
@@ -27,13 +53,9 @@ class LayerNorm:
     LN_GAMMA: str = "ln_gamma"
     LN_BIAS: str = "ln_bias"
 
-
-class Transformer:
-    """Constants for Transformer-level parameter names."""
-
-    EMBEDDING: str = "embed"
-    LM_HEAD_WEIGHT: str = "lm_head"
-    LM_HEAD_BIAS: str = "lm_head_bias"
+    # Save/load keys (cross-backend convention)
+    LN1: str = "ln1_gamma"
+    LN2: str = "ln2_gamma"
 
 
 class MoE:
@@ -46,6 +68,154 @@ class MoE:
     EXPERT_W1: str = "expert.w1"
     EXPERT_W2: str = "expert.w2"
     EXPERT_W3: str = "expert.w3"
+
+    # Save/load keys (cross-backend convention)
+    ROUTER: str = "router"
+    BIAS: str = "bias"
+    EXPERTS: str = "moe"
+    GATE1: str = "gate1"
+    GATE2: str = "gate2"
+
+
+class Transformer:
+    """Constants for Transformer-level parameter names."""
+
+    EMBEDDING: str = "embed"
+    LM_HEAD_WEIGHT: str = "lm_head"
+    LM_HEAD_BIAS: str = "lm_head_bias"
+
+    # Save/load keys (cross-backend convention)
+    EMBEDDING_WEIGHTS: str = "embedding_weights"
+    FINAL_GAMMA: str = "final_ln_gamma"  # also accept "final_gamma" for compat
+    OUTPUT_W1: str = "output.W1"
+    OUTPUT_W2: str = "output.W2"
+    OUTPUT_W3: str = "output.W3"
+    OUTPUT_PROJ_W: str = "output_proj_w"
+    OUTPUT_PROJ_B: str = "output_proj_b"
+
+
+class Block:
+    """Constants for per-block (layer) save/load keys.
+
+    Example usage:
+        >>> Block.prefix(0)
+        'blocks.0'
+        >>> Block.ln1_gamma(0)
+        'blocks.0.ln1_gamma'
+    """
+
+    PREFIX: str = "blocks"
+
+    @staticmethod
+    def prefix(layer_idx: int) -> str:
+        """Generate the base path for a transformer block.
+
+        Args:
+            layer_idx: 0-based transformer block index.
+
+        Returns:
+            Base path like 'blocks.0'.
+        """
+        return f"{Block.PREFIX}.{layer_idx}"
+
+    @staticmethod
+    def ln1_gamma(layer_idx: int) -> str:
+        """Layer norm 1 gamma save/load key.
+
+        Args:
+            layer_idx: 0-based transformer block index.
+
+        Returns:
+            Key like 'blocks.0.ln1_gamma'.
+        """
+        return f"{Block.prefix(layer_idx)}.ln1_gamma"
+
+    @staticmethod
+    def ln2_gamma(layer_idx: int) -> str:
+        """Layer norm 2 gamma save/load key.
+
+        Args:
+            layer_idx: 0-based transformer block index.
+
+        Returns:
+            Key like 'blocks.0.ln2_gamma'.
+        """
+        return f"{Block.prefix(layer_idx)}.ln2_gamma"
+
+    @staticmethod
+    def mha(layer_idx: int, param_key: str) -> str:
+        """MHA save/load key.
+
+        Args:
+            layer_idx: 0-based transformer block index.
+            param_key: MHA parameter key (e.g., Mha.WQ).
+
+        Returns:
+            Key like 'blocks.0.mha.Wq'.
+        """
+        return f"{Block.prefix(layer_idx)}.mha.{param_key}"
+
+    @staticmethod
+    def moe_router(layer_idx: int) -> str:
+        """MoE router save/load key.
+
+        Args:
+            layer_idx: 0-based transformer block index.
+
+        Returns:
+            Key like 'blocks.0.moe.router'.
+        """
+        return f"{Block.prefix(layer_idx)}.moe.{MoE.ROUTER}"
+
+    @staticmethod
+    def moe_bias(layer_idx: int) -> str:
+        """MoE router bias save/load key.
+
+        Args:
+            layer_idx: 0-based transformer block index.
+
+        Returns:
+            Key like 'blocks.0.moe.bias'.
+        """
+        return f"{Block.prefix(layer_idx)}.moe.{MoE.BIAS}"
+
+    @staticmethod
+    def moe_expert(layer_idx: int, expert_idx: int, param: str) -> str:
+        """MoE expert save/load key.
+
+        Args:
+            layer_idx: 0-based transformer block index.
+            expert_idx: 0-based expert index.
+            param: Parameter name (e.g., 'W1', 'W2', 'W3').
+
+        Returns:
+            Key like 'blocks.0.moe.experts.0.W1'.
+        """
+        return f"{Block.prefix(layer_idx)}.moe.experts.{expert_idx}.{param}"
+
+    @staticmethod
+    def gate1(layer_idx: int) -> str:
+        """Gate 1 save/load key (PyTorch-specific).
+
+        Args:
+            layer_idx: 0-based transformer block index.
+
+        Returns:
+            Key like 'blocks.0.gate1'.
+        """
+        return f"{Block.prefix(layer_idx)}.gate1"
+
+    @staticmethod
+    def gate2(layer_idx: int) -> str:
+        """Gate 2 save/load key (PyTorch-specific).
+
+        Args:
+            layer_idx: 0-based transformer block index.
+
+        Returns:
+            Key like 'blocks.0.gate2'.
+        """
+        return f"{Block.prefix(layer_idx)}.gate2"
 
 
 def block_param(layer_idx: int, component: str) -> str:
@@ -206,3 +376,45 @@ def get_all_params(num_layers: int) -> dict[str, str]:
         )
 
     return params
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Save/load key lookup functions (used by all three backends)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def block_ln1_gamma(layer_idx: int) -> str:
+    """Save/load key for block 1 layer norm gamma.
+
+    Cross-backend convention — all three backends use this key.
+
+    Args:
+        layer_idx: 0-based transformer block index.
+
+    Returns:
+        Key like 'blocks.0.ln1_gamma'.
+    """
+    return Block.ln1_gamma(layer_idx)
+
+
+def block_ln2_gamma(layer_idx: int) -> str:
+    """Save/load key for block 2 layer norm gamma.
+
+    Cross-backend convention — all three backends use this key.
+
+    Args:
+        layer_idx: 0-based transformer block index.
+
+    Returns:
+        Key like 'blocks.0.ln2_gamma'.
+    """
+    return Block.ln2_gamma(layer_idx)
+
+
+def save_load_prefix() -> str:
+    """Return the prefix used in all cross-backend save/load keys.
+
+    Returns:
+        Always 'blocks'.
+    """
+    return Block.PREFIX

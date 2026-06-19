@@ -6,6 +6,7 @@ Forward: tokens → embedding → stack → layernorm → SwiGLU(output_proj) �
 import numpy as np
 
 from impl._np.modules import DecoderStack, Embedding, RMSNorm, SwiGLUFFN
+from shared.constants import Block, Transformer
 
 
 class NumPyModel:
@@ -189,45 +190,37 @@ class NumPyModel:
         params: dict[str, np.ndarray] = {}
 
         # Embedding
-        params["embedding_weights"] = self.embedding_weights
+        params[Transformer.EMBEDDING_WEIGHTS] = self.embedding_weights
 
         # Stack — TransformerBlocks
         for layer_idx, block in enumerate(self.stack.blocks):
-            prefix = f"blocks.{layer_idx}"
 
             # Layer norm gamma
-            params[f"{prefix}.ln1_gamma"] = block.ln1_gamma
-            params[f"{prefix}.ln2_gamma"] = block.ln2_gamma
+            params[Block.ln1_gamma(layer_idx)] = block.ln1_gamma
+            params[Block.ln2_gamma(layer_idx)] = block.ln2_gamma
 
             # MHA
-            params[f"{prefix}.mha.Wq"] = block.mha.Wq
-            params[f"{prefix}.mha.bq"] = block.mha.bq
-            params[f"{prefix}.mha.Wk"] = block.mha.Wk
-            params[f"{prefix}.mha.bk"] = block.mha.bk
-            params[f"{prefix}.mha.Wv"] = block.mha.Wv
-            params[f"{prefix}.mha.bv"] = block.mha.bv
-            params[f"{prefix}.mha.Wo"] = block.mha.Wo
-            params[f"{prefix}.mha.bo"] = block.mha.bo
+            for param_name in ("Wq", "bq", "Wk", "bk", "Wv", "bv", "Wo", "bo"):
+                params[Block.mha(layer_idx, param_name)] = getattr(block.mha, param_name)
 
             # MoE
-            params[f"{prefix}.moe.router"] = block.moe.router
-            params[f"{prefix}.moe.bias"] = block.moe.bias
+            params[Block.moe_router(layer_idx)] = block.moe.router
+            params[Block.moe_bias(layer_idx)] = block.moe.bias
             for expert_idx, expert in enumerate(block.moe.experts):
-                params[f"{prefix}.moe.experts.{expert_idx}.W1"] = expert.W1
-                params[f"{prefix}.moe.experts.{expert_idx}.W2"] = expert.W2
-                params[f"{prefix}.moe.experts.{expert_idx}.W3"] = expert.W3
+                for param_key in ("W1", "W2", "W3"):
+                    params[Block.moe_expert(layer_idx, expert_idx, param_key)] = getattr(expert, param_key)
 
         # Final LN
-        params["final_gamma"] = self.final_ln_gamma
+        params[Transformer.FINAL_GAMMA] = self.final_ln_gamma
 
         # Output SwiGLU
-        params["output.W1"] = self.output.W1
-        params["output.W2"] = self.output.W2
-        params["output.W3"] = self.output.W3
+        params[Transformer.OUTPUT_W1] = self.output.W1
+        params[Transformer.OUTPUT_W2] = self.output.W2
+        params[Transformer.OUTPUT_W3] = self.output.W3
 
         # Output projection weights
-        params["output_proj_w"] = self.output_proj_w
-        params["output_proj_b"] = self.output_proj_b
+        params[Transformer.OUTPUT_PROJ_W] = self.output_proj_w
+        params[Transformer.OUTPUT_PROJ_B] = self.output_proj_b
 
         return params
 
