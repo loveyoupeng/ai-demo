@@ -215,8 +215,6 @@ class TritonMoE(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self._move_to_device(x)
 
-        from impl._triton.moe import mixture_of_experts
-
         # Router scores: [B, S, E]
         scores = x @ self.W_router + self.b_router
 
@@ -237,8 +235,57 @@ class TritonMoE(nn.Module):
 
         # Compute expert outputs: [E, B, S, D]
         expert_inputs = x.unsqueeze(0).expand(n_experts, -1, -1, -1)  # [E, B, S, D]
-        expert_outs = torch.stack([expert(expert_inputs[i]) for expert, i in zip(self.experts, range(n_experts))])
+        expert_outs = torch.stack([expert(expert_inputs[i]) for expert, i in zip(self.experts, range(n_experts), strict=True)])
 
         # Weighted sum: [B, S, E] x [E, B, S, D] -> [B, S, D]
         out = torch.einsum("bse,ebsd->bsd", routing_weights, expert_outs)
+        return out
+
+
+class TritonDecoderStack(nn.Module):
+    """Stack of TritonTransformerBlocks — chains n_layers of decoder blocks.
+
+    Architecture:
+        Input:  x [B, S, D]
+        |
+        +-> block_0 -> block_1 -> ... -> block_{n_layers-1} -> output [B, S, D]
+
+        Each block:
+          h = x + MHA(RMSNorm(x) + gated) + MoE(RMSNorm(residual) + gated)
+
+    Parameters:
+        n_layers: Number of transformer blocks.
+        embed_dim: Input/output dimension.
+        n_heads: Number of attention heads per block.
+        n_experts: Number of MoE experts per block.
+        ff_dim: Feed-forward hidden dimension per expert.
+        k: Number of top experts per token.
+    """
+
+    def __init__(
+        self,
+        n_layers: int,
+        embed_dim: int,
+        n_heads: int,
+        n_experts: int,
+        ff_dim: int,
+        k: int = 2,
+    ) -> None:
+        super().__init__()
+        self.n_layers = n_layers
+        self.layers = nn.ModuleList([
+            TritonTransformerBlock(
+                embed_dim=embed_dim,
+                n_heads=n_heads,
+                n_experts=n_experts,
+                ff_dim=ff_dim,
+                k=k,
+            )
+            for _ in range(n_layers)
+        ])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = x
+        for block in self.layers:
+            out = block(out)
         return out
