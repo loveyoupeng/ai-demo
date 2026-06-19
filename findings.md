@@ -307,3 +307,37 @@ Comprehensive pydocs added to all Triton kernel files explaining HOW and WHY:
 - Ruff clean — 0 lint errors
 - 4 pre-existing pyright errors in Triton files (accepted, not functional bugs)
 - All documentation follows consistent structure: formula → algorithm → memory → performance → references
+
+## Phase E+: Wave 3 Step 1 — Naming Consistency (Jun 20)
+
+**TransformerBlock RMSNorm instance rename:**
+
+Changed `self.ln1_gamma` / `self.ln2_gamma` from `nn.Parameter(torch.ones(...))` to `nn.RMSNorm(...)` instances. This makes Triton's TransformerBlock attribute naming match _torch exactly:
+
+| Before (raw param) | After (RMSNorm instance) | _torch equivalent |
+|---|---|---|
+| `self.ln1_gamma` | `self.ln1.weight` (via RMSNorm) | `self.ln1.weight` |
+| `self.ln2_gamma` | `self.ln2.weight` (via RMSNorm) | `self.ln2.weight` |
+| `rmsnorm(h, self.ln1_gamma)` | `self.ln1(h)` | `self.ln1(h)` |
+
+**Save/Load key handling:**
+
+The constant keys from `shared/constants.py` (e.g., `blocks.0.ln1_gamma`) are preserved for save/load compatibility. Internally, `_get_param()` maps these to the new attribute paths:
+
+```
+blocks.N.ln1_gamma → stack.layers[N].ln1.weight
+blocks.N.ln2_gamma → stack.layers[N].ln2.weight
+blocks.N.mha.WQ    → stack.layers[N].mha.Wq   (uppercase → lowercase)
+blocks.N.moe.W_router → stack.layers[N].moe.W_router
+```
+
+**PyTorch-style key support:**
+
+_added `_get_param()` support for keys from `torch_model.named_parameters()`:
+
+```
+layers.N.ln1.weight → stack.layers[N].ln1.weight
+layers.N.mha.Wq     → stack.layers[N].mha.Wq
+```
+
+This enables the parity test to sync parameters using PyTorch's key names while Triton resolves them to correct internal attributes.

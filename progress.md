@@ -124,7 +124,35 @@
 - Ruff auto-fixed: unused imports, sort_imports, unused variables
 - 1 intentional fallback remains: "final_gamma" for backwards compatibility in Triton
 
-## Jun 20 - Phase E+ Wave 2 — Partially Complete
+## Jun 20 - Phase E+ Wave 2 — Complete
+
+- impl/_triton/activation.py: verified already well-documented (no changes)
+- impl/_triton/layernorm.py: full pydocs (RMSNorm formula, memory access, BLOCK_SIZE rationale)
+- impl/_triton/rope.py: full pydocs (2D rotation, theta formula, odd/even pairing)
+- impl/_triton/ffn.py: full pydocs (SwiGLU formula, why 3 weight matrices)
+- impl/_triton/attn.py: full pydocs (attention pipeline, stable softmax, tiled matmul)
+- tests/unit/_np/test_inference.py: fixed Py3.10 annotation bug
+
+## Jun 20 - Phase E+ Wave 3 Step 1 — Triton Naming Consistency
+
+- impl/_triton/transformer.py: TransformerBlock.ln1_gamma/ln2_gamma → ln1/ln2 (RMSNorm instances)
+  - Now matches _torch naming: `self.ln1 = RMSNorm(...)` instead of raw `nn.Parameter`
+  - forward(): `h = self.ln1(h)` instead of `rmsnorm(h, self.ln1_gamma)`
+  - Removed `rmsnorm` import (now uses instance method calls)
+- impl/_triton/model.py: _get_param() added blocks.* key mapping (NumPy-style constant keys)
+  + layers.* key mapping (PyTorch-style from named_parameters())
+  + save_as_numpy() and load_from_numpy_dict() use block.ln1.weight / block.ln2.weight
+  + MHA constant key mapping: WQ/WK/WV/WO → Wq/Wk/Wv/Wo
+- Updated all test files (test_model.py, test_transformer.py, test_decoder_stack.py)
+  + Copy weights: ln1_gamma → ln1.weight, ln2_gamma → ln2.weight
+  + Gradient checks updated accordingly
+- Ruff: fixed trailing whitespace in docstrings
+
+## Jun 20 - Phase E+ Wave 3 Next Steps
+
+- Wave 3 Step 2: Update TritonModel-level naming (final_ln_gamma → final_lnorm instance?)
+- Wave 3 Step 3: Cross-backend named_parameters() output comparison (parity test keys)
+- Wave 3 Step 4: Naming consistency in PyTorch backend (if any inconsistencies exist)
 
 - impl/_triton/activation.py: verified already well-documented (no changes)
 - impl/_triton/layernorm.py: full pydocs (RMSNorm formula, memory access, BLOCK_SIZE rationale, numerical stability, tiled matrix operations)
@@ -140,6 +168,16 @@
 | shared/ + tests/ (unit) | 521 | ✅ all pass |
 | tests/cross_backend/ | 21 | ✅ all pass |
 | **Total** | **542** | **✅ all pass** |
+| Code quality | 0 ruff errors | ✅ clean |
+| Note | 4 pre-existing pyright errors in Triton files (accepted, not functional bugs) | ⚠️ accepted |
+
+## Commits So Far (Phase E+)
+
+| Commit | Description |
+|--------|-------------|
+| `c3d2ad7` | Wave 1 magic string elimination + Wave 2 Triton full docs |
+| `6dbb011` | Fix: add from __future__ import annotations to test_inference.py |
+| `5f6cf4b` | Wave 3 Step 1: Triton naming consistency — RMSNorm instances |
 | Code quality | 0 ruff errors | ✅ clean |
 | Note | 4 pre-existing pyright errors in Triton files (pointer type mismatches) | ⚠️ accepted |
 
