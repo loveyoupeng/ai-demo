@@ -8,7 +8,6 @@ Triton kernels), the training loop is identical to the PyTorch backend.
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING
 
 import torch

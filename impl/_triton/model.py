@@ -10,7 +10,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-
 from impl._triton.ffn import swiglu_ffn
 from impl._triton.layernorm import rmsnorm
 from impl._triton.transformer import TritonDecoderStack
@@ -101,10 +100,10 @@ class TritonModel(nn.Module):
     def _move_to_device(self, x: torch.Tensor) -> None:
         device = x.device
         dtype = x.dtype if x.dtype.is_floating_point or x.dtype.is_complex else None
-        for name, param in self.named_parameters():
+        for _name, param in self.named_parameters():
             if param.device != device or (dtype is not None and param.dtype != dtype):
                 param.data = param.data.to(device, dtype=param.dtype if dtype is None else dtype)
-        for name, module in self.named_modules():
+        for _name, module in self.named_modules():
             if isinstance(module, nn.Embedding):
                 module.to(device)
         self.stack._move_to_device(x)
@@ -136,7 +135,7 @@ class TritonModel(nn.Module):
 
         return logits
 
-    def _get_param(self, key: str) -> torch.Tensor:
+    def _get_param(self, key: str) -> torch.Tensor:  # noqa: C901 — nested module walk is complex
         """Get a parameter by key name (for save/load roundtrip verification).
 
         Maps key names to actual nn.Parameter attributes.
@@ -250,8 +249,10 @@ class TritonModel(nn.Module):
         result["output.W2"] = self.output_W2.detach().cpu().numpy()
         result["output.W3"] = self.output_W3.detach().cpu().numpy()
 
-        # Output projection
-        result["output_proj_w"] = self.output_proj.weight.detach().cpu().numpy()
+        # Output projection — transpose to NumPy convention (in, out) for
+        # cross-backend compatibility (matches TorchModel.save_as_numpy())
+        output_proj_w_t = self.output_proj.weight.detach().cpu().T.numpy()
+        result["output_proj_w"] = output_proj_w_t
         result["output_proj_b"] = self.output_proj.bias.detach().cpu().numpy()
 
         return result
@@ -298,14 +299,21 @@ class TritonModel(nn.Module):
                 load(f"{expert_prefix}.W2", expert.W2)
                 load(f"{expert_prefix}.W3", expert.W3)
 
-        # Final ln
-        load("final_ln_gamma", self.final_ln_gamma)
+        # Final ln — accept both naming conventions (final_gamma from torch, final_ln_gamma from triton)
+        try:
+            load("final_ln_gamma", self.final_ln_gamma)
+        except KeyError:
+            load("final_gamma", self.final_ln_gamma)
 
         # Output SwiGLU
         load("output.W1", self.output_W1)
         load("output.W2", self.output_W2)
         load("output.W3", self.output_W3)
 
-        # Output projection
-        load("output_proj_w", self.output_proj.weight)
+        # Output projection — transposed from NumPy (in, out) to PyTorch (out, in)
+        def load_output_proj(key, tensor):
+            return tensor.data.copy_(
+                    torch.from_numpy(params[key]).to(tensor.dtype).T
+                )
+        load_output_proj("output_proj_w", self.output_proj.weight)
         load("output_proj_b", self.output_proj.bias)

@@ -88,9 +88,8 @@ class TestTritonModel:
     def test_parity_with_torch(self):
         """Same weights → same output as PyTorchModel (rtol=1e-2 for 2+ layers)."""
         skip_if_no_gpu()
-        from impl._triton.model import TritonModel
-
         import impl._torch.layers as torch_layers
+        from impl._triton.model import TritonModel
 
         B, S, V, D, n_heads, n_experts, ff_dim, k = 2, 8, 64, 16, 4, 4, 32, 2
         n_layers = 2
@@ -199,5 +198,10 @@ class TestTritonModel:
         model.load_from_numpy_dict(params_before)
 
         for key, value in params_before.items():
-            assert torch.allclose(torch.from_numpy(value), model._get_param(key)), \
+            loaded = model._get_param(key)
+            tensor = torch.from_numpy(value)
+            # output_proj_w is saved transposed (D, V) but stored as (V, D)
+            if key == "output_proj_w":
+                tensor = tensor.T
+            assert torch.allclose(tensor, loaded), \
                 f"Parameter {key} changed after roundtrip"

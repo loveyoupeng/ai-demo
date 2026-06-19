@@ -78,8 +78,11 @@ def train_step(
     # 1. Forward pass
     logits = model(batch_input)
 
-    # 2. Compute loss
-    loss = loss_fn(logits, batch_target)
+    # 2. Compute loss — reshape logits (B, S, V) → (B*S, V) and
+    #    targets (B, S) → (B*S) for CrossEntropyLoss compatibility
+    flat_logits = logits.reshape(-1, logits.shape[-1])
+    flat_target = batch_target.reshape(-1)
+    loss = loss_fn(flat_logits, flat_target)
 
     # 3. Backward pass: autograd computes all gradients
     loss.backward()

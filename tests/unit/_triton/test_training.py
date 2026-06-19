@@ -157,7 +157,7 @@ class TestTrainStep:
         train_step(model, x, target, optimizer, loss_fn, max_norm=1.0)
 
         for param in model.parameters():
-            assert param.grad is None, f"Gradient should be None after zero_grad()"
+            assert param.grad is None, "Gradient should be None after zero_grad()"
 
 
 class SimpleModel(nn.Module):
