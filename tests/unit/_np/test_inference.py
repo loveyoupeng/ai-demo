@@ -4,6 +4,8 @@ Tests greedy decoding, sampled decoding, batch processing, top-k filtering,
 and output shape correctness.
 """
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 import numpy as np
