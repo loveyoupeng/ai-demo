@@ -308,6 +308,46 @@ Comprehensive pydocs added to all Triton kernel files explaining HOW and WHY:
 - 4 pre-existing pyright errors in Triton files (accepted, not functional bugs)
 - All documentation follows consistent structure: formula → algorithm → memory → performance → references
 
+## Phase E+: Wave 3 Step 2 — TritonModel Level Naming (Jun 20)
+
+**TritonModel final_ln and output parameter rename:**
+
+Changed `TritonModel` model-level parameters from raw `nn.Parameter` to module instances matching `_torch`:
+
+| Before (raw param) | After (module instance) | _torch equivalent |
+|---|---|---|
+| `self.final_ln_gamma` (nn.Parameter) | `self.final_ln` (RMSNorm) | `self.final_ln` (RMSNorm) |
+| `self.output_W1`/`W2`/`W3` | `self.output` (SwiGLUFFN) | `self.output` (SwiGLUFFN) |
+
+**Before:**
+```python
+# Raw parameters — flat namespace
+self.final_ln_gamma  # shape: (D,)
+self.output_W1       # shape: (D, D*2)
+self.output_W2       # shape: (D*2, D)
+self.output_W3       # shape: (D, D*2)
+```
+
+**After:**
+```python
+# Module instances — hierarchical namespace matching _torch
+self.final_ln       # RMSNorm(D) → final_ln.weight (shape: (D,))
+self.output         # SwiGLUFFN(D, D*2) → output.W1/W2/W3
+```
+
+**Import changes:**
+- Added: `from impl._torch.layers import SwiGLUFFN` (Triton reuses the SwiGLUFFN module)
+- Removed: `from impl._triton.ffn import swiglu_ffn` (no longer called at model level)
+- Removed: `from impl._triton.layernorm import rmsnorm` (no longer called at model level)
+
+**Save/Load:**
+- `save_as_numpy()`: `self.final_ln.weight`, `self.output.W1/W2/W3`
+- `load_from_numpy_dict()`: `self.final_ln.weight`, `self.output.W1/W2/W3`
+- `named_parameters()`: `final_ln.weight`, `output.W1`, `output.W2`, `output.W3`
+
+**Test coverage:**
+- `test_naming_parity.py`: 3 new tests verify TritonModel uses instance-style naming
+
 ## Phase E+: Wave 3 Step 1 — Naming Consistency (Jun 20)
 
 **TransformerBlock RMSNorm instance rename:**

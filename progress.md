@@ -148,11 +148,38 @@
   + Gradient checks updated accordingly
 - Ruff: fixed trailing whitespace in docstrings
 
+## Jun 20 - Phase E+ Wave 3 Step 2 — TritonModel-level naming parity
+
+- impl/_triton/model.py:
+  - final_ln_gamma (nn.Parameter) → final_ln (nn.RMSNorm instance)
+    - forward: self.final_ln(x) instead of rmsnorm(x, self.final_ln_gamma)
+    - _get_param: returns self.final_ln.weight
+    - save_as_numpy: self.final_ln.weight
+    - load_from_numpy_dict: self.final_ln.weight
+  - output_W1/2/3 (raw nn.Parameters) → output (SwiGLUFFN instance)
+    - forward: self.output(x) instead of swiglu_ffn(x, self.output_W1, ...)
+    - _get_param: returns self.output.W1/W2/W3
+    - save_as_numpy: self.output.W1/W2/W3
+    - load_from_numpy_dict: self.output.W1/W2/W3
+    - reset_parameters: calls self.output.reset_parameters()
+  - Removed rmsnorm and swiglu_ffn imports (no longer needed in model-level)
+  - Added SwiGLUFFN import from _torch.layers
+
+- tests/unit/_triton/test_model.py:
+  - Copy: final_ln_gamma.data → final_ln.weight.data
+  - Copy: output_W1/W2/W3.data → output.W1/W2/W3.data
+
+- tests/unit/_triton/test_naming_parity.py: new file (3 parity tests)
+  - Tests that TritonModel final_ln uses instance-style naming (no _gamma)
+  - Tests that TritonModel output uses instance-style naming (output.W1 not output_W1)
+  - Tests that TritonModel output_proj uses nn.Linear-style naming (.weight/.bias)
+
 ## Jun 20 - Phase E+ Wave 3 Next Steps
 
-- Wave 3 Step 2: Update TritonModel-level naming (final_ln_gamma → final_lnorm instance?)
-- Wave 3 Step 3: Cross-backend named_parameters() output comparison (parity test keys)
-- Wave 3 Step 4: Naming consistency in PyTorch backend (if any inconsistencies exist)
+- Wave 3 Step 3: MHA key naming (Wq.weight.bic vs Wq in Triton) — MHA modules don't use nn.Module wrapper in Triton, just raw tensor attributes
+- Wave 3 Step 4: MoE router key naming (router.weight/bi as vs W_router/b_router)
+- Wave 3 Step 5: Verify all named_parameters() keys match between Triton and Torch backends
+- Wave 3 Step 6: Remove any hardcoded key constants if now redundant
 
 - impl/_triton/activation.py: verified already well-documented (no changes)
 - impl/_triton/layernorm.py: full pydocs (RMSNorm formula, memory access, BLOCK_SIZE rationale, numerical stability, tiled matrix operations)
@@ -165,9 +192,11 @@
 
 | Module | Tests | Status |
 |--------|-------|--------|
-| shared/ + tests/ (unit) | 521 | ✅ all pass |
+| shared/ + tests/ (unit) | 521 → 525 | ✅ all pass (+4 new tests) |
 | tests/cross_backend/ | 21 | ✅ all pass |
-| **Total** | **542** | **✅ all pass** |
+| **Total** | **542 → 545** | **✅ all pass (+3 naming parity)** |
+| Code quality | 0 ruff errors | ✅ clean |
+| Note | 4 pre-existing pyright errors in Triton files (pointer type mismatches) | ⚠️ accepted |
 | Code quality | 0 ruff errors | ✅ clean |
 | Note | 4 pre-existing pyright errors in Triton files (accepted, not functional bugs) | ⚠️ accepted |
 
@@ -178,6 +207,5 @@
 | `c3d2ad7` | Wave 1 magic string elimination + Wave 2 Triton full docs |
 | `6dbb011` | Fix: add from __future__ import annotations to test_inference.py |
 | `5f6cf4b` | Wave 3 Step 1: Triton naming consistency — RMSNorm instances |
-| Code quality | 0 ruff errors | ✅ clean |
-| Note | 4 pre-existing pyright errors in Triton files (pointer type mismatches) | ⚠️ accepted |
+| `5ed9d0f` | Wave 3 Step 2: TritonModel-level naming parity (final_ln, output SwiGLU) |
 
