@@ -366,6 +366,7 @@ def _kernel_name_kernel(...):
 | Wave 1 | `test_constants.py` — verify no collisions | All 538 pass, no raw strings via grep |
 | Wave 2 | Performance benchmarks (optional) | All 538 pass, docstrings present |
 | Wave 3 | Parity tests (update existing) | All 538 pass, 3-way parity maintained |
+| Wave 3+ | `test_3way_equivalence.py` — cross-backend training/inference matrix | 9/9 cross-load cells pass |
 | Wave 4 | None (cleanup) | All 538 pass, ruff=0 errors, pyright check |
 | Wave 5 | None (docs) | All 538 pass, docs reflect code |
 
@@ -405,10 +406,14 @@ pytest tests/cross_backend/ -q
 
 This phase is complete when ALL of the following are true:
 
-- [ ] **538 tests pass** — unchanged test count, all passing
+- [ ] **538 tests pass** — unchanged test count, all passing (plus new tests)
 - [ ] **Zero magic strings** — `git grep` shows no hardcoded parameter names in `impl/`
 - [ ] **All Triton kernels documented** — every `@triton.jit` function has comprehensive docstring
 - [ ] **Triton naming matches NumPy/PyTorch** — same attribute names for equivalent components
+- [ ] **Cross-backend training/inference equivalence** — `test_3way_equivalence.py` passes all 9 cells
+  - Any trained model can be loaded + inferred by any backend
+  - NumPy-train → NumPy-infer is the truth benchmark
+  - Exact greedy token match across all 9 cross-load combinations
 - [ ] **ruff check passes** — zero errors in `impl/`
 - [ ] **pyright check passes** — zero errors (or documented expected errors)
 - [ ] **docs/design.md updated** — reflects current state, includes naming guide
@@ -445,6 +450,411 @@ This phase is complete when ALL of the following are true:
 
 ---
 
+## 8.5 Wave 3+ (New): 3-Way Cross-Backend Equivalence (Acceptance Gate)
+
+**Status:** Not started — added as acceptance criterion for Wave 3
+
+**Goal:** Verify that after all naming consistency work, any backend's trained model can be loaded and used for inference by all three backends with identical outputs. NumPy-train → NumPy-inference is the truth benchmark.
+
+### 8.5.1 Design: Borrowing from Phase C+
+
+Phase C+ established the pattern via `scripts/verify_equivalence.py`:
+- Train both backends with identical config + seed
+- Save both checkpoints (`.npz` + `config.json`)
+- Compare weights, greedy inference, distribution output
+- 6 scenarios testing small/medium models, MoE, GQA, multi-layer
+
+Phase E+ extends this to **3 backends** with a **cross-load matrix**: not just "train numpy → inference numpy", but "train numpy → inference torch", "train triton → inference numpy", etc.
+
+### 8.5.2 The Cross-Backend Training Matrix
+
+Each backend trains a model for 10-20 steps, then saves. We get 3 checkpoints:
+
+```
+numpy_ckpt.npz           — trained with NumPyModel
+torch_ckpt.npz           — trained with TorchModel
+triton_ckpt.npz          — trained with TritonModel
+config.json              — shared config
+```
+
+Each checkpoint contains the same key structure as `NumPyModel.get_all_parameters()`:
+```python
+{
+    # Embedding
+    "model.embedding": ndarray[vocab, D],
+    # Stack TransformerBlocks
+    "model.blocks.0.ln1_gamma": ndarray[D],
+    "model.blocks.0.mha.Wq": ndarray[D, D],
+    "model.blocks.0.mha.bq": ndarray[D],
+    ...
+    # Final norm
+    "model.final_ln": ndarray[D],
+    # Output SwiGLU
+    "model.output.W1": ndarray[D, ff_dim],
+    ...
+    # Output projection
+    "model.output_proj_w": ndarray[D, vocab],
+    "model.output_proj_b": ndarray[vocab],
+}
+```
+
+Every backend's save method must produce keys matching this exact schema.
+
+### 8.5.3 The Cross-Backend Inference Matrix
+
+After training, we build a **9×3 cross-load** matrix: for each of 3 training backends, we test loading + inference with all 3 inference backends:
+
+```
+Training → Inference          NumPy    Torch    Triton
+─────────────────────────────────────────────────────────
+NumPy trained    → NumPy infer      ●      ○       ○
+NumPy trained    → Torch infer      ○      ●       ○
+NumPy trained    → Triton infer     ○      ○       ●
+
+Torch trained    → NumPy infer      ○      ○       ○
+Torch trained    → Torch infer      ○      ○       ○
+Torch trained    → Triton infer     ○      ○       ○
+
+Triton trained   → NumPy infer      ○      ○       ○
+Triton trained   → Torch infer      ○      ○       ○
+Triton trained   → Triton infer     ○      ○       ●
+```
+
+### 8.5.4 Acceptance Criteria
+
+| Criterion | Rule | Tolerance |
+|-----------|------|-----------|
+| Self-load self-infer | Backend trains → loads → infers produces same logits | `rtol=1e-5, atol=1e-5` |
+| Cross-load same inference | Checkpoint trained with backend A loaded by backend B produces identical logits | `rtol=1e-4, atol=1e-4` |
+| Greedy decode | All 9 combinations produce exactly same token IDs | **Exact match** |
+| NumPy benchmark | NumPy-infer on NumPy-ckpt is the reference truth | — |
+| Weight equivalence | All 3 trained checkpoints produce identical weights after training | `rtol=1e-2, atol=1e-2` |
+
+Each cell in the 9×3 matrix is a test. A "●" cell (self-serve) has no cross-load — it's the baseline that self-training self-loading should always work. The "○" cells are the actual cross-load tests.
+
+**Pass condition:** All 9 matrix cells must pass with the tolerances above.
+
+### 8.5.5 Prompt Design
+
+We test with two input prompts to ensure both short and longer sequences work:
+
+```python
+# Prompt 1: Short (4 tokens)
+PROMPT_SHORT = [65, 97, 109, 101]  # "ame"
+
+# Prompt 2: Longer (32 tokens)
+PROMPT_LONG = list(range(32))  # 0,1,2,...,31 — covers broader vocab
+```
+
+Both backends generate `max_new_tokens=10` tokens sequentially (autoregressive greedy).
+For each prompt:
+1. Run inference on the loaded model
+2. Collect generated token IDs + final logits (last token distribution)
+3. Compare against the NumPy-inference baseline
+
+### 8.5.6 Test Structure (Unit Test)
+
+Create `tests/cross_backend/test_3way_equivalence.py`:
+
+```python
+"""3-way cross-backend training + inference equivalence test.
+
+Acceptance criterion: any backend's trained model can be loaded by any
+inference backend and produce identical outputs.
+"""
+
+import pytest
+import numpy as np
+import torch
+
+from impl._np.model import NumPyModel
+from impl._torch.layers import TorchModel
+from impl._triton.model import TritonModel
+
+CONFIG = {
+    "vocab_size": 256,
+    "context_length": 64,
+    "embed_dim": 32,
+    "n_layers": 2,
+    "n_heads": 4,
+    "n_groups": 4,
+    "rope_dim": 0,
+    "n_experts": 2,
+    "top_k": 1,
+    "expert_dim": 0,
+    "max_length": 64,
+    "seed": 42,
+}
+
+PROMPTS = {
+    "short": [65, 97, 109, 101],
+    "long": list(range(32)),
+}
+
+
+def _train_and_save(model_class, config, steps=15) -> dict:
+    """Train a model for `steps` steps and return its params.
+
+    Uses synthetic data for speed. Returns the model's save_as_numpy()
+    dict (or get_all_parameters() for NumPy).
+    """
+    if model_class is NumPyModel:
+        model = NumPyModel(**config)
+        for _ in range(steps):
+            x = np.random.randint(0, config["vocab_size"], (2, config["context_length"]))
+            model.forward(x)
+        return model.get_all_parameters()
+    else:
+        import torch
+        model = model_class(**config)
+        for _ in range(steps):
+            x = torch.randint(0, config["vocab_size"], (2, config["context_length"]))
+            model(x)
+        return model.save_as_numpy()
+
+
+def _create_backend(model_class, ckpt_params):
+    """Create a fresh model of backend type and load checkpoint params."""
+    model = model_class(**{k: v for k, v in CONFIG.items() if k not in ("seed",)})
+    if model_class is NumPyModel:
+        # NumPyModel doesn't have load_from_numpy_dict — copy params manually
+        for key in ckpt_params:
+            _set_attr_from_path(model, key, ckpt_params[key])
+    else:
+        model.load_from_numpy_dict(ckpt_params)
+    return model
+
+
+def _set_attr_from_path(model, path: str, value: np.ndarray):
+    """Set a nested attribute on model from dot-separated path."""
+    parts = path.split(".")
+    obj = model
+    for part in parts[:-1]:
+        obj = getattr(obj, part)
+    setattr(obj, parts[-1], value)
+
+
+def _load_and_infer(ckpt_params, model_class, prompt, max_tokens=10):
+    """Load checkpoint into model_class, run greedy inference on prompt.
+
+    Returns:
+        token_ids: list[int] — generated token sequence
+        final_logits: np.ndarray — last token's logits for distribution comparison
+    """
+    model = _create_backend(model_class, ckpt_params)
+
+    generated = prompt.copy()
+    if model_class is NumPyModel:
+        # NumPy: manual sequential greedy inference
+        for _ in range(max_tokens):
+            x = np.array([generated[-CONFIG["context_length"]:]], dtype=np.int32)
+            logits = model.forward(x)
+            next_id = int(np.argmax(logits[0, -1]))
+            generated.append(next_id)
+        # Get final logits for distribution comparison
+        x = np.array([generated[-CONFIG["context_length"]:]], dtype=np.int32)
+        final_logits = model.forward(x)[0, -1]
+    else:
+        # Torch/Triton: sequential greedy inference
+        import torch
+        x = torch.tensor([generated[-CONFIG["context_length"]:]], dtype=torch.long)
+        for _ in range(max_tokens):
+            with torch.no_grad():
+                out = model(x)  # (1, 1, vocab)
+            next_id = int(torch.argmax(out[0, -1]).item())
+            x = torch.tensor([[next_id]], dtype=torch.long)
+            generated.append(next_id)
+        # Get final logits for distribution comparison
+        with torch.no_grad():
+            final_out = model(x)
+            final_logits = final_out[0, -1].cpu().numpy()
+
+    return generated, final_logits
+
+
+@pytest.mark.gpu
+class TestCrossBackendEquivalence:
+    """Train with one backend, load+infer with another. All combos must match NumPy baseline."""
+
+    @pytest.fixture(scope="class")
+    def checkpoints(self):
+        """Train models with all 3 backends."""
+        ckpts = {}
+        for name, cls in [("numpy", NumPyModel), ("torch", TorchModel), ("triton", TritonModel)]:
+            ckpts[name] = _train_and_save(cls, CONFIG)
+        return ckpts
+
+    def _compare(self, actual: list[int], expected: list[int]) -> bool:
+        return actual == expected
+
+    # ─── Self-load self-infer (● cells — always true if load works) ────
+    def test_numpy_self(self, checkpoints):
+        prompt = PROMPTS["short"]
+        # Baseline
+        base_tokens, _ = _load_and_infer(checkpoints["numpy"], NumPyModel, prompt, 10)
+        # Same
+        same_tokens, _ = _load_and_infer(checkpoints["numpy"], NumPyModel, prompt, 10)
+        assert self._compare(base_tokens, same_tokens), "Self-serve NumPy failed"
+
+    def test_torch_self(self, checkpoints):
+        prompt = PROMPTS["short"]
+        base_tokens, _ = _load_and_infer(checkpoints["torch"], TorchModel, prompt, 10)
+        same_tokens, _ = _load_and_infer(checkpoints["torch"], TorchModel, prompt, 10)
+        assert self._compare(base_tokens, same_tokens), "Self-serve Torch failed"
+
+    def test_triton_self(self, checkpoints):
+        prompt = PROMPTS["short"]
+        base_tokens, _ = _load_and_infer(checkpoints["triton"], TritonModel, prompt, 10)
+        same_tokens, _ = _load_and_infer(checkpoints["triton"], TritonModel, prompt, 10)
+        assert self._compare(base_tokens, same_tokens), "Self-serve Triton failed"
+
+    # ─── Cross-load self-infer (○ cells — cross-backend load) ────────────
+    def test_numpy_ckpt_to_torch(self, checkpoints):
+        """NumPy-trained checkpoint loaded by Torch → match NumPy baseline."""
+        prompt = PROMPTS["short"]
+        base_tokens, _ = _load_and_infer(checkpoints["numpy"], NumPyModel, prompt, 10)
+        cross_tokens, _ = _load_and_infer(checkpoints["numpy"], TorchModel, prompt, 10)
+        assert self._compare(base_tokens, cross_tokens), (
+            f"Benchmark: {base_tokens}\nCross:     {cross_tokens}"
+        )
+
+    def test_numpy_ckpt_to_triton(self, checkpoints):
+        """NumPy-trained checkpoint loaded by Triton → match NumPy baseline."""
+        prompt = PROMPTS["short"]
+        base_tokens, _ = _load_and_infer(checkpoints["numpy"], NumPyModel, prompt, 10)
+        cross_tokens, _ = _load_and_infer(checkpoints["numpy"], TritonModel, prompt, 10)
+        assert self._compare(base_tokens, cross_tokens), (
+            f"Benchmark: {base_tokens}\nCross:     {cross_tokens}"
+        )
+
+    def test_torch_ckpt_to_numpy(self, checkpoints):
+        """Torch-trained checkpoint loaded by NumPy → match NumPy baseline."""
+        prompt = PROMPTS["short"]
+        base_tokens, _ = _load_and_infer(checkpoints["torch"], NumPyModel, prompt, 10)
+        cross_tokens, _ = _load_and_infer(checkpoints["torch"], NumPyModel, prompt, 10)
+        assert self._compare(base_tokens, cross_tokens), (
+            f"Benchmark: {base_tokens}\nCross:     {cross_tokens}"
+        )
+
+    def test_torch_ckpt_to_triton(self, checkpoints):
+        """Torch-trained checkpoint loaded by Triton → match NumPy baseline."""
+        prompt = PROMPTS["short"]
+        base_tokens, _ = _load_and_infer(checkpoints["torch"], NumPyModel, prompt, 10)
+        cross_tokens, _ = _load_and_infer(checkpoints["torch"], TritonModel, prompt, 10)
+        assert self._compare(base_tokens, cross_tokens), (
+            f"Benchmark: {base_tokens}\nCross:     {cross_tokens}"
+        )
+
+    def test_triton_ckpt_to_numpy(self, checkpoints):
+        """Triton-trained checkpoint loaded by NumPy → match NumPy baseline."""
+        prompt = PROMPTS["short"]
+        base_tokens, _ = _load_and_infer(checkpoints["triton"], NumPyModel, prompt, 10)
+        cross_tokens, _ = _load_and_infer(checkpoints["triton"], NumPyModel, prompt, 10)
+        assert self._compare(base_tokens, cross_tokens), (
+            f"Benchmark: {base_tokens}\nCross:     {cross_tokens}"
+        )
+
+    def test_triton_ckpt_to_torch(self, checkpoints):
+        """Triton-trained checkpoint loaded by Torch → match NumPy baseline."""
+        prompt = PROMPTS["short"]
+        base_tokens, _ = _load_and_infer(checkpoints["triton"], NumPyModel, prompt, 10)
+        cross_tokens, _ = _load_and_infer(checkpoints["triton"], TorchModel, prompt, 10)
+        assert self._compare(base_tokens, cross_tokens), (
+            f"Benchmark: {base_tokens}\nCross:     {cross_tokens}"
+        )
+
+    # ─── Long prompt variant ──────────────────────────────────────────────
+    def test_long_prompt_cross(self, checkpoints):
+        """Run the full 9×3 matrix on a longer prompt."""
+        prompt = PROMPTS["long"]
+        ref_tokens, _ = _load_and_infer(checkpoints["numpy"], NumPyModel, prompt, 10)
+
+        load_map = {
+            ("numpy", "torch"): (checkpoints["numpy"], TorchModel),
+            ("numpy", "triton"): (checkpoints["numpy"], TritonModel),
+            ("torch", "numpy"): (checkpoints["torch"], NumPyModel),
+            ("torch", "triton"): (checkpoints["torch"], TritonModel),
+            ("triton", "numpy"): (checkpoints["triton"], NumPyModel),
+            ("triton", "torch"): (checkpoints["triton"], TorchModel),
+        }
+        for combo, (ckpt, cls) in load_map.items():
+            gen_tokens, _ = _load_and_infer(ckpt, cls, prompt, 10)
+            assert self._compare(ref_tokens, gen_tokens), (
+                f"Long prompt failed: {combo[0]}→{combo[1]}\n"
+                f"Ref: {ref_tokens[:20]}\nGen: {gen_tokens[:20]}"
+            )
+
+    # ─── Weight equivalence across backends ────────────────────────────────
+    def test_all_trainings_produce_same_weights(self, checkpoints):
+        """All trained checkpoints must have weights within tolerance."""
+        from tests.cross_backend.test_triton_parity import check_weight_parity as assert_close
+
+        np_vs_torch = assert_close(checkpoints["numpy"], checkpoints["torch"], rtol=1e-2, atol=1e-2)
+        assert np_vs_torch, "NumPy and Torch weights diverged"
+
+        np_vs_triton = assert_close(checkpoints["numpy"], checkpoints["triton"], rtol=1e-2, atol=1e-2)
+        assert np_vs_triton, "NumPy and Triton weights diverged"
+
+        torch_vs_triton = assert_close(checkpoints["torch"], checkpoints["triton"], rtol=1e-2, atol=1e-2)
+        assert torch_vs_triton, "Torch and Triton weights diverged"
+```
+
+### 8.5.7 How to Implement
+
+**Step 1:** Create `tests/cross_backend/test_3way_equivalence.py` using the template above.
+This test will initially use placeholder fixtures — it should compile but may need minor adjustments for each backend's exact API:
+- `TorchModel.load_from_numpy_dict(params)` — already exists
+- `TritonModel.load_from_numpy_dict(params)` — already exists
+- `NumPyModel` doesn't have `load_from_numpy_dict` — need to add it (or use a different path)
+
+**Step 2:** Fix any missing methods:
+- If `NumPyModel` lacks `load_from_numpy_dict()`, add it (should exist since NumPy saves itself already)
+- Verify that each `load_from_numpy_dict()` accepts the output of the other backend's save method
+- Ensure config keys between backends match (e.g., `expert_dim` vs hidden_dim naming)
+
+**Step 3:** Run the test:
+```bash
+# All tests (uses GPU for cross-load matrix)
+uv run pytest tests/cross_backend/test_3way_equivalence.py -v
+
+# Quick verification: only the cross-load tests
+uv run pytest tests/cross_backend/test_3way_equivalence.py -v -k "not self and not test_all_trainings"
+```
+
+### 8.5.8 Acceptance Gate
+
+This test is the **acceptance gate** for Wave 3. No other Wave 3 work can proceed until:
+1. The test is written (may initially have failing tests as placeholders)
+2. After fixing all MHA/MoE naming issues, the test passes for all 9 cross-load cells
+3. The long prompt variant also passes
+4. Weight equivalence test passes across all 3 backends
+
+### 8.5.9 Integration with verify_equivalence.py
+
+The `scripts/verify_equivalence.py` script should be extended to support a third backend:
+
+```python
+# Current: 2 backends (numpy, torch)
+# New: 3 backends (numpy, torch, triton)
+
+backends = {
+    "numpy": NumPyModel,
+    "torch": TorchModel,
+    # "triton": TritonModel,  ← add as optional GPU backend
+}
+```
+
+The new `--backend` flags allow specifying which backends to test:
+```bash
+# Train + compare all 3 backends
+uv run python -m scripts.verify_equivalence --backend numpy --backend torch --backend triton
+
+# Quick cross-load test only
+uv run python -m scripts.verify_equivalence --backend numpy --backend torch --cross-load
+```
+
+---
+
 ## 9. Estimated Effort
 
 | Wave | Commits | Time | Complexity |
@@ -453,8 +863,9 @@ This phase is complete when ALL of the following are true:
 | Wave 1 | 2-3 | 2-3 hours | Medium |
 | Wave 2 | 3-4 | 3-4 hours | High (detailed) |
 | Wave 3 | 2-3 | 2-3 hours | Medium |
+| Wave 3+ | 1-2 | 2-3 hours | High (acceptance gate) |
 | Wave 4 | 1-2 | 1-2 hours | Low |
 | Wave 5 | 1 | 1 hour | Low |
-| **Total** | **9-13** | **10-13 hours** | **Medium** |
+| **Total** | **10-15** | **12-16 hours** | **Medium** |
 
-**Total:** ~10-13 commits, ~10-13 hours of focused work.
+**Total:** ~10-15 commits, ~12-16 hours of focused work.

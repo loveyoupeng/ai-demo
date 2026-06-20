@@ -114,7 +114,7 @@ class TestTransformerBlockWiring:
             assert torch.isfinite(p.grad).all(), f"NaN gradient in {name}"
 
         # Attention gradient should be non-trivial
-        attn_grad = block.mha.Wq.grad
+        attn_grad = block.mha.Wq.weight.grad
         assert attn_grad is not None
         assert attn_grad.norm() > 1e-6, "Attention gradient should be non-trivial"
 
@@ -233,10 +233,10 @@ class TestTransformerBlockWiring:
             assert torch.isfinite(p.grad).all(), f"NaN gradient in {name}"
 
         # Specific checks for key parameters
-        assert block.mha.Wq.grad is not None
-        assert block.mha.Wk.grad is not None
-        assert block.mha.Wv.grad is not None
-        assert block.mha.Wo.grad is not None
+        assert block.mha.Wq.weight.grad is not None
+        assert block.mha.Wk.weight.grad is not None
+        assert block.mha.Wv.weight.grad is not None
+        assert block.mha.Wo.weight.grad is not None
         assert block.ln1.weight.grad is not None
         assert block.ln2.weight.grad is not None
         assert block.gate1.grad is not None

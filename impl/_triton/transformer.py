@@ -17,6 +17,7 @@ import torch.nn as nn
 
 from impl._triton.attn import scaled_dot_product_attention
 from impl._triton.ffn import swiglu_ffn
+from impl._torch.layers import Linear
 
 
 class TritonMultiHeadAttention(nn.Module):
@@ -28,21 +29,17 @@ class TritonMultiHeadAttention(nn.Module):
         self.n_heads = n_heads
         self.head_dim = embed_dim // n_heads
         assert embed_dim % n_heads == 0, "embed_dim must be divisible by n_heads"
-        self.Wq = nn.Parameter(torch.empty(embed_dim, embed_dim))
-        self.bq = nn.Parameter(torch.zeros(embed_dim))
-        self.Wk = nn.Parameter(torch.empty(embed_dim, embed_dim))
-        self.bk = nn.Parameter(torch.zeros(embed_dim))
-        self.Wv = nn.Parameter(torch.empty(embed_dim, embed_dim))
-        self.bv = nn.Parameter(torch.zeros(embed_dim))
-        self.Wo = nn.Parameter(torch.empty(embed_dim, embed_dim))
-        self.bo = nn.Parameter(torch.zeros(embed_dim))
+        self.Wq = Linear(embed_dim, embed_dim, bias=True)
+        self.Wk = Linear(embed_dim, embed_dim, bias=True)
+        self.Wv = Linear(embed_dim, embed_dim, bias=True)
+        self.Wo = Linear(embed_dim, embed_dim, bias=True)
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        nn.init.kaiming_uniform_(self.Wq, a=0.01)
-        nn.init.kaiming_uniform_(self.Wk, a=0.01)
-        nn.init.kaiming_uniform_(self.Wv, a=0.01)
-        nn.init.kaiming_uniform_(self.Wo, a=0.01)
+        nn.init.kaiming_uniform_(self.Wq.weight, a=0.01)
+        nn.init.kaiming_uniform_(self.Wk.weight, a=0.01)
+        nn.init.kaiming_uniform_(self.Wv.weight, a=0.01)
+        nn.init.kaiming_uniform_(self.Wo.weight, a=0.01)
 
     def _move_to_device(self, x: torch.Tensor) -> None:
         """Move parameters to the same device and dtype as x on first forward pass."""
@@ -50,18 +47,21 @@ class TritonMultiHeadAttention(nn.Module):
             return
         device = x.device
         dtype = x.dtype if x.dtype.is_floating_point or x.dtype.is_complex else None
-        for param in [self.Wq, self.bq, self.Wk, self.bk, self.Wv, self.bv, self.Wo, self.bo]:
-            if param.device != device or (dtype is not None and param.dtype != dtype):
-                param.data = param.data.to(device, dtype or param.dtype)
+        for param in [self.Wq, self.Wk, self.Wv, self.Wo]:
+            if param is not None:
+                if dtype is not None:
+                    param = param.to(device, dtype)
+                else:
+                    param = param.to(device)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self._move_to_device(x)
         B, S, D = x.shape
 
         # Q, K, V projections: [B, S, D] -> [B, S, embed_dim]
-        q = x @ self.Wq + self.bq  # [B, S, D]
-        k = x @ self.Wk + self.bk  # [B, S, D]
-        v = x @ self.Wv + self.bv  # [B, S, D]
+        q = self.Wq(x)  # [B, S, D]
+        k = self.Wk(x)  # [B, S, D]
+        v = self.Wv(x)  # [B, S, D]
 
         # Reshape for MHA: [B, S, H, head_dim] -> [B, H, S, head_dim]
         q = q.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
@@ -75,7 +75,7 @@ class TritonMultiHeadAttention(nn.Module):
         attn_out = attn_out.transpose(1, 2).contiguous().view(B, S, D)
 
         # Output projection: [B, S, D] -> [B, S, D]
-        out = attn_out @ self.Wo + self.bo  # [B, S, D]
+        out = self.Wo(attn_out)  # [B, S, D]
         return out
 
 

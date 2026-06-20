@@ -126,15 +126,15 @@ class TestTritonModel:
             tb = triton_model.stack.layers[i]
             tblock = torch_model.stack.layers[i]
 
-            # MHA weights
-            tb.mha.Wq.data.copy_(tblock.mha.Wq.weight.data.t())
-            tb.mha.bq.data.copy_(tblock.mha.Wq.bias.data)
-            tb.mha.Wk.data.copy_(tblock.mha.Wk.weight.data.t())
-            tb.mha.bk.data.copy_(tblock.mha.Wk.bias.data)
-            tb.mha.Wv.data.copy_(tblock.mha.Wv.weight.data.t())
-            tb.mha.bv.data.copy_(tblock.mha.Wv.bias.data)
-            tb.mha.Wo.data.copy_(tblock.mha.Wo.weight.data.t())
-            tb.mha.bo.data.copy_(tblock.mha.Wo.bias.data)
+            # MHA weights — now both backends use Linear wrappers so shapes match
+            tb.mha.Wq.weight.data.copy_(tblock.mha.Wq.weight.data)
+            tb.mha.Wq.bias.data.copy_(tblock.mha.Wq.bias.data)
+            tb.mha.Wk.weight.data.copy_(tblock.mha.Wk.weight.data)
+            tb.mha.Wk.bias.data.copy_(tblock.mha.Wk.bias.data)
+            tb.mha.Wv.weight.data.copy_(tblock.mha.Wv.weight.data)
+            tb.mha.Wv.bias.data.copy_(tblock.mha.Wv.bias.data)
+            tb.mha.Wo.weight.data.copy_(tblock.mha.Wo.weight.data)
+            tb.mha.Wo.bias.data.copy_(tblock.mha.Wo.bias.data)
 
             # MoE router and expert weights
             tb.moe.W_router.data.copy_(tblock.moe.router.weight.data.t())
