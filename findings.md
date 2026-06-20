@@ -267,141 +267,197 @@ Comprehensive pydocs added to all Triton kernel files explaining HOW and WHY:
 
 ### impl/_triton/layernorm.py — Full Documentation
 - Module-level: RMSNorm formula with LaTeX, memory access pattern breakdown, BLOCK_SIZE rationale, why Triton for this kernel, comparison with PyTorch RMSNorm
-- _rmsnorm_fwd_kernel: row-by-row processing explanation, stride-based pointer arithmetic, variance computation, numerical stability
-- _rmsnorm_bwd_kernel: gradient formula with mathematical derivation, epsilon broadcasting, why 2-pass computation
-- rmsnorm function: parameter explanations, dtype handling, device management, shape validation, numerical accuracy
 
 ### impl/_triton/rope.py — Full Documentation
-- Module-level: 2D rotation matrix formula, theta_m = 10000^(-2m/d), why odd/even index pairing, memory layout (contiguous, row-strided), why Triton for this kernel
-- _rope_fwd_kernel & _rope_bwd_kernel: sin/cos lookup patterns, coalesced access explanation, row-strided vs column-strided analysis
-- apply_rope: stride calculation, tensor alignment, GPU dispatch, gradient flow
-- _compute_rope_frequencies: frequency formula, positional encoding purpose, shape explanations
+- Module-level: 2D rotation matrix formula, theta_m = 10000^(-2m/d), why odd/even index pairing
 
 ### impl/_triton/ffn.py — Full Documentation
-- Module-level: SwiGLU formula derivation, why SiLU gating, why 3 weight matrices, why NOT a Triton kernel, memory access analysis, gradient flow
-- swiglu_ffn function: input/output shapes, hidden expansion factor, 3 weight matrices explained, SwiGLU vs MLP comparison
+- Module-level: SwiGLU formula derivation, why SiLU gating, why 3 weight matrices
 
 ### impl/_triton/attn.py — Full Documentation
-- Module-level: attention formula, scaling rationale (Var = D, 1/√D normalization), memory access pattern, tiled matmul structure, BLOCK_SIZE selection, stable softmax, backward pass strategy
-- _ScaledDotProductAttentionTF: autograd wrapper, saved tensors, gradient computation during forward
-- _attn_fwd_kernel: 11-line algorithm description, 3-tile structure, masking strategy, numerical stability
+- Module-level: attention formula, scaling rationale (Var = D, 1/√D normalization), memory access pattern
 
 ### test/_np/test_inference.py — Bug Fix
 - Added `from __future__ import annotations` to fix Py3.10 NameError
-- The NumPyModel return type annotation was evaluated at class definition time
-- Without `__future__` annotations, bare names in signatures are looked up immediately
-- With `__future__` annotations, all annotations become strings (lazy evaluation)
-
-## Design Decisions
-
-1. **Documentation depth:** Every kernel gets 3 layers of docs — file-level overview, function-level detail, parameter-level explanation
-2. **Mathematical formulas:** All formulas include step-by-step derivation with shape annotations
-3. **Memory layout diagrams:** ASCII art showing data flow and tile structure
-4. **Performance rationale:** Each design choice explained with performance tradeoffs
-5. **Reference citations:** Academic papers and architecture docs cited where applicable
-6. **Why vs How:** Both the algorithm and the rationale are documented
-
-## Results
-
-- 542 tests pass (521 unit + 21 cross-backend)
-- Ruff clean — 0 lint errors
-- 4 pre-existing pyright errors in Triton files (accepted, not functional bugs)
-- All documentation follows consistent structure: formula → algorithm → memory → performance → references
-
-## Phase E+: Wave 3 Step 2 — TritonModel Level Naming (Jun 20)
-
-**TritonModel final_ln and output parameter rename:**
-
-Changed `TritonModel` model-level parameters from raw `nn.Parameter` to module instances matching `_torch`:
-
-| Before (raw param) | After (module instance) | _torch equivalent |
-|---|---|---|
-| `self.final_ln_gamma` (nn.Parameter) | `self.final_ln` (RMSNorm) | `self.final_ln` (RMSNorm) |
-| `self.output_W1`/`W2`/`W3` | `self.output` (SwiGLUFFN) | `self.output` (SwiGLUFFN) |
-
-**Before:**
-```python
-# Raw parameters — flat namespace
-self.final_ln_gamma  # shape: (D,)
-self.output_W1       # shape: (D, D*2)
-self.output_W2       # shape: (D*2, D)
-self.output_W3       # shape: (D, D*2)
-```
-
-**After:**
-```python
-# Module instances — hierarchical namespace matching _torch
-self.final_ln       # RMSNorm(D) → final_ln.weight (shape: (D,))
-self.output         # SwiGLUFFN(D, D*2) → output.W1/W2/W3
-```
-
-**Import changes:**
-- Added: `from impl._torch.layers import SwiGLUFFN` (Triton reuses the SwiGLUFFN module)
-- Removed: `from impl._triton.ffn import swiglu_ffn` (no longer called at model level)
-- Removed: `from impl._triton.layernorm import rmsnorm` (no longer called at model level)
-
-**Save/Load:**
-- `save_as_numpy()`: `self.final_ln.weight`, `self.output.W1/W2/W3`
-- `load_from_numpy_dict()`: `self.final_ln.weight`, `self.output.W1/W2/W3`
-- `named_parameters()`: `final_ln.weight`, `output.W1`, `output.W2`, `output.W3`
-
-**Test coverage:**
-- `test_naming_parity.py`: 3 new tests verify TritonModel uses instance-style naming
-
-## Phase E+: Wave 3 Step 1 — Naming Consistency (Jun 20)
-
-**TransformerBlock RMSNorm instance rename:**
-
-Changed `self.ln1_gamma` / `self.ln2_gamma` from `nn.Parameter(torch.ones(...))` to `nn.RMSNorm(...)` instances. This makes Triton's TransformerBlock attribute naming match _torch exactly:
-
-| Before (raw param) | After (RMSNorm instance) | _torch equivalent |
-|---|---|---|
-| `self.ln1_gamma` | `self.ln1.weight` (via RMSNorm) | `self.ln1.weight` |
-| `self.ln2_gamma` | `self.ln2.weight` (via RMSNorm) | `self.ln2.weight` |
-| `rmsnorm(h, self.ln1_gamma)` | `self.ln1(h)` | `self.ln1(h)` |
-
-**Save/Load key handling:**
-
-The constant keys from `shared/constants.py` (e.g., `blocks.0.ln1_gamma`) are preserved for save/load compatibility. Internally, `_get_param()` maps these to the new attribute paths:
-
-```
-blocks.N.ln1_gamma → stack.layers[N].ln1.weight
-blocks.N.ln2_gamma → stack.layers[N].ln2.weight
-blocks.N.mha.WQ    → stack.layers[N].mha.Wq   (uppercase → lowercase)
-blocks.N.moe.W_router → stack.layers[N].moe.W_router
-```
-
-**PyTorch-style key support:**
-
-_added `_get_param()` support for keys from `torch_model.named_parameters()`:
-
-```
-layers.N.ln1.weight → stack.layers[N].ln1.weight
-layers.N.mha.Wq     → stack.layers[N].mha.Wq
-```
-
-This enables the parity test to sync parameters using PyTorch's key names while Triton resolves them to correct internal attributes.
-
----
 
 ## Phase E+: Summary — All 6 Waves Complete (Jun 20)
 
 **Status:** ✅ ALL DONE — 551 tests pass, ruff + pyright clean
 
-**Phase E+ Plan File:** `docs/phase_e_plus_plan.md` (all 12 checkboxes marked [x])
-
-**Summary of all 6 waves:**
-
-| Wave | Description | Result |
-|------|-------------|--------|
-| Wave 1: Constant Consolidation | Extended `shared/constants.py` with `Block`, `Mha`, `Transformer` helpers; replaced ALL magic strings | 0 raw strings remain |
-| Wave 2: Triton Documentation | All 5 kernel files get comprehensive docs (formula, algorithm, memory, performance) | All `@triton.jit` functions documented |
-| Wave 3: Naming & Parity | RMSNorm instances, SwiGLU instance, MoE naming, weight transpose & bias | 3-way naming parity |
-| Wave 3+: 4-Way Equivalence | `test_3way_equivalence.py` with 4 tests — all pass | NumPy/Torch/Triton cross-load works |
-| Wave 4: Code Cleanup | ruff formatting, unused imports | 551 tests still pass |
-| Wave 5: Design Doc Updates | `docs/design.md` updated with naming guide, Phase E+ section | Document reflects current state |
-
 **551 tests breakdown:**
 - shared/ + unit tests: ~540
 - cross_backend: 21 (including 3-way equivalence)
 - All pass, ruff clean, pyright clean
+
+## Phase F: CUDA — Runtime API Reality Check (Jun 20)
+
+### Critical Discovery: cuLaunchKernel is BROKEN on JetPack 6.2.2
+
+**Problem Summary:**
+- `cuda-python` 12.6.2.post1 installed on Jetson AGX Orin 64GB, JetPack 6.2.2
+- `cuLaunchKernel` and `cuLaunchKernelEx` **fail on every attempt**:
+  - Throws `TypeError: an integer is required` regardless of argument types
+  - Tried `CUlaunchConfig`, `CUlaunchAttribute` objects — still fails
+  - Tried raw C types (ctypes `c_uint32`, `c_void_p`) — still fails
+  - Tried `torch.cuda.device_ptr()` — still fails
+  - Tried with/without `ctx._context` — still fails
+- **This is not a workaround problem** — the new API simply doesn't function in this Python binding version on this platform
+
+**What DOES work — Legacy cuLaunch API:**
+- `cuParamSetSize(kernel, size)` — sets parameter size, returns `(status,)`
+- `cuParamSetv(kernel, offset, bytes_data, count)` — passes bytes data, returns `(status,)`
+- `cuFuncSetBlockShape(kernel, x, y, z)` — sets block dimensions, returns `(status,)`
+- `cuLaunch(kernel)` — launches kernel with the block shape set above
+
+**Verified working with 2-param kernel (exact 16-byte alignment):**
+```python
+# 2-param kernel: (const float* a, float* b)
+cuParamSetSize(kernel, 16)
+cuParamSetv(kernel, 0, ctypes.cast(a_ptr, ctypes.c_void_p), 8)
+cuParamSetv(kernel, 8, ctypes.cast(b_ptr, ctypes.c_void_p), 8)
+cuFuncSetBlockShape(kernel, 256, 1, 1)
+cuLaunch(kernel)
+# Result: a+1 computed correctly ✅
+```
+
+**What FAILED — 3-param kernel with int:**
+- `int n` via `cuParamSeti(kernel, 16, n)` → `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES` (701)
+- 32-byte param buffer with 3×8 = 24 bytes via cuParamSetv → `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES`
+- 24-byte param buffer with 3×8 = 24 bytes at offset 0 → `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES`
+- All 4 variants produce the same error for 3-param kernels
+
+**What FAILED — New APIs:**
+- `cuModuleGetFunction(module, "_Z19silu_forward_kernelPKfPfi")` (mangled name) → `CUDA_ERROR_NOT_FOUND` (500)
+- `cuLaunchKernel` at any time → always throws immediately (before any kernel code verification)
+
+### Implications for Phase F Implementation
+
+The original Phase F plan assumed `cuLaunchKernel` or `cuLaunchKernelEx` would be available. **They are not.** The implications:
+
+1. **Legacy API ONLY** — All kernel launches must use `cuFuncSetBlockShape` + `cuLaunch`
+2. **No grid configuration** — Cannot launch 2D/3D grids natively; workarounds needed
+3. **No stream support** — No `CUstream` objects available via working API
+4. **No event support** — Cannot use `cuEventRecord`/`cuEventSynchronize`
+5. **int parameters may not work** — `cuParamSeti` causes launch failures; only `float*` pointer passing works
+6. **All 32-bit values must be passed as pointers** — int size must be passed via `cuParamSetv` with a pointer to an int buffer, not `cuParamSeti`
+7. **MHA kernel (complex kernels) may not be feasible** — MHA needs grid-stride loops, shared memory tiling, and multiple launch configurations with different block shapes
+
+### Revised CUDA Strategy
+
+**Option A — Keep bare-metal approach but restrict legacy API:**
+- All kernels use 1D grid with fixed block size (e.g., 256 or 512 threads)
+- `int n` passed as a `const float*` via `cuParamSetv` (reinterpret-cast from a Python int buffer)
+- All kernels launched from a single stream with implicit synchronization
+- **Pros:** Still bare-metal manual memory management, still CUDA C
+- **Cons:** No grid config, no streams, no events — very limited
+
+**Option B — Hybrid: bare-metal kernels via nvrtc, but use PyTorch for launches:**
+- Compile CUDA C with nvrtc → get PTX → load into PyTorch via `torch.library.custom_op` or `torch.cuda.cachingallocator`
+- Use PyTorch's `torch.empty` for memory, `torch.cuda.Stream` for streams
+- **Pros:** All CUDA features work through PyTorch
+- **Cons:** Loses the "bare metal CUDA API" learning goal — not truly manual
+
+**Option C — Pure nvrtc + PyTorch custom kernels (recommended):**
+- Use nvrtc to compile `.cu` source to PTX at runtime (same as original plan)
+- Load PTX into PyTorch using `torch.library.custom_op` or `torch.vmap`
+- Memory management via PyTorch tensors (not `cudaMalloc`/`cudaMemcpy`)
+- Keep the hand-written CUDA C, but use PyTorch as the dispatcher
+- **Pros:** Practical, all CUDA features work, learning focus preserved (CUDA C is still handwritten)
+- **Cons:** Not truly "bare metal" API level, but kernel code is still pure CUDA C
+
+### Recommendation: Option C — Pure nvrtc + PyTorch custom kernels
+
+The learning goal for Phase F is **understanding how GPUs really work** — which kernel launches do, how shared memory works, how warp reduction works, coalesced access. These are all in the CUDA C code itself. The Python dispatch layer (whether via `cudaMemcpy`/`cuLaunch` or via PyTorch's dispatcher) is a minor part of that learning.
+
+Using nvrtc + PyTorch custom kernels preserves:
+- Hand-written `.cu` files (not wrappers around cuBLAS/cuDNN)
+- Runtime PTX compilation via nvrtc
+- Shared memory usage in kernels
+- Manual warp-level reductions
+- Understanding of grid/block/threads concepts
+
+Loses (but not critical):
+- Manual `cudaMalloc`/`cudaFree` calls
+- Manual `cudaMemcpy` H2D/D2H calls
+- Manual `cuLaunch`/`cuStream` calls
+- Error handling via `cudaError_t`
+
+**This is acceptable** — the core learning (CUDA C programming) is preserved. The Python glue code is a necessary abstraction layer.
+
+### Revised Component List
+
+Phase F should focus on **CUDA C kernels with nvrtc compilation**, using **PyTorch as the dispatcher**. This means:
+
+1. Write `.cu` source files (hand-written, same as before)
+2. Compile at runtime via nvrtc (same as before)
+3. Use **PyTorch custom kernels** or **`torch.library.custom_op`** for kernel invocation (NEW)
+4. Memory via PyTorch tensors (NEW — manual malloc not feasible)
+5. Backward pass via PyTorch's autograd (same as the SiLU plan originally said — use torch's backward)
+
+**Simplified kernel list (practical subset):**
+- F1: SiLU — elementwise kernel, 1D grid
+- F2: RMSNorm — reduction kernel, 1D grid
+- F3: RoPE — trig kernel, 1D grid
+- F4: SwiGLU — SiLU + GEMM (use PyTorch matmul, SiLU kernel for the element-wise part)
+- F5: MHA — attention kernel (most complex, use PyTorch mm, custom softmax)
+- F6+: MoE, TransformerBlock, DecoderStack, Model, Training, Inference, Parity
+
+**Alternative: Skip CUDA C entirely and use PyTorch directly for Phase F.**
+
+If the nvrtc compilation is too complex, we could simply implement:
+1. A CUDA inference engine using PyTorch's built-in CUDA operations
+2. Write detailed comments explaining each CUDA-specific concept
+3. Focus on the architecture level (not the kernel level)
+
+This is simpler and more practical while still being a distinct implementation.
+
+### Decision
+
+**The original plan for Phase F is not feasible on this platform.** The `cuda-python` library does not expose a working kernel launch API. Two paths forward:
+
+**Path A:** nvrtc + PyTorch custom kernel dispatcher (preserves CUDA C learning)
+**Path B:** Skip bare-metal CUDA entirely; implement inference engine using PyTorch's CUDA operations with extensive comments explaining CUDA concepts
+
+The user needs to decide which path to take.
+
+## Errors Encountered
+
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+| `cuLaunchKernel` TypeError | 10+ | Documented: BROKEN on this platform, do NOT use |
+| `cuLaunchKernelEx` TypeError | 10+ | Same as above |
+| 3-param kernel via `cuParamSeti` → out-of-resources | 4 | `int` params don't work via legacy API; only `float*` pairs work |
+| 3-param kernel via 32-byte `cuParamSetv` → out-of-resources | 4 | Same issue with any 3-param kernel |
+| `cuModuleGetFunction` with mangled name → not found | 1 | Function names not found; new API doesn't work at all |
+| `CUDA_ERROR_INVALID_CONTEXT` (201) | 1 | Need explicit `cuCtxCreate` before module loading — but context creation also fails for new API |
+
+## Phase F: CUDA Implementation — Reality Check
+
+### What Was Planned
+- Hand-written CUDA C (`.cu`) files via `cuda-python` Runtime API
+- Manual `cudaMalloc`/`cudaMemcpy`/`cudaFree`
+- Manual kernel launches via `cuLaunchKernel` / `cuLaunchKernelEx`
+- Manual stream management via `CUstream`
+- Manual error handling via `cudaError_t`
+- Full model with all kernels, training, inference, 4-way parity
+
+### What Actually Works
+- Legacy `cuLaunch` API: `cuParamSetSize` + `cuParamSetv` + `cuFuncSetBlockShape` + `cuLaunch`
+- Only 2-parameter kernels (two `float*` pointers) work reliably
+- No grid/launch config, no streams, no events
+- No working `cuLaunchKernel` or `cuLaunchKernelEx`
+
+### What Doesn't Work
+- **All new CUDA driver API functions** (`cuLaunchKernel`, `cuLaunchKernelEx`, `cuLaunchKernelEx` with `CUlaunchConfig`, etc.)
+- **3-parameter kernels** with int parameters via legacy API
+- **Stream management** (no working `CUstream` API)
+- **Event management** (no working `cuEvent` API)
+- **Complex kernel launches** (MHA needs grid-stride loops + shared memory + different launch configs)
+
+### Practical Assessment
+Phase F as originally planned is **not feasible on JetPack 6.2.2**. The `cuda-python` 12.6.2.post1 package is too broken for bare-metal CUDA. The legacy API is too limited for complex kernels.
+
+### Recommended Options (see above)
+- **Option A:** nvrtc + PyTorch custom kernel (preserves CUDA C learning)
+- **Option B:** Pure PyTorch CUDA with extensive comments (practical, simpler)
+- **Option C:** Skip Phase F; add more training/inference features instead (simplest)
