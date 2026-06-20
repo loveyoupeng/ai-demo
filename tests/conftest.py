@@ -16,14 +16,6 @@ def _is_cuda_available():
     return _cuda_available
 
 
-@pytest.fixture(autouse=True, scope="session")
-def cuda_cleanup():
-    """Clean up GPU state between tests in the GPU test class."""
-    # No-op: this ensures the fixture runs but doesn't interfere
-    # Each test class manages its own GPU state
-    yield
-
-
 @contextmanager
 def cuda_isolated():
     """Context manager to isolate GPU state between operations.
