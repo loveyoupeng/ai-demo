@@ -342,10 +342,11 @@ class TestLoadCheckpoint:
         import subprocess
 
         result = subprocess.run(
-            [sys.executable, "-c", (
-                "import scripts.infer as m;"
-                "m.load_model_from_checkpoint('/tmp/nonexistent_xyz', 'numpy');"
-            )],
+            [
+                sys.executable,
+                "-c",
+                ("import scripts.infer as m;m.load_model_from_checkpoint('/tmp/nonexistent_xyz', 'numpy');"),
+            ],
             capture_output=True,
             text=True,
         )

@@ -8,6 +8,7 @@ from shared.constants import Attention, LayerNorm, MoE, Transformer
 #  Step 0a: Attention class attributes exist and are correct strings           #
 # --------------------------------------------------------------------------- #
 
+
 def test_attention_q_weight_is_string():
     assert isinstance(Attention.Q_WEIGHT, str)
     assert Attention.Q_WEIGHT == "q.weight"
@@ -52,6 +53,7 @@ def test_attention_o_bias_is_string():
 #  Step 0b: LayerNorm class attributes exist and are correct strings           #
 # --------------------------------------------------------------------------- #
 
+
 def test_layernorm_gamma_is_string():
     assert isinstance(LayerNorm.LN_GAMMA, str)
     assert LayerNorm.LN_GAMMA == "ln_gamma"
@@ -65,6 +67,7 @@ def test_layernorm_bias_is_string():
 # --------------------------------------------------------------------------- #
 #  Step 0c: Transformer class attributes exist and are correct strings         #
 # --------------------------------------------------------------------------- #
+
 
 def test_transformer_embedding_is_string():
     assert isinstance(Transformer.EMBEDDING, str)
@@ -85,6 +88,7 @@ def test_transformer_lm_head_bias_is_string():
 #  Step 0d: MoE class attributes exist and are correct strings                 #
 # --------------------------------------------------------------------------- #
 
+
 def test_moe_w1_is_string():
     assert isinstance(MoE.W1, str)
     assert MoE.W1 == "w1"
@@ -104,6 +108,7 @@ def test_moe_w3_is_string():
 #  Step 1: block_param() helper                                                #
 # --------------------------------------------------------------------------- #
 
+
 def test_block_param_0_attn():
     from shared.constants import block_param
 
@@ -122,6 +127,7 @@ def test_block_param_2_mlp():
 # --------------------------------------------------------------------------- #
 #  Step 2: attention_param() helper                                            #
 # --------------------------------------------------------------------------- #
+
 
 def test_attention_param_uses_constants():
     from shared.constants import Attention, attention_param
@@ -147,6 +153,7 @@ def test_attention_param_bias():
 # --------------------------------------------------------------------------- #
 #  Step 3: layer_norm_param() helper                                           #
 # --------------------------------------------------------------------------- #
+
 
 def test_layer_norm_param_ln1():
     from shared.constants import layer_norm_param
@@ -174,6 +181,7 @@ def test_layer_norm_param_final():
 #  Step 4: moe_param() helper                                                  #
 # --------------------------------------------------------------------------- #
 
+
 def test_moe_param_gate():
     from shared.constants import MoE, moe_param
 
@@ -199,6 +207,7 @@ def test_moe_param_expert_for_layer_2():
 #  Step 5: transformer_param() helper                                          #
 # --------------------------------------------------------------------------- #
 
+
 def test_transformer_param_embedding():
     from shared.constants import Transformer, transformer_param
 
@@ -223,6 +232,7 @@ def test_transformer_param_lm_head_bias():
 # --------------------------------------------------------------------------- #
 #  Step 6: get_all_params() helper                                             #
 # --------------------------------------------------------------------------- #
+
 
 def test_get_all_params_0_layers():
     from shared.constants import get_all_params
@@ -287,4 +297,3 @@ def test_get_all_params_all_values_are_strings():
     result = get_all_params(0)
     for v in result.values():
         assert isinstance(v, str)
-

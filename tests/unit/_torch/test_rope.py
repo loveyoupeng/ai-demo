@@ -59,13 +59,9 @@ class TestRoPEForward:
         out_partial = rope(x, positions, rope_dim=4)
 
         # Unrotated dims (4-8) should be identical to input (pass-through)
-        assert torch.allclose(
-            out_partial[:, :, :, 4:], x[:, :, :, 4:], atol=1e-10
-        )
+        assert torch.allclose(out_partial[:, :, :, 4:], x[:, :, :, 4:], atol=1e-10)
         # First 4 dims should differ (rotated)
-        assert not torch.allclose(
-            out_partial[:, :, :, :4], x[:, :, :, :4], atol=1e-10
-        )
+        assert not torch.allclose(out_partial[:, :, :, :4], x[:, :, :, :4], atol=1e-10)
 
     def test_deterministic(self) -> None:
         """Same input + same position → same output."""

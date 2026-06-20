@@ -90,8 +90,15 @@ class TestTrainStepIntegration:
 
         # Use tiny model so numerical backward completes within test timeout
         model = NumPyModel(
-            vocab_size=4, embed_dim=4, n_layers=1, n_heads=1,
-            n_experts=2, ff_dim=4, k=1, rope_dim=0, seed=0,
+            vocab_size=4,
+            embed_dim=4,
+            n_layers=1,
+            n_heads=1,
+            n_experts=2,
+            ff_dim=4,
+            k=1,
+            rope_dim=0,
+            seed=0,
         )
         x = np.array([[0, 1, 2, 3], [1, 2, 3, 0]], dtype=np.int32)
         t = np.array([[1, 2, 3, 0], [2, 3, 0, 1]], dtype=np.int32)
@@ -115,8 +122,15 @@ class TestTrainStepIntegration:
         from impl._np.training import train_step
 
         model = NumPyModel(
-            vocab_size=4, embed_dim=4, n_layers=1, n_heads=1,
-            n_experts=2, ff_dim=4, k=1, rope_dim=0, seed=0,
+            vocab_size=4,
+            embed_dim=4,
+            n_layers=1,
+            n_heads=1,
+            n_experts=2,
+            ff_dim=4,
+            k=1,
+            rope_dim=0,
+            seed=0,
         )
         x = np.array([[0, 1, 2, 3], [1, 2, 3, 0]], dtype=np.int32)
         t = np.array([[1, 2, 3, 0], [2, 3, 0, 1]], dtype=np.int32)
@@ -149,8 +163,15 @@ class TestNoExplosion:
         from impl._np.training import train_step
 
         model = NumPyModel(
-            vocab_size=4, embed_dim=4, n_layers=1, n_heads=1,
-            n_experts=2, ff_dim=4, k=1, rope_dim=0, seed=0,
+            vocab_size=4,
+            embed_dim=4,
+            n_layers=1,
+            n_heads=1,
+            n_experts=2,
+            ff_dim=4,
+            k=1,
+            rope_dim=0,
+            seed=0,
         )
         x = np.random.randint(0, 4, (2, 4), dtype=np.int32)
         t = np.random.randint(0, 4, (2, 4), dtype=np.int32)
@@ -169,8 +190,15 @@ class TestNoExplosion:
         from impl._np.training import train_step
 
         model = NumPyModel(
-            vocab_size=4, embed_dim=4, n_layers=1, n_heads=1,
-            n_experts=2, ff_dim=4, k=1, rope_dim=0, seed=0,
+            vocab_size=4,
+            embed_dim=4,
+            n_layers=1,
+            n_heads=1,
+            n_experts=2,
+            ff_dim=4,
+            k=1,
+            rope_dim=0,
+            seed=0,
         )
         x = np.random.randint(0, 4, (2, 4), dtype=np.int32)
         t = np.random.randint(0, 4, (2, 4), dtype=np.int32)

@@ -51,12 +51,8 @@ class TorchTurboQuantKVCache:
 
         # Internal storage placeholders (batch=1 until first write).
         placeholder_shape = (1, n_heads, max_length, head_dim)
-        self.bits_k: list[torch.Tensor] = [
-            torch.zeros(placeholder_shape, dtype=torch.int8) for _ in range(n_layers)
-        ]
-        self.bits_v: list[torch.Tensor] = [
-            torch.zeros(placeholder_shape, dtype=torch.int8) for _ in range(n_layers)
-        ]
+        self.bits_k: list[torch.Tensor] = [torch.zeros(placeholder_shape, dtype=torch.int8) for _ in range(n_layers)]
+        self.bits_v: list[torch.Tensor] = [torch.zeros(placeholder_shape, dtype=torch.int8) for _ in range(n_layers)]
         self.scales_k: list[torch.Tensor] = [
             torch.zeros(placeholder_shape, dtype=torch.float32) for _ in range(n_layers)
         ]

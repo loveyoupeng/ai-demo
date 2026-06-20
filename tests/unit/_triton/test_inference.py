@@ -1,6 +1,5 @@
 """E11: CLI inference — text_to_tokens, text_from_tokens, generate_text."""
 
-
 import pytest
 import torch
 import torch.nn as nn

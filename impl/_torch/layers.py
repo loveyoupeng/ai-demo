@@ -927,7 +927,6 @@ class TorchModel(nn.Module):
 
         # ── DecoderStack ───────────────────────────────────────────
         for layer_idx, block in enumerate(self.stack.layers):
-
             # Layer norm gamma
             load(Block.ln1_gamma(layer_idx), block.ln1.gamma)
             load(Block.ln2_gamma(layer_idx), block.ln2.gamma)
@@ -1016,7 +1015,6 @@ class TorchModel(nn.Module):
 
         # ── DecoderStack ───────────────────────────────────────────
         for layer_idx, block in enumerate(self.stack.layers):
-
             # Layer norm gamma
             save(block.ln1.gamma, Block.ln1_gamma(layer_idx))
             save(block.ln2.gamma, Block.ln2_gamma(layer_idx))
@@ -1101,7 +1099,6 @@ class TorchModel(nn.Module):
 
         # ── DecoderStack ───────────────────────────────────────────
         for layer_idx, block in enumerate(self.stack.layers):
-
             # Layer norm gamma
             load(block.ln1.gamma, Block.ln1_gamma(layer_idx))
             load(block.ln2.gamma, Block.ln2_gamma(layer_idx))

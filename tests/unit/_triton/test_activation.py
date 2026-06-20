@@ -84,10 +84,7 @@ class TestSiLUKernel:
         sigmoid_x = 1.0 / (1.0 + np.exp(-x_np))
         y_numpy = x_np * sigmoid_x
 
-        np.testing.assert_allclose(
-            y_numpy, y_triton, rtol=1e-4, atol=1e-4,
-            err_msg="Triton SiLU != NumPy reference"
-        )
+        np.testing.assert_allclose(y_numpy, y_triton, rtol=1e-4, atol=1e-4, err_msg="Triton SiLU != NumPy reference")
 
     @pytest.mark.timeout(30)
     def test_parity_with_torch(self):
@@ -101,7 +98,4 @@ class TestSiLUKernel:
         y_triton = silu(x)
         y_torch = torch.nn.functional.silu(x)
 
-        torch.testing.assert_close(
-            y_triton, y_torch, rtol=1e-4, atol=1e-4,
-            msg="Triton SiLU != torch.nn.SiLU"
-        )
+        torch.testing.assert_close(y_triton, y_torch, rtol=1e-4, atol=1e-4, msg="Triton SiLU != torch.nn.SiLU")

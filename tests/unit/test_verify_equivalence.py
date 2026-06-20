@@ -14,13 +14,20 @@ import pytest
 def _train_and_load(backend, tmpdir, seed=42, synthetic=True, **kwargs):
     """Run train.py on synthetic data with minimal config and return params."""
     cmd = [
-        sys.executable, "-m", "scripts.train",
-        "--backend", backend,
-        "--epochs", "2",
-        "--batch_size", "32",
-        "--seed", str(seed),
+        sys.executable,
+        "-m",
+        "scripts.train",
+        "--backend",
+        backend,
+        "--epochs",
+        "2",
+        "--batch_size",
+        "32",
+        "--seed",
+        str(seed),
         "--synthetic",
-        "--save_dir", str(tmpdir),
+        "--save_dir",
+        str(tmpdir),
     ]
     for k, v in kwargs.items():
         cmd.extend([f"--{k}" if not k.startswith("-") else "", str(v)])
@@ -36,6 +43,7 @@ class TestVerifyEquivalenceStructure:
     def test_main_exists(self):
         """Main function must exist."""
         import scripts.verify_equivalence
+
         assert hasattr(scripts.verify_equivalence, "main")
 
     def test_help_exits_zero(self):
@@ -47,7 +55,8 @@ class TestVerifyEquivalenceStructure:
     def test_script_runnable(self):
         """Script should run (even with errors like missing resource dir)."""
         import scripts.verify_equivalence
-        assert hasattr(scripts.verify_equivalence, 'main')
+
+        assert hasattr(scripts.verify_equivalence, "main")
         result = scripts.verify_equivalence.main(["--help"])
         assert result == 0
 
@@ -62,7 +71,6 @@ class TestScenario1_SmallConfig:
         import scripts.verify_equivalence as ve
 
         with tempfile.TemporaryDirectory() as tmpdir:
-
             # Train NumPy
             np_dir = Path(tmpdir) / "numpy_42"
             np_dir.mkdir()
@@ -89,6 +97,7 @@ class TestMatrixRun:
 
     def test_matrix_runner_import(self):
         import scripts.verify_equivalence as ve
+
         assert hasattr(ve, "run_scenario")
 
 
@@ -98,6 +107,7 @@ class TestReportGeneration:
     def test_report_format_string(self):
         """Report should format with PASS/FAIL."""
         import scripts.verify_equivalence as ve
+
         assert "PASS" in str(ve) or "FAIL" in str(ve) or True  # Module, not string
 
     def test_format_result_line(self):
@@ -123,11 +133,15 @@ class TestVerifyEquivalenceScriptIntegration:
         """Script should run without error with --fast flag."""
         with tempfile.TemporaryDirectory() as tmpdir:
             subprocess.run(
-                [sys.executable, "-c", (
-                    "import sys; sys.argv=['verify_equivalence']; "
-                    "import scripts.verify_equivalence as m; "
-                    "m.main(['--fast'])"
-                )],
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import sys; sys.argv=['verify_equivalence']; "
+                        "import scripts.verify_equivalence as m; "
+                        "m.main(['--fast'])"
+                    ),
+                ],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -195,16 +209,19 @@ class TestScenariosFunction:
 
     def test_returns_list(self):
         import scripts.verify_equivalence as ve
+
         scenarios = ve._scenarios()
         assert isinstance(scenarios, list)
 
     def test_returns_six_scenarios(self):
         import scripts.verify_equivalence as ve
+
         scenarios = ve._scenarios()
         assert len(scenarios) == 6
 
     def test_each_scenario_has_name(self):
         import scripts.verify_equivalence as ve
+
         scenarios = ve._scenarios()
         for s in scenarios:
             assert isinstance(s.name, str)
@@ -212,6 +229,7 @@ class TestScenariosFunction:
 
     def test_each_scenario_has_kwargs(self):
         import scripts.verify_equivalence as ve
+
         scenarios = ve._scenarios()
         for s in scenarios:
             assert isinstance(s.kwargs, dict)
@@ -224,11 +242,13 @@ class TestFormatReport:
 
     def test_empty_results(self):
         import scripts.verify_equivalence as ve
+
         report = ve.format_report([])
         assert "PASS" in report or "FAIL" in report or len(report) > 0
 
     def test_single_pass_result(self):
         import scripts.verify_equivalence as ve
+
         results = [{"passed": True, "name": "Test", "details": {}, "elapsed": 1.0}]
         report = ve.format_report(results)
         assert "Test" in report
@@ -236,6 +256,7 @@ class TestFormatReport:
 
     def test_single_fail_result(self):
         import scripts.verify_equivalence as ve
+
         results = [{"passed": False, "name": "Test", "details": {}, "elapsed": 1.0}]
         report = ve.format_report(results)
         assert "Test" in report

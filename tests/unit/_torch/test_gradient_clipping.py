@@ -15,7 +15,17 @@ class TestGradientClippingIntegration:
 
     def test_clip_gradients_is_called_by_train_step(self) -> None:
         """train_step must call clip_gradients before optimizer.step."""
-        model = TorchModel(vocab_size=16, embed_dim=32, n_layers=2, n_heads=2, n_experts=2, ff_dim=64, k=2, rope_dim=0, seed=0)
+        model = TorchModel(
+            vocab_size=16,
+            embed_dim=32,
+            n_layers=2,
+            n_heads=2,
+            n_experts=2,
+            ff_dim=64,
+            k=2,
+            rope_dim=0,
+            seed=0,
+        )
         x = torch.randint(0, 16, (2, 4))
         y = torch.randint(0, 16, (2, 4))
         optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
@@ -26,9 +36,10 @@ class TestGradientClippingIntegration:
         # Patch the loss_fn to return a scalar with grad so autograd works
         # — this avoids model architecture shape mismatches while keeping
         # the backward pass intact for verifying the clip call.
-        with patch.object(loss_fn, "forward", return_value=torch.tensor(1.0, requires_grad=True)), patch(
-            "impl._torch.training.clip_gradients"
-        ) as mock_clip:
+        with (
+            patch.object(loss_fn, "forward", return_value=torch.tensor(1.0, requires_grad=True)),
+            patch("impl._torch.training.clip_gradients") as mock_clip,
+        ):
             train_step(model, x, y, optimizer, loss_fn, max_norm=max_norm_value)
             mock_clip.assert_called_once()
             call_args = mock_clip.call_args
@@ -105,7 +116,17 @@ class TestGradientClippingIntegration:
 
     def test_zero_max_norm_no_clip(self) -> None:
         """max_norm=0 should skip all clipping."""
-        model = TorchModel(vocab_size=16, embed_dim=32, n_layers=2, n_heads=2, n_experts=2, ff_dim=64, k=2, rope_dim=0, seed=0)
+        model = TorchModel(
+            vocab_size=16,
+            embed_dim=32,
+            n_layers=2,
+            n_heads=2,
+            n_experts=2,
+            ff_dim=64,
+            k=2,
+            rope_dim=0,
+            seed=0,
+        )
         x = torch.randint(0, 16, (2, 4))
         y = torch.randint(0, 16, (2, 4))
         logits = model(x)

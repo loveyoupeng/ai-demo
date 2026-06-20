@@ -76,9 +76,7 @@ class TritonTextGenerator:
 
         return sequence
 
-    def _generate_sampled(
-        self, prompt: torch.Tensor, temperature: float = 1.0
-    ) -> torch.Tensor:
+    def _generate_sampled(self, prompt: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
         """Generate using temperature-sampled token selection."""
         prompt = _validate_prompt(prompt)
         batch_size = prompt.shape[0]
@@ -102,9 +100,7 @@ class TritonTextGenerator:
             exp_logits = torch.exp(scaled_logits - logits_max)
             probs = exp_logits / torch.sum(exp_logits, dim=-1, keepdim=True)
 
-            next_token = torch.stack(
-                [torch.multinomial(probs[b].float(), num_samples=1) for b in range(batch_size)]
-            )
+            next_token = torch.stack([torch.multinomial(probs[b].float(), num_samples=1) for b in range(batch_size)])
 
             sequence = torch.cat([sequence, next_token], dim=1)
 

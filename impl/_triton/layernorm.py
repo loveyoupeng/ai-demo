@@ -196,14 +196,14 @@ def _rmsnorm_kernel(
 
         # Square each element: x^2
         x_sq_acc = tl.where(
-            feature_mask,            # Condition per element
-            x_block * x_block,       # True: use x^2
-            x_sq_acc,                # False: keep accumulated value
+            feature_mask,  # Condition per element
+            x_block * x_block,  # True: use x^2
+            x_sq_acc,  # False: keep accumulated value
         )
 
     # Reduce the block accumulator to a single scalar sum
     x_sq_sum: float = tl.sum(x_sq_acc)  # Scalar float32
-    mean_x_sq = x_sq_sum / n_features   # (float) Mean of squares
+    mean_x_sq = x_sq_sum / n_features  # (float) Mean of squares
 
     # Compute RMS with stability epsilon
     rms = tl.sqrt(mean_x_sq + eps)  # (float) Root mean square
@@ -333,9 +333,7 @@ class _RmsNormTriton(torch.autograd.Function):
         if gamma.dim() != 1:
             raise ValueError(f"gamma must be 1D, got {gamma.dim()}")
         if x.shape[-1] != gamma.shape[0]:
-            raise ValueError(
-                f"Last dim of x ({x.shape[-1]}) must match gamma ({gamma.shape[0]})"
-            )
+            raise ValueError(f"Last dim of x ({x.shape[-1]}) must match gamma ({gamma.shape[0]})")
         if x.device.type != "cuda":
             raise ValueError("x must be on CUDA device")
         if gamma.device.type != "cuda":
@@ -433,7 +431,7 @@ class _RmsNormTriton(torch.autograd.Function):
         # ── Compute dgamma: element-wise product + sum ────────────
         # Reconstruct y from saved x: y = (x / r) * gamma
         # where r = sqrt(mean(x^2) + eps)
-        mean_x_sq = torch.mean(x_flat ** 2, dim=-1, keepdim=True)  # (n_rows, 1)
+        mean_x_sq = torch.mean(x_flat**2, dim=-1, keepdim=True)  # (n_rows, 1)
         rms_x = torch.sqrt(mean_x_sq + eps)  # (n_rows, 1)
         y = (x_flat / rms_x) * gamma  # (n_rows, D) — forward output
 

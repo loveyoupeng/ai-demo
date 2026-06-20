@@ -13,6 +13,7 @@ class TestLoadTinyStories:
     def test_load_training_data(self):
         """Loading train split returns non-empty list of stories."""
         from shared.dataset import load_tinystories
+
         data = load_tinystories("train")
         assert isinstance(data, list)
         assert len(data) > 0
@@ -23,6 +24,7 @@ class TestLoadTinyStories:
     def test_load_validation_data(self):
         """Loading validation split returns non-empty list."""
         from shared.dataset import load_tinystories
+
         data = load_tinystories("validation")
         assert isinstance(data, list)
         assert len(data) > 0
@@ -30,6 +32,7 @@ class TestLoadTinyStories:
     def test_load_returns_strings(self):
         """All loaded stories should be strings."""
         from shared.dataset import load_tinystories
+
         data = load_tinystories("train")
         for story in data:
             assert isinstance(story, str)
@@ -184,8 +187,6 @@ class TestDataloaderSequences:
         ds = TextDataset(stories, tok, context_length=32, seed=42)
 
         for batch_size in [1, 4, 8, 16]:
-            batches = get_dataloader_sequences(
-                ds, batch_size=batch_size, num_batches=1
-            )
+            batches = get_dataloader_sequences(ds, batch_size=batch_size, num_batches=1)
             assert len(batches[0][0]) == batch_size  # input batch
             assert len(batches[0][1]) == batch_size  # target batch

@@ -902,7 +902,9 @@ class TransformerBlock:
         # Mixture of Experts
         self.moe = MoE(embed_dim, n_experts=n_experts, ff_dim=ff_dim, k=k, seed=seed + 3)
 
-    def forward(self, x: np.ndarray, dropout: float = 0.0, training: bool = False, rng: np.random.Generator | None = None) -> np.ndarray:
+    def forward(
+        self, x: np.ndarray, dropout: float = 0.0, training: bool = False, rng: np.random.Generator | None = None
+    ) -> np.ndarray:
         """Forward pass through the transformer block.
 
         Parameters
@@ -936,7 +938,11 @@ class TransformerBlock:
 
         # Optional dropout: h = h * Bernoulli(1 - dropout) with scaling
         if training and dropout > 0.0:
-            mask = (rng.random(h.shape) >= dropout).astype(np.float32) if rng is not None else (np.random.random(h.shape) >= dropout).astype(np.float32)
+            mask = (
+                (rng.random(h.shape) >= dropout).astype(np.float32)
+                if rng is not None
+                else (np.random.random(h.shape) >= dropout).astype(np.float32)
+            )
             h = h * (mask / (1.0 - dropout))  # (B, S, D) — scaled dropout
 
         # ── Stream 2: MoE ──────────────────────────────────────────
@@ -955,7 +961,11 @@ class TransformerBlock:
 
         # Optional dropout: out = out * Bernoulli(1 - dropout) with scaling
         if training and dropout > 0.0:
-            mask = (rng.random(out.shape) >= dropout).astype(np.float32) if rng is not None else (np.random.random(out.shape) >= dropout).astype(np.float32)
+            mask = (
+                (rng.random(out.shape) >= dropout).astype(np.float32)
+                if rng is not None
+                else (np.random.random(out.shape) >= dropout).astype(np.float32)
+            )
             out = out * (mask / (1.0 - dropout))  # (B, S, D) — scaled dropout
 
         return out

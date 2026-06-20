@@ -81,8 +81,7 @@ class TestTritonModel:
         for name, param in model.named_parameters():
             if param.requires_grad:
                 assert param.grad is not None, f"Parameter {name} has no gradient"
-                assert param.grad.shape == param.shape, \
-                    f"Gradient shape mismatch for {name}"
+                assert param.grad.shape == param.shape, f"Gradient shape mismatch for {name}"
 
     @pytest.mark.timeout(60)
     def test_parity_with_torch(self):
@@ -200,13 +199,18 @@ class TestTritonModel:
         # Keys saved with (in, out) transpose but stored as (out, in) in PyTorch
         transposed_keys = {
             "output_proj_w",
-            "blocks.0.mha.Wq", "blocks.0.mha.Wk", "blocks.0.mha.Wv", "blocks.0.mha.Wo",
-            "blocks.1.mha.Wq", "blocks.1.mha.Wk", "blocks.1.mha.Wv", "blocks.1.mha.Wo",
+            "blocks.0.mha.Wq",
+            "blocks.0.mha.Wk",
+            "blocks.0.mha.Wv",
+            "blocks.0.mha.Wo",
+            "blocks.1.mha.Wq",
+            "blocks.1.mha.Wk",
+            "blocks.1.mha.Wv",
+            "blocks.1.mha.Wo",
         }
         for key, value in params_before.items():
             loaded = model._get_param(key)
             tensor = torch.from_numpy(value)
             if key in transposed_keys:
                 tensor = tensor.T
-            assert torch.allclose(tensor, loaded, rtol=1e-4, atol=1e-4), \
-                f"Parameter {key} changed after roundtrip"
+            assert torch.allclose(tensor, loaded, rtol=1e-4, atol=1e-4), f"Parameter {key} changed after roundtrip"

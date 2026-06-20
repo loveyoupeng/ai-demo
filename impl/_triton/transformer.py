@@ -214,9 +214,7 @@ class TritonMoE(nn.Module):
         self.k = k
         self.W_router = nn.Parameter(torch.empty(embed_dim, n_experts))
         self.b_router = nn.Parameter(torch.zeros(n_experts))
-        self.experts = nn.ModuleList([
-            TritonExpert(embed_dim, ff_dim) for _ in range(n_experts)
-        ])
+        self.experts = nn.ModuleList([TritonExpert(embed_dim, ff_dim) for _ in range(n_experts)])
 
     def _move_to_device(self, x: torch.Tensor) -> None:
         """Move all MoE parameters to the same device and dtype as x (skip if int)."""
@@ -255,7 +253,9 @@ class TritonMoE(nn.Module):
 
         # Compute expert outputs: [E, B, S, D]
         expert_inputs = x.unsqueeze(0).expand(n_experts, -1, -1, -1)  # [E, B, S, D]
-        expert_outs = torch.stack([expert(expert_inputs[i]) for expert, i in zip(self.experts, range(n_experts), strict=True)])
+        expert_outs = torch.stack(
+            [expert(expert_inputs[i]) for expert, i in zip(self.experts, range(n_experts), strict=True)]
+        )
 
         # Weighted sum: [B, S, E] x [E, B, S, D] -> [B, S, D]
         out = torch.einsum("bse,ebsd->bsd", routing_weights, expert_outs)
@@ -294,16 +294,18 @@ class TritonDecoderStack(nn.Module):
     ) -> None:
         super().__init__()
         self.n_layers = n_layers
-        self.layers = nn.ModuleList([
-            TritonTransformerBlock(
-                embed_dim=embed_dim,
-                n_heads=n_heads,
-                n_experts=n_experts,
-                ff_dim=ff_dim,
-                k=k,
-            )
-            for _ in range(n_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                TritonTransformerBlock(
+                    embed_dim=embed_dim,
+                    n_heads=n_heads,
+                    n_experts=n_experts,
+                    ff_dim=ff_dim,
+                    k=k,
+                )
+                for _ in range(n_layers)
+            ]
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = x

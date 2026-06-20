@@ -197,7 +197,6 @@ class NumPyModel:
 
         # Stack — TransformerBlocks
         for layer_idx, block in enumerate(self.stack.blocks):
-
             # Layer norm gamma
             params[Block.ln1_gamma(layer_idx)] = block.ln1_gamma
             params[Block.ln2_gamma(layer_idx)] = block.ln2_gamma
@@ -232,7 +231,8 @@ class NumPyModel:
         return params
 
     def load_from_numpy_dict(
-        self, params_dict: dict[str, np.ndarray],
+        self,
+        params_dict: dict[str, np.ndarray],
     ) -> None:
         """Load parameters from a NumPy-style dictionary.
 

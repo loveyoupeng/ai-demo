@@ -31,6 +31,7 @@ def cuda_isolated():
         finally:
             # Clean up after GPU work
             import gc
+
             torch.cuda.empty_cache()
             gc.collect()
     else:
@@ -40,16 +41,19 @@ def cuda_isolated():
 
 def make_isolation_fixture():
     """Create a fixture that cleans CUDA state between tests."""
+
     @pytest.fixture
     def gpu_isolation(request):
         if _is_cuda_available():
             import gc
+
             torch.cuda.empty_cache()
             gc.collect()
             yield
             torch.cuda.empty_cache()
         else:
             yield
+
     return gpu_isolation
 
 

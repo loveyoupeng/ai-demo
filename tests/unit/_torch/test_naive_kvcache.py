@@ -48,15 +48,9 @@ class TestTorchNaiveKVCache:
 
         # Verify stored values: position 0 should be 1.0, pos 1 should be 2.0, etc.
         for layer_k in k_result:
-            assert torch.allclose(
-                layer_k[:, :, 0, :], torch.tensor([[[[1.0]]]] * H, dtype=torch.float32)
-            )
-            assert torch.allclose(
-                layer_k[:, :, 1, :], torch.tensor([[[[2.0]]]] * H, dtype=torch.float32)
-            )
-            assert torch.allclose(
-                layer_k[:, :, 2, :], torch.tensor([[[[3.0]]]] * H, dtype=torch.float32)
-            )
+            assert torch.allclose(layer_k[:, :, 0, :], torch.tensor([[[[1.0]]]] * H, dtype=torch.float32))
+            assert torch.allclose(layer_k[:, :, 1, :], torch.tensor([[[[2.0]]]] * H, dtype=torch.float32))
+            assert torch.allclose(layer_k[:, :, 2, :], torch.tensor([[[[3.0]]]] * H, dtype=torch.float32))
 
     def test_incremental_growth(self) -> None:
         """Cache grows sequentially, positions not overwritten."""

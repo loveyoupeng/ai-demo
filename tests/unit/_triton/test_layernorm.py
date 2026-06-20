@@ -32,7 +32,7 @@ class TestRMSNormKernel:
         gamma = torch.ones(D, dtype=torch.float64, device="cuda")
         y = rmsnorm(x, gamma)
         # For each row, mean of squared output over features should be ≈ 1
-        mean_sq_per_row = torch.mean(y ** 2, dim=-1)  # (B, S)
+        mean_sq_per_row = torch.mean(y**2, dim=-1)  # (B, S)
         assert torch.allclose(mean_sq_per_row, torch.ones_like(mean_sq_per_row), rtol=1e-4, atol=1e-4)
 
     @pytest.mark.timeout(30)
@@ -46,7 +46,7 @@ class TestRMSNormKernel:
         gamma = torch.ones(D, dtype=torch.float64, device="cuda")
         y = rmsnorm(x, gamma)
         # Should be x / rms(x)
-        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-6)
+        rms = torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + 1e-6)
         expected = x / rms
         torch.testing.assert_close(y, expected, rtol=1e-4, atol=1e-4)
 
@@ -112,8 +112,7 @@ class TestRMSNormKernel:
 
             numerical_grad = torch.tensor(num_grad, dtype=torch.float64, device="cuda")
             assert torch.isclose(grad_numerical[0, 0, i], numerical_grad, rtol=1e-1, atol=1e-1), (
-                f"Gradient mismatch at index {i}: "
-                f"numerical={numerical_grad}, autograd={grad_numerical[0, 0, i]}"
+                f"Gradient mismatch at index {i}: numerical={numerical_grad}, autograd={grad_numerical[0, 0, i]}"
             )
 
     @pytest.mark.timeout(30)
@@ -134,7 +133,7 @@ class TestRMSNormKernel:
 
         # NumPy reference
         eps = 1e-6
-        rms = np.sqrt(np.mean(x_np ** 2, axis=-1, keepdims=True)) + eps
+        rms = np.sqrt(np.mean(x_np**2, axis=-1, keepdims=True)) + eps
         y_numpy = (x_np / rms) * gamma_np
 
         np.testing.assert_allclose(y_numpy, y_triton, rtol=1e-4, atol=1e-4)

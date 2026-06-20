@@ -87,9 +87,7 @@ class CrossEntropyLoss:
 
         # F.cross_entropy expects (N, C) logits and (N,) targets
         # ignore_index skips target positions with the given label
-        per_pos_loss = F.cross_entropy(
-            flat_logits, flat_targets, ignore_index=self.ignore_index, reduction="none"
-        )
+        per_pos_loss = F.cross_entropy(flat_logits, flat_targets, ignore_index=self.ignore_index, reduction="none")
 
         # Reshape back to (B, S)
         loss_2d = per_pos_loss.reshape(B, S)

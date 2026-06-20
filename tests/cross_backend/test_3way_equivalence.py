@@ -16,8 +16,10 @@ import torch
 
 # ── helpers ──────────────────────────────────────────────────────
 
+
 def _cuda_isolated(func):
     """Decorator to clean CUDA state before/after a function."""
+
     def wrapper(*args, **kwargs):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -27,6 +29,7 @@ def _cuda_isolated(func):
             torch.cuda.empty_cache()
             gc.collect()
         return result
+
     return wrapper
 
 
@@ -73,6 +76,7 @@ def _produce_output(ckpt, model):
 
 
 # ── test ─────────────────────────────────────────────────────────
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="No GPU")
 @pytest.mark.gpu

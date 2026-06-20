@@ -174,28 +174,28 @@ def _rope_kernel(
     # ── Program assignment ─────────────────────────────────────
     # Row (token) and column (pair block) indices identify the
     # tile of (num_tokens, head_dim) handled by this program.
-    token_idx = tl.program_id(axis=0)       # Which token row [0..num_tokens)
+    token_idx = tl.program_id(axis=0)  # Which token row [0..num_tokens)
     pair_block_idx = tl.program_id(axis=1)  # Which pair block [0..num_pairs/BLOCK_SIZE)
 
     # Compute offsets for this tile:
     # - token_offset: starting byte offset for this token's row
     # - pair_range: dimension pair indices in this block
 
-    token_offset = token_idx * head_dim     # Row offset in x/output
+    token_offset = token_idx * head_dim  # Row offset in x/output
     pair_range = pair_block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)  # Pair indices
-    pair_mask = pair_range < num_pairs      # Bounds: only valid pairs
-    dim_range = 2 * pair_range              # Actual dimension indices: 2*m, 2*m+1
-    inner_offset = token_offset + dim_range # Byte offset: row + per-dimension
+    pair_mask = pair_range < num_pairs  # Bounds: only valid pairs
+    dim_range = 2 * pair_range  # Actual dimension indices: 2*m, 2*m+1
+    inner_offset = token_offset + dim_range  # Byte offset: row + per-dimension
 
     # Load input x values: x_m (even dims), x_{m+1} (odd dims)
     # Both are (BLOCK_SIZE, ) vectors, masked for valid pairs
     x_m = tl.load(
-        x_ptr + inner_offset,              # Even: 2*m within row
+        x_ptr + inner_offset,  # Even: 2*m within row
         mask=pair_mask,
         other=0.0,
     ).to(tl.float32)  # (BLOCK_SIZE,) — odd dimension values
     x_m1 = tl.load(
-        x_ptr + inner_offset + 1,          # Odd: 2*m+1 within row
+        x_ptr + inner_offset + 1,  # Odd: 2*m+1 within row
         mask=pair_mask,
         other=0.0,
     ).to(tl.float32)  # (BLOCK_SIZE,) — even dimension values
@@ -224,8 +224,8 @@ def _rope_kernel(
     # while the pair index m determines the FREQUENCY. This creates
     # a multi-scale positional signal.
 
-    y_m = x_m * cos_val - x_m1 * sin_val      # Rotated even dimension
-    y_m1 = x_m * sin_val + x_m1 * cos_val      # Rotated odd dimension
+    y_m = x_m * cos_val - x_m1 * sin_val  # Rotated even dimension
+    y_m1 = x_m * sin_val + x_m1 * cos_val  # Rotated odd dimension
 
     # ── Store results ──────────────────────────────────────────
     # Each output dimension gets its own tl.store call. We initialize
@@ -358,7 +358,7 @@ class _RoPETriton(torch.autograd.Function):
 
         orig_shape = x.shape  # (num_tokens, D)
         num_tokens, D = orig_shape
-        pair_dim = D // 2     # Number of rotation pairs
+        pair_dim = D // 2  # Number of rotation pairs
 
         if pair_dim % 2 != 0:
             raise ValueError(f"head_dim must be divisible by 4, got {D}")
@@ -488,8 +488,8 @@ def apply_rope(
 
     # Separate rotated dims from unrotated tail dims
     if rope_dim > 0 and rope_dim < D:
-        x_rot = x[..., :rope_dim]      # Dimensions to rotate
-        x_pass = x[..., rope_dim:]      # Dimensions to pass through
+        x_rot = x[..., :rope_dim]  # Dimensions to rotate
+        x_pass = x[..., rope_dim:]  # Dimensions to pass through
     else:
         x_rot = x
         x_pass = None
@@ -498,9 +498,7 @@ def apply_rope(
     max_pos = int(positions.max()) + 1
 
     # Compute frequencies for the rotating portion
-    cos_full, sin_full = _compute_rope_frequencies(
-        x_rot.shape[-1], max_pos, x_rot.device, dtype=torch.float64
-    )
+    cos_full, sin_full = _compute_rope_frequencies(x_rot.shape[-1], max_pos, x_rot.device, dtype=torch.float64)
 
     # rotating_dim = number of dims to rotate (rope_dim or full D)
     rotating_dim = rope_dim if rope_dim > 0 else D
@@ -508,8 +506,7 @@ def apply_rope(
 
     # Generate per-token position indices: each token gets its position
     # Extract position for each (batch, seq, head) combination
-    pos_per_token = positions[torch.arange(B * S * H, device=positions.device)
-                                  % (S * H) // H]  # (B*S*H,)
+    pos_per_token = positions[torch.arange(B * S * H, device=positions.device) % (S * H) // H]  # (B*S*H,)
 
     # Build per-token cos/sin tables: (B*S*H, pair_count)
     # Each token's row gets the frequencies at its position

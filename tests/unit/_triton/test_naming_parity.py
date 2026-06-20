@@ -3,6 +3,7 @@
 Verify that TritonModel uses the same attribute naming as TorchModel,
 enabling cross-backend parity via named_parameters().
 """
+
 from __future__ import annotations
 
 import pytest
@@ -18,7 +19,13 @@ class TestTritonModelNamingParity:
         """final layer norm should use RMSNorm instance in both backends."""
         skip_if_no_gpu()
         triton_model = TritonModel(
-            vocab_size=16, embed_dim=8, n_layers=1, n_heads=2, n_experts=2, ff_dim=16, k=1,
+            vocab_size=16,
+            embed_dim=8,
+            n_layers=1,
+            n_heads=2,
+            n_experts=2,
+            ff_dim=16,
+            k=1,
         )
 
         triton_params = dict(triton_model.named_parameters())
@@ -34,28 +41,37 @@ class TestTritonModelNamingParity:
         """Output SwiGLU should be a single instance in both backends."""
         skip_if_no_gpu()
         triton_model = TritonModel(
-            vocab_size=16, embed_dim=8, n_layers=1, n_heads=2, n_experts=2, ff_dim=16, k=1,
+            vocab_size=16,
+            embed_dim=8,
+            n_layers=1,
+            n_heads=2,
+            n_experts=2,
+            ff_dim=16,
+            k=1,
         )
 
         triton_params = dict(triton_model.named_parameters())
 
         # Find output keys
-        triton_output_keys = sorted(
-            [k for k in triton_params if "output" in k and "proj" not in k]
-        )
+        triton_output_keys = sorted([k for k in triton_params if "output" in k and "proj" not in k])
 
         # Triton should use instance-style naming (output.W1, not output_W1)
         for k in triton_output_keys:
             assert "." in k, (
-                f"TritonModel output key '{k}' should be instance-style (output.W1), "
-                f"not raw param style (output_W1)"
+                f"TritonModel output key '{k}' should be instance-style (output.W1), not raw param style (output_W1)"
             )
 
     def test_model_level_output_proj_matches(self) -> None:
         """Output projection should use nn.Linear in both backends."""
         skip_if_no_gpu()
         triton_model = TritonModel(
-            vocab_size=16, embed_dim=8, n_layers=1, n_heads=2, n_experts=2, ff_dim=16, k=1,
+            vocab_size=16,
+            embed_dim=8,
+            n_layers=1,
+            n_heads=2,
+            n_experts=2,
+            ff_dim=16,
+            k=1,
         )
 
         triton_params = dict(triton_model.named_parameters())
@@ -65,9 +81,7 @@ class TestTritonModelNamingParity:
 
         for k in triton_proj_keys:
             # If project uses nn.Linear, keys should be .weight and .bias
-            assert ".weight" in k or ".bias" in k, (
-                f"TritonModel output_proj key '{k}' should use nn.Linear style"
-            )
+            assert ".weight" in k or ".bias" in k, f"TritonModel output_proj key '{k}' should use nn.Linear style"
 
 
 def skip_if_no_gpu() -> None:

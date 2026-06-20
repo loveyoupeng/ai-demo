@@ -77,9 +77,7 @@ class TestParseConfigFile:
         Path(f.name).unlink()
 
     def test_parse_model_section(self):
-        data = {
-            "model": {"vocab_size": 256, "context_length": 64, "embed_dim": 128}
-        }
+        data = {"model": {"vocab_size": 256, "context_length": 64, "embed_dim": 128}}
         with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
             json.dump(data, f)
             f.flush()
@@ -88,10 +86,7 @@ class TestParseConfigFile:
         Path(f.name).unlink()
 
     def test_parse_nested_sections_flattens(self):
-        data = {
-            "training": {"epochs": 5, "lr": 0.01, "batch_size": 32},
-            "output": {"save_dir": "/tmp/models"}
-        }
+        data = {"training": {"epochs": 5, "lr": 0.01, "batch_size": 32}, "output": {"save_dir": "/tmp/models"}}
         with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
             json.dump(data, f)
             f.flush()
@@ -109,17 +104,13 @@ class TestParseCliToConfig:
 
     def test_basic_cli_parsing(self):
         """Simple key-value args produce flat config dict."""
-        args = argparse.Namespace(
-            vocab_size=256, context_length=64, embed_dim=128
-        )
+        args = argparse.Namespace(vocab_size=256, context_length=64, embed_dim=128)
         result = parse_cli_to_config(args, "phase")
         assert result == {"vocab_size": 256, "context_length": 64, "embed_dim": 128, "phase": "phase"}
 
     def test_cli_bool_args_stripped(self):
         """Action='store_true' and action='store_false' args should be excluded."""
-        args = argparse.Namespace(
-            synthetic=True, quiet=False, verbose=True, hidden=False
-        )
+        args = argparse.Namespace(synthetic=True, quiet=False, verbose=True, hidden=False)
         result = parse_cli_to_config(args, "phase")
         assert "synthetic" not in result
         assert "quiet" not in result
@@ -128,9 +119,7 @@ class TestParseCliToConfig:
 
     def test_cli_merges_non_bool(self):
         """Only non-action='store_*' args are included."""
-        args = argparse.Namespace(
-            n_layers=4, lr=0.001, synthetic=True, verbose=False
-        )
+        args = argparse.Namespace(n_layers=4, lr=0.001, synthetic=True, verbose=False)
         result = parse_cli_to_config(args, "C")
         assert "n_layers" in result
         assert "lr" in result
@@ -146,8 +135,12 @@ class TestLoadConfig:
     def test_load_cli_overrides_defaults(self):
         """CLI args should override values from defaults."""
         args = argparse.Namespace(
-            n_layers=8, embed_dim=256, n_heads=8, n_groups=8,
-            synthetic=True, seed=99,
+            n_layers=8,
+            embed_dim=256,
+            n_heads=8,
+            n_groups=8,
+            synthetic=True,
+            seed=99,
         )
         result = load_config(args, "C", config_file=None, env_prefix="UNUSED", tmpdir=None)
         # CLI value should override
@@ -160,8 +153,12 @@ class TestLoadConfig:
     def test_phase_not_in_merged(self):
         """The 'phase' key from CLI is metadata — not merged into tracked values."""
         args = argparse.Namespace(
-            n_layers=8, embed_dim=256, n_heads=8, n_groups=8,
-            synthetic=True, verbose=False,
+            n_layers=8,
+            embed_dim=256,
+            n_heads=8,
+            n_groups=8,
+            synthetic=True,
+            verbose=False,
         )
         result = load_config(args, "C", config_file=None, env_prefix="UNUSED", tmpdir=None)
         # "phase" is metadata from parse_cli_to_config, excluded from merged result
@@ -170,8 +167,12 @@ class TestLoadConfig:
     def test_env_overrides_defaults(self):
         """Environment variables should override defaults."""
         args = argparse.Namespace(
-            n_layers=8, embed_dim=256, n_heads=8, n_groups=8,
-            synthetic=True, seed=99,
+            n_layers=8,
+            embed_dim=256,
+            n_heads=8,
+            n_groups=8,
+            synthetic=True,
+            seed=99,
         )
         # Save original if set
         old_n_layers = os.environ.pop("UNUSED_N_LAYERS", None)

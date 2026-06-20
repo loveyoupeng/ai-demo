@@ -145,7 +145,7 @@ class _SiluTriton(torch.autograd.Function):
             Gradient w.r.t. input, same shape as the saved input.
 
         """
-        x, = ctx.saved_tensors
+        (x,) = ctx.saved_tensors
         # Compute gradient directly using PyTorch's SiLU gradient formula
         # d/dx SiLU(x) = sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
         sigma = torch.sigmoid(x)

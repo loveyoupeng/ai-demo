@@ -180,10 +180,13 @@ class TritonModel(nn.Module):
                 param_name = attr_name.split(".", 1)[1]
                 # Map uppercase constant name → (module, attr) for Linear wrappers
                 upper = param_name.upper()
-                w_mapping = {"WQ": ("Wq", "weight"), "WK": ("Wk", "weight"),
-                             "WV": ("Wv", "weight"), "WO": ("Wo", "weight")}
-                b_mapping = {"BQ": ("Wq", "bias"), "BK": ("Wk", "bias"),
-                             "BV": ("Wv", "bias"), "BO": ("Wo", "bias")}
+                w_mapping = {
+                    "WQ": ("Wq", "weight"),
+                    "WK": ("Wk", "weight"),
+                    "WV": ("Wv", "weight"),
+                    "WO": ("Wo", "weight"),
+                }
+                b_mapping = {"BQ": ("Wq", "bias"), "BK": ("Wk", "bias"), "BV": ("Wv", "bias"), "BO": ("Wo", "bias")}
                 if upper in w_mapping:
                     mod_name, attr_name2 = w_mapping[upper]
                     return getattr(getattr(block.mha, mod_name), attr_name2)
@@ -261,7 +264,6 @@ class TritonModel(nn.Module):
 
         # Stack layers
         for layer_idx, block in enumerate(self.stack.layers):
-
             # Layer norm gamma (now stored as RMSNorm instance weight)
             result[Block.ln1_gamma(layer_idx)] = block.ln1.weight.detach().cpu().numpy()
             result[Block.ln2_gamma(layer_idx)] = block.ln2.weight.detach().cpu().numpy()
@@ -312,10 +314,11 @@ class TritonModel(nn.Module):
             params: Dictionary mapping parameter names to NumPy arrays.
 
         """
+
         def load(key: str, tensor: torch.Tensor, transpose: bool = False) -> None:
             np_array = params[key]
             loaded = torch.from_numpy(np_array).to(tensor.dtype)
-            if (tensor.dim() == 2 and transpose):
+            if tensor.dim() == 2 and transpose:
                 loaded = loaded.T.contiguous()
             tensor.data.copy_(loaded)
 
@@ -324,7 +327,6 @@ class TritonModel(nn.Module):
 
         # Stack layers
         for layer_idx, block in enumerate(self.stack.layers):
-
             # Layer norm gamma (now stored as RMSNorm instance weight)
             load(Block.ln1_gamma(layer_idx), block.ln1.weight)
             load(Block.ln2_gamma(layer_idx), block.ln2.weight)
@@ -361,8 +363,7 @@ class TritonModel(nn.Module):
 
         # Output projection — transposed from NumPy (in, out) to PyTorch (out, in)
         def load_output_proj(key, tensor):
-            return tensor.data.copy_(
-                    torch.from_numpy(params[key]).to(tensor.dtype).T
-                )
+            return tensor.data.copy_(torch.from_numpy(params[key]).to(tensor.dtype).T)
+
         load_output_proj(Transformer.OUTPUT_PROJ_W, self.output_proj.weight)
         load(Transformer.OUTPUT_PROJ_B, self.output_proj.bias)

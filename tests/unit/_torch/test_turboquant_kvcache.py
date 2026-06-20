@@ -14,9 +14,7 @@ class TestTorchTurboQuantKVCache:
         from impl._torch.turboquant_kv_cache import TorchTurboQuantKVCache
 
         B, S, H, D = 2, 10, 3, 8
-        cache = TorchTurboQuantKVCache(
-            max_length=S, n_layers=2, n_heads=H, head_dim=D
-        )
+        cache = TorchTurboQuantKVCache(max_length=S, n_layers=2, n_heads=H, head_dim=D)
 
         k = torch.randn(B, H, 1, D, dtype=torch.float32)
         v = torch.randn(B, H, 1, D, dtype=torch.float32)
@@ -32,9 +30,7 @@ class TestTorchTurboQuantKVCache:
         from impl._torch.turboquant_kv_cache import TorchTurboQuantKVCache
 
         B, H, D = 1, 2, 8
-        cache = TorchTurboQuantKVCache(
-            max_length=5, n_layers=1, n_heads=H, head_dim=D
-        )
+        cache = TorchTurboQuantKVCache(max_length=5, n_layers=1, n_heads=H, head_dim=D)
 
         # Create a clear positive tensor so all bits = 1
         k = torch.ones(B, H, 1, D, dtype=torch.float32) * 2.0
@@ -51,9 +47,7 @@ class TestTorchTurboQuantKVCache:
         from impl._torch.turboquant_kv_cache import TorchTurboQuantKVCache
 
         B, H, D = 1, 2, 16
-        cache = TorchTurboQuantKVCache(
-            max_length=5, n_layers=1, n_heads=H, head_dim=D
-        )
+        cache = TorchTurboQuantKVCache(max_length=5, n_layers=1, n_heads=H, head_dim=D)
 
         # Mixed values: some positive, some negative
         torch.manual_seed(42)
@@ -79,9 +73,7 @@ class TestTorchTurboQuantKVCache:
         from impl._torch.turboquant_kv_cache import TorchTurboQuantKVCache
 
         B, H, D = 1, 2, 4
-        cache = TorchTurboQuantKVCache(
-            max_length=5, n_layers=1, n_heads=H, head_dim=D
-        )
+        cache = TorchTurboQuantKVCache(max_length=5, n_layers=1, n_heads=H, head_dim=D)
 
         for pos in range(3):
             k = torch.full((B, H, 1, D), float(pos + 1), dtype=torch.float32)
@@ -94,18 +86,14 @@ class TestTorchTurboQuantKVCache:
         # After dequantization, all-positive values reconstruct to scale ≈ value
         # Position 0 has value 1.0, position 1 has 2.0, position 2 has 3.0
         for pos, expected in enumerate([1.0, 2.0, 3.0]):
-            assert torch.allclose(
-                k_result[0][:, :, pos, :], torch.tensor(expected, dtype=torch.float32), atol=0.5
-            )
+            assert torch.allclose(k_result[0][:, :, pos, :], torch.tensor(expected, dtype=torch.float32), atol=0.5)
 
     def test_clear(self) -> None:
         """After clear, cache is empty."""
         from impl._torch.turboquant_kv_cache import TorchTurboQuantKVCache
 
         B, H, D = 2, 3, 16
-        cache = TorchTurboQuantKVCache(
-            max_length=10, n_layers=2, n_heads=H, head_dim=D
-        )
+        cache = TorchTurboQuantKVCache(max_length=10, n_layers=2, n_heads=H, head_dim=D)
         k = torch.randn(B, H, 1, D, dtype=torch.float32)
         v = torch.randn(B, H, 1, D, dtype=torch.float32)
         cache.update(k, v, 0)
