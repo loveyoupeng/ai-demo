@@ -10,8 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from impl._triton.ffn import swiglu_ffn
-from impl._triton.layernorm import rmsnorm
+from impl._torch.layers import SwiGLUFFN
 from impl._triton.transformer import TritonDecoderStack
 from shared.constants import Block, Mha, Transformer
 
@@ -26,7 +25,7 @@ class TritonModel(nn.Module):
         |
         +-> Embedding table lookup       [batch, seq_len, embed_dim]
         +-> DecoderStack (Triton n_layers) [batch, seq_len, embed_dim]
-        +-> RMSNorm (final_ln_gamma)      [batch, seq_len, embed_dim]
+        +-> RMSNorm (final_ln)            [batch, seq_len, embed_dim]
         +-> SwiGLU (output)               [batch, seq_len, embed_dim]
         +-> Linear (output_proj)          [batch, seq_len, vocab_size]
 
@@ -71,16 +70,13 @@ class TritonModel(nn.Module):
             k=k,
         )
 
-        # Final layer normalization — learnable gamma (raw param, not instance)
-        self.final_ln_gamma = nn.Parameter(torch.ones(embed_dim))
+        # Final layer normalization — RMSNorm instance to match _torch
+        self.final_ln = nn.RMSNorm(embed_dim, eps=1e-5)
 
         # Output projection — SwiGLU -> Linear
         # SwiGLU maps D -> D via hidden (D*2), then linear projects D -> V
         ff_dim_out = embed_dim * 2  # output projection hidden dim
-        self.output_W1 = nn.Parameter(torch.empty(embed_dim, ff_dim_out))
-        self.output_W2 = nn.Parameter(torch.empty(ff_dim_out, embed_dim))
-        self.output_W3 = nn.Parameter(torch.empty(embed_dim, ff_dim_out))
-        self.reset_output_parameters()
+        self.output = SwiGLUFFN(embed_dim, ff_dim_out)
 
         # Output projection to vocabulary
         self.output_proj = nn.Linear(embed_dim, vocab_size, bias=True)
@@ -89,14 +85,7 @@ class TritonModel(nn.Module):
 
     def reset_parameters(self) -> None:
         nn.init.kaiming_uniform_(self.embedding.weight, a=0.01)
-        nn.init.kaiming_uniform_(self.output_W1, a=0.01)
-        nn.init.kaiming_uniform_(self.output_W3, a=0.01)
-        nn.init.kaiming_uniform_(self.output_W2, a=0.01)
-
-    def reset_output_parameters(self) -> None:
-        nn.init.kaiming_uniform_(self.output_W1, a=0.01)
-        nn.init.kaiming_uniform_(self.output_W3, a=0.01)
-        nn.init.kaiming_uniform_(self.output_W2, a=0.01)
+        self.output.reset_parameters()
 
     def _move_to_device(self, x: torch.Tensor) -> None:
         device = x.device
@@ -125,11 +114,11 @@ class TritonModel(nn.Module):
         # Decoder stack: [B,S,D] -> [B,S,D] — all Triton kernels
         x = self.stack(x)
 
-        # Final layer normalization: [B,S,D] -> [B,S,D] — Triton kernel
-        x = rmsnorm(x, self.final_ln_gamma)  # (B, S, D)
+        # Final layer normalization: [B,S,D] -> [B,S,D] — instance layer
+        x = self.final_ln(x)  # (B, S, D)
 
         # SwiGLU output projection: [B,S,D] -> [B,S,D]
-        x = swiglu_ffn(x, self.output_W1, self.output_W3, self.output_W2)  # (B, S, D)
+        x = self.output(x)  # (B, S, D)
 
         # Linear projection to vocabulary: [B,S,D] -> [B,S,V]
         logits = self.output_proj(x)
@@ -230,13 +219,13 @@ class TritonModel(nn.Module):
                 # Direct block attribute: gate1, gate2, ln1, ln2
                 return getattr(block, first_attr)
         elif key == Transformer.FINAL_GAMMA:
-            return self.final_ln_gamma
+            return self.final_ln.weight
         elif key == Transformer.OUTPUT_W1:
-            return self.output_W1
+            return self.output.W1
         elif key == Transformer.OUTPUT_W2:
-            return self.output_W2
+            return self.output.W2
         elif key == Transformer.OUTPUT_W3:
-            return self.output_W3
+            return self.output.W3
         elif key == Transformer.OUTPUT_PROJ_W:
             return self.output_proj.weight
         elif key == Transformer.OUTPUT_PROJ_B:
@@ -285,12 +274,12 @@ class TritonModel(nn.Module):
                 result[Block.moe_expert(layer_idx, expert_idx, "W3")] = expert.W3.detach().cpu().numpy()
 
         # Final ln
-        result[Transformer.FINAL_GAMMA] = self.final_ln_gamma.detach().cpu().numpy()
+        result[Transformer.FINAL_GAMMA] = self.final_ln.weight.detach().cpu().numpy()
 
         # Output SwiGLU
-        result[Transformer.OUTPUT_W1] = self.output_W1.detach().cpu().numpy()
-        result[Transformer.OUTPUT_W2] = self.output_W2.detach().cpu().numpy()
-        result[Transformer.OUTPUT_W3] = self.output_W3.detach().cpu().numpy()
+        result[Transformer.OUTPUT_W1] = self.output.W1.detach().cpu().numpy()
+        result[Transformer.OUTPUT_W2] = self.output.W2.detach().cpu().numpy()
+        result[Transformer.OUTPUT_W3] = self.output.W3.detach().cpu().numpy()
 
         # Output projection — transpose to NumPy convention (in, out) for
         # cross-backend compatibility (matches TorchModel.save_as_numpy())
@@ -340,16 +329,16 @@ class TritonModel(nn.Module):
                 load(Block.moe_expert(layer_idx, expert_idx, "W2"), expert.W2)
                 load(Block.moe_expert(layer_idx, expert_idx, "W3"), expert.W3)
 
-        # Final ln — accept both naming conventions (final_gamma from torch, final_ln_gamma from triton)
+        # Final ln — accept both naming conventions (final_ln_gamma from np, final_ln from torch)
         try:
-            load(Transformer.FINAL_GAMMA, self.final_ln_gamma)
+            load(Transformer.FINAL_GAMMA, self.final_ln.weight)
         except KeyError:
-            load("final_gamma", self.final_ln_gamma)
+            load("final_gamma", self.final_ln.weight)
 
         # Output SwiGLU
-        load(Transformer.OUTPUT_W1, self.output_W1)
-        load(Transformer.OUTPUT_W2, self.output_W2)
-        load(Transformer.OUTPUT_W3, self.output_W3)
+        load(Transformer.OUTPUT_W1, self.output.W1)
+        load(Transformer.OUTPUT_W2, self.output.W2)
+        load(Transformer.OUTPUT_W3, self.output.W3)
 
         # Output projection — transposed from NumPy (in, out) to PyTorch (out, in)
         def load_output_proj(key, tensor):

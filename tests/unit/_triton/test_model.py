@@ -151,12 +151,12 @@ class TestTritonModel:
             tb.gate2.data.copy_(tblock.gate2.data)
 
         # Final ln
-        triton_model.final_ln_gamma.data.copy_(torch_model.final_ln.gamma.data)
+        triton_model.final_ln.weight.data.copy_(torch_model.final_ln.gamma.data)
 
         # Output projection
-        triton_model.output_W1.data.copy_(torch_model.output.W1.data)
-        triton_model.output_W2.data.copy_(torch_model.output.W2.data)
-        triton_model.output_W3.data.copy_(torch_model.output.W3.data)
+        triton_model.output.W1.data.copy_(torch_model.output.W1.data)
+        triton_model.output.W2.data.copy_(torch_model.output.W2.data)
+        triton_model.output.W3.data.copy_(torch_model.output.W3.data)
         triton_model.output_proj.weight.data.copy_(torch_model.output_proj.weight.data)
         triton_model.output_proj.bias.data.copy_(torch_model.output_proj.bias.data)
 
