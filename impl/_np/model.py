@@ -202,6 +202,10 @@ class NumPyModel:
             params[Block.ln1_gamma(layer_idx)] = block.ln1_gamma
             params[Block.ln2_gamma(layer_idx)] = block.ln2_gamma
 
+            # Gate parameters
+            params[Block.gate1(layer_idx)] = block.gate1
+            params[Block.gate2(layer_idx)] = block.gate2
+
             # MHA
             for param_name in ("Wq", "bq", "Wk", "bk", "Wv", "bv", "Wo", "bo"):
                 params[Block.mha(layer_idx, param_name)] = getattr(block.mha, param_name)
@@ -226,6 +230,67 @@ class NumPyModel:
         params[Transformer.OUTPUT_PROJ_B] = self.output_proj_b
 
         return params
+
+    def load_from_numpy_dict(
+        self, params_dict: dict[str, np.ndarray],
+    ) -> None:
+        """Load parameters from a NumPy-style dictionary.
+
+        Keys are expected to match the format produced by
+        :meth:`get_all_parameters`.
+
+        Parameters
+        ----------
+        params_dict : dict[str, np.ndarray]
+            Dictionary mapping parameter names to NumPy arrays.
+
+        """
+        # Embedding
+        self.embedding_weights = np.copy(
+            params_dict[Transformer.EMBEDDING_WEIGHTS],
+        )
+
+        # Stack layers
+        for layer_idx, block in enumerate(self.stack.blocks):
+            ln1_key = Block.ln1_gamma(layer_idx)
+            ln2_key = Block.ln2_gamma(layer_idx)
+            block.ln1_gamma = np.copy(params_dict[ln1_key])
+            block.ln2_gamma = np.copy(params_dict[ln2_key])
+
+            # Gate parameters
+            block.gate1 = np.copy(params_dict[Block.gate1(layer_idx)])
+            block.gate2 = np.copy(params_dict[Block.gate2(layer_idx)])
+
+            # MHA weights
+            for param_name in ("Wq", "bq", "Wk", "bk", "Wv", "bv", "Wo", "bo"):
+                key = Block.mha(layer_idx, param_name)
+                setattr(block.mha, param_name, np.copy(params_dict[key]))
+
+            # MoE
+            block.moe.router = np.copy(params_dict[Block.moe_router(layer_idx)])
+            block.moe.bias = np.copy(params_dict[Block.moe_bias(layer_idx)])
+            for expert_idx, expert in enumerate(block.moe.experts):
+                for pw in ("W1", "W2", "W3"):
+                    key = Block.moe_expert(layer_idx, expert_idx, pw)
+                    setattr(expert, pw, np.copy(params_dict[key]))
+
+        # Final LN
+        self.final_ln_gamma = np.copy(
+            params_dict[Transformer.FINAL_GAMMA],
+        )
+
+        # Output SwiGLU
+        self.output.W1 = np.copy(params_dict[Transformer.OUTPUT_W1])
+        self.output.W2 = np.copy(params_dict[Transformer.OUTPUT_W2])
+        self.output.W3 = np.copy(params_dict[Transformer.OUTPUT_W3])
+
+        # Output projection
+        self.output_proj_w = np.copy(
+            params_dict[Transformer.OUTPUT_PROJ_W],
+        )
+        self.output_proj_b = np.copy(
+            params_dict[Transformer.OUTPUT_PROJ_B],
+        )
 
     def backward(self, logits: np.ndarray, targets: np.ndarray, input_ids: np.ndarray) -> dict[str, np.ndarray]:
         """Compute gradients for all parameters using numerical differentiation.

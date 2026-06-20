@@ -266,6 +266,10 @@ class TritonModel(nn.Module):
             result[Block.ln1_gamma(layer_idx)] = block.ln1.weight.detach().cpu().numpy()
             result[Block.ln2_gamma(layer_idx)] = block.ln2.weight.detach().cpu().numpy()
 
+            # Gate parameters (initialized to zero)
+            result[Block.gate1(layer_idx)] = block.gate1.detach().cpu().numpy()
+            result[Block.gate2(layer_idx)] = block.gate2.detach().cpu().numpy()
+
             # MHA weights — transpose to NumPy convention (in, out) for cross-backend compatibility
             result[Block.mha(layer_idx, Mha.WQ)] = block.mha.Wq.weight.detach().cpu().T.numpy()
             result[Block.mha(layer_idx, Mha.BQ)] = block.mha.Wq.bias.detach().cpu().numpy()
