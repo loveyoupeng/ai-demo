@@ -381,3 +381,27 @@ layers.N.mha.Wq     → stack.layers[N].mha.Wq
 ```
 
 This enables the parity test to sync parameters using PyTorch's key names while Triton resolves them to correct internal attributes.
+
+---
+
+## Phase E+: Summary — All 6 Waves Complete (Jun 20)
+
+**Status:** ✅ ALL DONE — 551 tests pass, ruff + pyright clean
+
+**Phase E+ Plan File:** `docs/phase_e_plus_plan.md` (all 12 checkboxes marked [x])
+
+**Summary of all 6 waves:**
+
+| Wave | Description | Result |
+|------|-------------|--------|
+| Wave 1: Constant Consolidation | Extended `shared/constants.py` with `Block`, `Mha`, `Transformer` helpers; replaced ALL magic strings | 0 raw strings remain |
+| Wave 2: Triton Documentation | All 5 kernel files get comprehensive docs (formula, algorithm, memory, performance) | All `@triton.jit` functions documented |
+| Wave 3: Naming & Parity | RMSNorm instances, SwiGLU instance, MoE naming, weight transpose & bias | 3-way naming parity |
+| Wave 3+: 4-Way Equivalence | `test_3way_equivalence.py` with 4 tests — all pass | NumPy/Torch/Triton cross-load works |
+| Wave 4: Code Cleanup | ruff formatting, unused imports | 551 tests still pass |
+| Wave 5: Design Doc Updates | `docs/design.md` updated with naming guide, Phase E+ section | Document reflects current state |
+
+**551 tests breakdown:**
+- shared/ + unit tests: ~540
+- cross_backend: 21 (including 3-way equivalence)
+- All pass, ruff clean, pyright clean

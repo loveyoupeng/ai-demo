@@ -1,6 +1,6 @@
 # Design Document: Decoder-Only Transformer Learning Project
 
-**Date:** 2026-06-14 (last synced: 2026-06-18)
+**Date:** 2026-06-14 (last synced: 2026-06-20)
 **Goal:** Build a fully functional decoder-only transformer LLM in 4 equivalent implementations (NumPy, PyTorch, Triton, CUDA) for educational purposes.
 
 ---
@@ -155,9 +155,9 @@ Each expert implementation:
 
 ## 3. Project Structure
 
-**Date:** 2026-06-14 (last synced: 2026-06-18)
+**Date:** 2026-06-14 (last synced: 2026-06-20)
 
-**Note:** Only 2 of 4 planned backends have been implemented. Triton and CUDA are not yet started.
+**Note:** Only 3 of 4 planned backends have been implemented. CUDA not yet started.
 
 ```
 project-root/
@@ -202,10 +202,34 @@ project-root/
 │   │   ├── turboquant_kv_cache.py  # TurboQuant 1-bit KV cache
 │   │   └── cli.py               # CLI entry point (argparse)
 │   │
-│   ├── triton/                  # GPU kernels in Triton DSL (NOT STARTED)
-│   │   └── ...
+│   ├── _triton/                  # GPU kernels in Triton DSL ✅ COMPLETE
+│   │   ├── __init__.py
+│   │   ├── activation.py         # SiLU, gating kernels
+│   │   ├── layernorm.py          # RMSNorm kernel
+│   │   ├── rope.py               # RoPE kernel
+│   │   ├── ffn.py                # SwiGLU kernel
+│   │   ├── attention.py          # MHA kernel (full attention + GQA)
+│   │   ├── moe.py                # MoE routing + expert computation
+│   │   ├── transformer.py        # TransformerBlock wrapper (Python)
+│   │   ├── model.py              # TritonModel → PyTorch nn.Module wrapper
+│   │   ├── inference.py          # Inference engine (same API as _torch)
+│   │   └── training.py           # Training loop (same API as _torch)
 │   │
-│   └── cuda/                    # Bare-metal GPU code (NOT STARTED)
+│   ├── _cuda/                    # Bare-metal CUDA C (NOT STARTED)
+│   │   ├── __init__.py
+│   │   ├── compiler.py           # CUDA source → PTX → runtime compilation
+│   │   ├── activation.py         # SiLU/CUDA wrapper
+│   │   ├── layernorm.py          # RMSNorm/CUDA wrapper
+│   │   ├── rope.py               # RoPE/CUDA wrapper
+│   │   ├── ffn.py                # SwiGLU/CUDA wrapper
+│   │   ├── attention.py          # MHA/CUDA wrapper
+│   │   ├── moe.py                # MoE/CUDA wrapper
+│   │   ├── transformer.py        # TransformerBlock wrapper
+│   │   ├── model.py              # CUDAModel → model integration
+│   │   ├── inference.py          # Inference engine
+│   │   └── training.py           # Training loop
+│   │
+│   └── cuda/                     # (Legacy/placeholder — use _cuda/)
 │       └── ...
 │
 ├── tests/                       # Test suite (63 files, 421+ tests)
@@ -248,6 +272,8 @@ project-root/
 │   │       ├── test_verify_equivalence.py
 │   │       └── test_auto_test_equivalence.py
 │   └── cross_backend/           # Cross-backend parity (merged into main)
+│       ├── test_3way_equivalence.py  # 3-way: NumPy/Torch/Triton
+│       └── (parity_cuda.py coming in Phase F)
 │
 ├── scripts/
 │   ├── train.py                 # Unified training entry point (--backend numpy/torch)
@@ -451,8 +477,8 @@ Each backend produces identical outputs. Pick the one that matches your goal:
 | Checkpoint Round-trip | ✅ | — | — | — | — | — |
 
 **Status:** All NumPy vs PyTorch rows verified — 5 parity tests pass, `weight_diff=0.0`.
-Triton: 🔶 Phase E ready to start (GPU confirmed, plan complete).
-CUDA: 🔲 Not started.
+Triton: ✅ Complete — 538 tests, parity with NumPy/PyTorch verified.
+CUDA: 🔲 Not started — Phase F plan ready.
 
 **Tolerances (following AGENTS.md tiered policy):**
 - Standalone layer (tested in isolation): `rtol=1e-4, atol=1e-4`
@@ -831,14 +857,30 @@ Wave 4: Code Cleanup (1-2 commits)
 
 **Note:** The plan file `docs/phase_e_plus_plan.md` contains the full detailed specification for all 6 waves of Phase E+. This design doc has been updated to reflect the current implemented state.
 
-### Phase F: CUDA 🔲 Not Started
+### Phase F: CUDA 🔲 NOT STARTED (Plan Ready)
 ```
-E1: CUDA kernels (all compute ops)
-E2: Python wrapper for kernels
-E3: Full model
-E4: Cross-backend parity tests
-E5: Training + Inference
+F0: Scaffolding
+F1: SiLU kernel (element-wise CUDA C)
+F2: RMSNorm kernel (reduction)
+F3: RoPE kernel (trig, indexing)
+F4: SwiGLU kernel (SiLU + matmul)
+F5: MHA kernel (attention + GQA, tiled)
+F6: MoE kernel (top-k routing)
+F7: TransformerBlock assembly
+F8: DecoderStack assembly
+F9: Full CUDAModel (save/load/parity)
+F10: Inference + Training scripts
+F11: 4-way cross-backend parity (NumPy/Torch/Triton/CUDA)
 ```
+
+**Plan:** `docs/phase_f_plan.md` — 12-stage TDD plan, ~15 commits, ~21 hours
+
+**CUDA-Specific Notes:**
+- Hand-written `.cu` files (not wrappers around cuBLAS/cuDNN)
+- Manual memory management via `cuda-python` bindings
+- Runtime PTX compilation via NVRTC
+- Learning: shared memory, warp reduction, coalesced access, stream ordering
+- Use `cuda-python` for CUDA C Runtime API access from Python
 
 ---
 

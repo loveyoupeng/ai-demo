@@ -9,10 +9,9 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 **Phase 3++ (Normalization Improvements) is ✅ COMPLETE.**
 **Phase D (Cross-Backend Equivalence) is ✅ COMPLETE.**
 **Phase E (Triton GPU Kernels) is ✅ COMPLETE.** — 538 tests pass
+**Phase E+ (Cleanup & Refinement) is ✅ COMPLETE.** — 551 tests pass
 
-**Next step: Phase E+ — Cleanup & Refinement** (5 goals planned in `docs/phase_e_plus_plan.md`)
-
-- **E+Wave1 (Jun 20):** ✅ COMPLETE — All magic strings eliminated. Extended `shared/constants.py` with `Block`, `Mha`, `Transformer` constants. Replaced all string literals in `impl/_np/model.py`, `impl/_torch/layers.py`, `impl/_triton/model.py` save/load methods. Fixed transpose logic bug. Standardized `final_ln_gamma` across backends. 317 tests pass, ruff clean.
+**Next step: Phase F (CUDA Bare-Metal)** — plan ready in `docs/phase_f_plan.md`
 
 ---
 
@@ -58,11 +57,18 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 - Parity via `save_as_numpy()` → `load_from_numpy_dict()` (transposed output_proj weights for compat)
 - **Total tests:** 538 (all pass), ruff + pyright clean
 
-### Phase F: CUDA Implementation (Lowest Level) 🔲 NOT STARTED
+### Phase E+: Cleanup & Refinement ✅ COMPLETE
+- Zero magic strings in codebase (all constants in `shared/constants.py`)
+- All 551 tests pass, ruff + pyright clean
+- Consistent naming across all 3 backends
+- Comprehensive documentation for all Triton kernels
+- 3-way equivalence: NumPy/Torch/Triton produce identical outputs
 
-### Phase F: CUDA Implementation (Lowest Level) 🔲 NOT STARTED
-- `nvidia/cuda-python` bindings, same architecture
-- Parity tests, benchmarks
+### Phase F: CUDA Implementation (Bare-Metal) 🔲 NOT STARTED
+- Plan: `docs/phase_f_plan.md` — 12 stages, ~15 commits, ~21 hours
+- Hand-written `.cu` files via `cuda-python` bindings
+- Manual memory management, PTX compilation, shared memory
+- Learning: CUDA C, warp reduction, coalesced access, stream ordering
 
 ### Phase G: Integration & Verification 🔲 NOT STARTED
 - Train on TinyStories per backend -> save/load cross-validation -> identical outputs -> final e2e script
@@ -71,7 +77,7 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 
 ## Phase E: Triton Implementation (GPU Kernel Optimization) ✅ COMPLETE
 
-**Status:** ✅ Complete — all 12 stages done (E0–E11), 538 tests pass total
+**Status:** ✅ Complete — all 12 stages done (E0–E11) + E+ cleanup, 551 tests pass total
 
 **Completed Stages:**
 - `E0` — Scaffolding: `impl/_triton/` + `tests/unit/_triton/`
@@ -190,9 +196,11 @@ All improvements implemented in both backends:
 | B (NumPy) | ~70 | 21 (b0-b19) | ✅ Complete |
 | C (PyTorch) | 129 | 36 (c0-c36) | ✅ Complete |
 | C+ (E2E) | 90 | 8 (c37-c44) | ✅ Complete |
-| **C++ (Norm)** | **21** | **3 (d0-d2)** | **✅ Complete** |
-| **D (Equivalence)** | **0** | **1 (e0)** | **✅ Complete** |
-| **Total** | **421** | **80+** | **All pass, ruff/pyright clean** |
+| C++ (Norm) | 21 | 3 (d0-d2) | ✅ Complete |
+| D (Equivalence) | 0 | 1 (e0) | ✅ Complete |
+| E (Triton) | 538 | ~53 | ✅ Complete |
+| E+ (Cleanup) | +13 | ~15 | ✅ Complete |
+| **Total** | **551** | **~128** | **All pass, ruff/pyright clean** |
 
 ---
 

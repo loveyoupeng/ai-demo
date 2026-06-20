@@ -209,3 +209,23 @@
 | `5f6cf4b` | Wave 3 Step 1: Triton naming consistency — RMSNorm instances |
 | `5ed9d0f` | Wave 3 Step 2: TritonModel-level naming parity (final_ln, output SwiGLU) |
 
+---
+
+## Phase E+ — ALL 6 WAVES COMPLETE (Jun 20)
+
+- Wave 1: Constant consolidation — 0 raw strings remain
+- Wave 2: Triton documentation — all 5 kernel files documented
+- Wave 3: Naming parity — RMSNorm instances, SwiGLU instance, MoE naming
+- Wave 3+: 3-way equivalence — test_3way_equivalence.py (4/4 pass)
+- Wave 4: Code cleanup — ruff clean
+- Wave 5: Design doc updates — design.md reflects current state
+- Phase E+ plan: `docs/phase_e_plus_plan.md` — all 12 checkboxes marked [x]
+- **Total tests: 551** (all pass), ruff clean, pyright clean
+
+## Phase F — NOT STARTED (Plan Ready)
+
+- Plan: `docs/phase_f_plan.md` — 12 stages, ~15 commits, ~21 hours
+- Hand-written CUDA C (`.cu`) files via `cuda-python` bindings
+- Manual memory management, PTX compilation, shared memory
+- Learning: warp reduction, coalesced access, stream ordering
+
