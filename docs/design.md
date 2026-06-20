@@ -343,6 +343,101 @@ def set_global_seed(seed: int):
         torch.cuda.manual_seed_all(seed)   # All CUDA GPUs
 ```
 
+### 4.5 Unified Naming Reference
+
+All three backends use identical parameter names via `shared/constants.py` constants.
+Here is the 1:1 mapping:
+
+| NumPy Model Attribute           | PyTorch Model Attribute            | Triton Model Attribute            | Shared Key (Constants)            |
+|---------------------------------|------------------------------------|-----------------------------------|-----------------------------------|
+| `embedding_weights`             | `embedding.weight`                 | `embedding.weight`                | `Transformer.EMBEDDING_WEIGHTS`   |
+| `stack.blocks[i].ln1_gamma`     | `stack.layers[i].ln1.weight`       | `stack.layers[i].ln1.weight`      | `Block.ln1_gamma(i)`             |
+| `stack.blocks[i].ln2_gamma`     | `stack.layers[i].ln2.weight`       | `stack.layers[i].ln2.weight`      | `Block.ln2_gamma(i)`             |
+| `stack.blocks[i].gate1`         | `stack.layers[i].gate1`            | `stack.layers[i].gate1`           | `Block.gate1(i)`                 |
+| `stack.blocks[i].gate2`         | `stack.layers[i].gate2`            | `stack.layers[i].gate2`           | `Block.gate2(i)`                 |
+| `stack.blocks[i].mha.Wq`        | `stack.layers[i].mha.Wq.weight`    | `stack.layers[i].mha.Wq.weight`   | `Block.mha(i, 'Wq')`             |
+| `stack.blocks[i].mha.Wk`        | `stack.layers[i].mha.Wk.weight`    | `stack.layers[i].mha.Wk.weight`   | `Block.mha(i, 'Wk')`             |
+| `stack.blocks[i].mha.Wv`        | `stack.layers[i].mha.Wv.weight`    | `stack.layers[i].mha.Wv.weight`   | `Block.mha(i, 'Wv')`             |
+| `stack.blocks[i].mha.Wo`        | `stack.layers[i].mha.Wo.weight`    | `stack.layers[i].mha.Wo.weight`   | `Block.mha(i, 'Wo')`             |
+| `stack.blocks[i].moe.experts[j].W1` | `stack.layers[i].mlp.experts[j].W1` | `stack.layers[i].mlp.experts[j].W1` | `Block.moe_expert(i, j, 'W1')` |
+| `stack.blocks[i].moe.experts[j].W2` | `stack.layers[i].mlp.experts[j].W2` | `stack.layers[i].mlp.experts[j].W2` | `Block.moe_expert(i, j, 'W2')` |
+| `stack.blocks[i].moe.experts[j].W3` | `stack.layers[i].mlp.experts[j].W3` | `stack.layers[i].mlp.experts[j].W3` | `Block.moe_expert(i, j, 'W3')` |
+| `output.W1`                     | `output.W1`                        | `output.W1`                       | `Transformer.OUTPUT_W1`          |
+| `output.W2`                     | `output.W2`                        | `output.W2`                       | `Transformer.OUTPUT_W2`          |
+| `output.W3`                     | `output.W3`                        | `output.W3`                       | `Transformer.OUTPUT_W3`          |
+| `output_proj_w`                 | `output_proj.weight`               | `output_proj.weight`              | `Transformer.OUTPUT_PROJ_W`      |
+| `final_ln_gamma`                | `final_ln.weight`                  | `final_ln.weight`                 | `Transformer.FINAL_GAMMA`        |
+
+**Key:** Every save/load function uses constants from `shared/constants.py` — no raw string literals.
+This ensures that all three backends share the same parameter interface and cross-loading works seamlessly.
+
+### 4.6 How to Contribute
+
+This repo is designed for learning and contribution. Here's how to get started:
+
+**1. Understand the Architecture:**
+- Read `docs/design.md` for the full design specification
+- Start with NumPy (`impl/_np/`) — it's the "read to learn" reference implementation with detailed comments
+- PyTorch (`impl/_torch/`) is the "production ready" equivalent
+- Triton (`impl/_triton/`) has custom CUDA kernels with extensive documentation
+
+**2. Run the Training Loop:**
+```bash
+# Train on NumPy backend
+uv run python -m scripts.train --backend numpy --epochs 10 --fast
+
+# Train on PyTorch backend
+uv run python -m scripts.train --backend torch --epochs 10 --fast
+
+# Train on Triton (GPU) backend
+uv run python -m scripts.train --backend triton --epochs 10 --fast
+```
+
+**3. Run Inference:**
+```bash
+# Interactive mode
+uv run python -m scripts.infer --backend numpy --max_length 50
+
+# Generated text comparison
+uv run python -m scripts.infer --backend numpy --backend torch --backend triton
+```
+
+**4. Run Tests (551 tests):**
+```bash
+# All tests
+uv run pytest tests/ -v
+
+# NumPy backend tests
+uv run pytest tests/unit/_np/ -v
+
+# PyTorch backend tests
+uv run pytest tests/unit/_torch/ -v
+
+# Triton backend tests (requires GPU)
+uv run pytest tests/unit/_triton/ -v
+
+# Cross-backend equivalence tests (requires GPU)
+uv run pytest tests/cross_backend/test_3way_equivalence.py -v
+
+# Skip GPU tests
+uv run pytest tests/ -v -m "not gpu"
+```
+
+**5. Understanding the Codebase:**
+- `shared/` — Configuration, constants, dataset loading, tokenizer
+- `impl/_np/` — NumPy implementation (learning-focused, detailed comments)
+- `impl/_torch/` — PyTorch implementation (production-ready, nn.Module-based)
+- `impl/_triton/` — Triton GPU kernels (kernel DSL with math explanations)
+- `scripts/` — CLI scripts (train, infer, verify, auto_test)
+- `tests/` — Unit tests, cross-backend tests, equivalence verification
+- `docs/` — Design docs, plan files, implementation guides
+
+**6. Backend Comparison:**
+Each backend produces identical outputs. Pick the one that matches your goal:
+- **NumPy** → Learn the math (every line commented)
+- **PyTorch** → Learn production-grade ML frameworks
+- **Triton** → Learn CUDA kernel programming (GPGPU)
+
 ### 4.4 Equivalence Test Matrix
 
 | Test | NumPy vs PyTorch | NumPy vs Triton | NumPy vs CUDA | PyTorch vs Triton | PyTorch vs CUDA | Triton vs CUDA |
