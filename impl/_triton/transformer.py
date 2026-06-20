@@ -15,9 +15,9 @@ No new Triton kernels — this is pure PyTorch module wiring.
 import torch
 import torch.nn as nn
 
+from impl._torch.layers import Linear
 from impl._triton.attn import scaled_dot_product_attention
 from impl._triton.ffn import swiglu_ffn
-from impl._torch.layers import Linear
 
 
 class TritonMultiHeadAttention(nn.Module):
