@@ -27,6 +27,7 @@ class Embedding(nn.Module):
     Parameters:
         vocab_size: Number of tokens in the vocabulary.
         embed_dim: Dimension of the embedding vector.
+
     """
 
     __slots__ = ("weight",)
@@ -50,6 +51,7 @@ class Embedding(nn.Module):
 
         Returns:
             Embedding vectors [batch, seq_len, embed_dim].
+
         """
         return nn.functional.embedding(input_ids, self.weight)
 
@@ -71,6 +73,7 @@ class RMSNorm(nn.Module):
     Shape:
         - Input: (..., embed_dim) — any leading batch dimensions
         - Output: (..., embed_dim) — same shape as input
+
     """
 
     __slots__ = ("gamma",)
@@ -88,6 +91,7 @@ class RMSNorm(nn.Module):
 
         Returns:
             RMS-normalized, scaled output. Same shape as input.
+
         """
         # x:           (..., embed_dim)
         # x^2:         (..., embed_dim)
@@ -111,6 +115,7 @@ class SiLULayer(nn.Module):
     Shape:
         - Input: (..., any dims)
         - Output: (..., same) — element-wise
+
     """
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -121,6 +126,7 @@ class SiLULayer(nn.Module):
 
         Returns:
             SiLU(x) = x * sigmoid(x), same shape as input.
+
         """
         return x * torch.sigmoid(x)
 
@@ -144,6 +150,7 @@ class SwiGLUFFN(nn.Module):
         - W1, W3:  (embed_dim, ff_dim)
         - W2:      (ff_dim, embed_dim)
         - output:  (batch, seq_len, embed_dim) — same as input
+
     """
 
     def __init__(self, embed_dim: int, ff_dim: int) -> None:
@@ -170,6 +177,7 @@ class SwiGLUFFN(nn.Module):
 
         Returns:
             Output [batch, seq_len, embed_dim] with gating applied.
+
         """
         # x:        (batch, seq_len, embed_dim)
         # x @ W1:   (batch, seq_len, ff_dim) — projection to inner dim
@@ -217,6 +225,7 @@ class RoPE(nn.Module):
 
     Returns:
         Rotated tensor with same shape as input.
+
     """
 
     def forward(
@@ -234,6 +243,7 @@ class RoPE(nn.Module):
 
         Returns:
             Rotated tensor. Same shape as input.
+
         """
         # x:          (B, S, H, D)
         # positions:  (S,) — position indices
@@ -310,6 +320,7 @@ class Linear(nn.Module):
     Shape:
         - Input:  (..., in_features)
         - Output: (..., out_features)
+
     """
 
     __slots__ = ("weight", "bias")
@@ -339,6 +350,7 @@ class Linear(nn.Module):
 
         Returns:
             Output with last dim = out_features.
+
         """
         w = self.weight.to(x.dtype)
         b = self.bias.to(x.dtype) if self.bias is not None else None
@@ -372,6 +384,7 @@ class MultiHeadAttention(nn.Module):
         n_heads: Number of query heads.
         n_groups: Number of K/V groups (default = n_heads, standard MHA).
         rope_dim: Rotary position embedding dimension (default 0 = disabled).
+
     """
 
     def __init__(
@@ -423,6 +436,7 @@ class MultiHeadAttention(nn.Module):
         Returns:
             output: [batch, seq_len, embed_dim] — attention output
             attn_weights: [batch, n_heads, seq_len, seq_len] — attention for debug
+
         """
         batch_size, seq_len = x.shape[0], x.shape[1]
         head_dim = self.head_dim
@@ -511,6 +525,7 @@ class MixtureOfExperts(nn.Module):
         n_experts: Number of expert networks.
         ff_dim: Feed-forward hidden dimension within each expert.
         k: Number of top experts to select per token (default=2).
+
     """
 
     def __init__(
@@ -542,6 +557,7 @@ class MixtureOfExperts(nn.Module):
 
         Returns:
             Output tensor. Shape [batch, seq, embed_dim].
+
         """
         n_experts = self.n_experts
         k = self.k
@@ -608,6 +624,7 @@ class TransformerBlock(nn.Module):
         ff_dim: Feed-forward hidden dimension per expert.
         k: Number of top experts per token.
         rope_dim: Rotary position embedding dimension (0 = disabled).
+
     """
 
     def __init__(
@@ -665,6 +682,7 @@ class TransformerBlock(nn.Module):
 
         Returns:
             Output tensor. Shape [batch, seq_len, embed_dim].
+
         """
         # ── Stream 1: Attention ─────────────────────────────────────
         # MHA: (B, S, D) → (B, S, D) — attention output
@@ -722,6 +740,7 @@ class DecoderStack(nn.Module):
         ff_dim: Feed-forward hidden dimension per expert.
         k: Number of top experts per token.
         rope_dim: Rotary position embedding dimension (0 = disabled).
+
     """
 
     def __init__(
@@ -758,6 +777,7 @@ class DecoderStack(nn.Module):
 
         Returns:
             Output tensor. Shape [batch, seq_len, embed_dim].
+
         """
         out = x
         for block in self.layers:
@@ -789,6 +809,7 @@ class TorchModel(nn.Module):
         k: Number of top experts per token.
         rope_dim: Rotary position embedding dimension (0 = disabled).
         seed: Random seed for initialization.
+
     """
 
     def __init__(
@@ -843,6 +864,7 @@ class TorchModel(nn.Module):
 
         Returns:
             Predicted logits. Shape [batch_size, seq_len, vocab_size].
+
         """
         # Embedding: [B,S] → [B,S,D]
         x = self.embedding(x)  # (B, S, D)
@@ -870,6 +892,7 @@ class TorchModel(nn.Module):
 
         Args:
             np_model: A NumPyModel instance with loaded parameters.
+
         """
         from impl._np.model import NumPyModel
 
@@ -968,6 +991,7 @@ class TorchModel(nn.Module):
         -----
         Linear weight matrices are transposed to match NumPy's (in, out)
         convention. The matching load_from_numpy_dict reverses this transpose.
+
         """
 
         params: dict[str, Any] = {}
@@ -980,6 +1004,7 @@ class TorchModel(nn.Module):
                 np_key: NumPy parameter name.
                 transpose: If True, transpose the tensor before saving
                     (for Linear layers: PyTorch (out, in) → NumPy (in, out)).
+
             """
             array = tensor.detach().cpu().numpy()
             if transpose:
@@ -1057,6 +1082,7 @@ class TorchModel(nn.Module):
             params_dict: Dictionary mapping parameter names to array-like values.
                          Keys match those from save_as_numpy() (NumPy format,
                          Linear weights are transposed to (in, out)).
+
         """
 
         def load(tensor: Any, np_key: str, transpose: bool = False) -> None:
@@ -1143,6 +1169,7 @@ class AdamW:
     -----
     >>> optimizer = AdamW(lr=1e-3, weight_decay=0.01)
     >>> optimizer.step(model.state_dict())
+
     """
 
     def __init__(
@@ -1176,6 +1203,7 @@ class AdamW:
             Gradients for each parameter (must have same keys as params).
             Each key maps to a tensor of the same shape as the
             corresponding parameter.
+
         """
         self._count += 1
 

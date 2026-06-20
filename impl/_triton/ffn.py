@@ -208,6 +208,7 @@ def swiglu_ffn(
 
     The dual-path architecture (W1→gate AND W3→proj) provides
     richer gradient flow than single-path FFNs.
+
     """
     # ── Step 1: Gate path ─────────────────────────────────────
     # x:       (..., D)

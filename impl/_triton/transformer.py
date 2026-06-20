@@ -49,10 +49,7 @@ class TritonMultiHeadAttention(nn.Module):
         dtype = x.dtype if x.dtype.is_floating_point or x.dtype.is_complex else None
         for param in [self.Wq, self.Wk, self.Wv, self.Wo]:
             if param is not None:
-                if dtype is not None:
-                    param = param.to(device, dtype)
-                else:
-                    param = param.to(device)
+                param = param.to(device, dtype) if dtype is not None else param.to(device)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self._move_to_device(x)
@@ -96,6 +93,7 @@ class TritonTransformerBlock(nn.Module):
         Number of top experts to activate.
     dropout : float
         Dropout rate (disabled during eval).
+
     """
 
     def __init__(
@@ -282,6 +280,7 @@ class TritonDecoderStack(nn.Module):
         n_experts: Number of MoE experts per block.
         ff_dim: Feed-forward hidden dimension per expert.
         k: Number of top experts per token.
+
     """
 
     def __init__(

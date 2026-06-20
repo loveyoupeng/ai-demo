@@ -80,6 +80,7 @@ class TorchTurboQuantKVCache:
             1-bit binary storage (int8), 1 for positive, 0 for non-positive.
         scale : torch.Tensor, shape (batch_size, n_heads, 1, head_dim)
             Per-channel mean(|x|) float32 scale factor per (batch, head).
+
         """
         # Compute scale: mean absolute value per (batch, head) across
         # sequence (dim=1) and head_dim (dim=-1) dims.
@@ -109,6 +110,7 @@ class TorchTurboQuantKVCache:
         -------
         reconstructed : torch.Tensor, shape (batch, heads, seq, head_dim)
             Dequantized float32 tensor.
+
         """
         return bits.float() * scale
 
@@ -128,6 +130,7 @@ class TorchTurboQuantKVCache:
             New Value tensor for one token.
         pos : int
             Position in the sequence to store at (0-indexed).
+
         """
         batch_size = k.shape[0]
 

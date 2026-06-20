@@ -54,6 +54,7 @@ def _silu_kernel(
         Total number of elements in the tensor.
     BLOCK_SIZE : int
         Number of elements per block (constexpr).
+
     """
     # Create offsets for this program instance
     offsets = tl.program_id(axis=0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -105,6 +106,7 @@ class _SiluTriton(torch.autograd.Function):
         The forward pass is GPU-only for the activation computation.
         Gradients are not computed here — they use PyTorch's native
         formula in backward() because the SiLU gradient is well-known.
+
         """
         if x.requires_grad:
             ctx.save_for_backward(x)
@@ -141,6 +143,7 @@ class _SiluTriton(torch.autograd.Function):
         -------
         torch.Tensor
             Gradient w.r.t. input, same shape as the saved input.
+
         """
         x, = ctx.saved_tensors
         # Compute gradient directly using PyTorch's SiLU gradient formula
@@ -185,6 +188,7 @@ def silu(x: torch.Tensor) -> torch.Tensor:
     >>> y = silu(x)
     >>> y.shape
     torch.Size([2, 4, 8])
+
     """
     # Validate input
     if not isinstance(x, torch.Tensor):

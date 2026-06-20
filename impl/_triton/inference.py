@@ -24,6 +24,7 @@ class TritonTextGenerator:
         Sampling temperature for token selection (0.0 = greedy/argmax).
     top_k : int
         Keep only top-k logits before sampling. 0 = disabled.
+
     """
 
     def __init__(
@@ -50,6 +51,7 @@ class TritonTextGenerator:
         -------
         output : torch.Tensor, shape (batch_size, prompt_len + new_tokens)
             Full sequence including the original prompt.
+
         """
         prompt = _validate_prompt(prompt)
 

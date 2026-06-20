@@ -169,6 +169,7 @@ def _rope_kernel(
       loaded as float32 for computation (acceptable precision for rotation)
     - No clipping needed: sin/cos are always in [-1, 1]
     - Mask handles variable sequence lengths (pad tokens get zeros)
+
     """
     # ── Program assignment ─────────────────────────────────────
     # Row (token) and column (pair block) indices identify the
@@ -271,6 +272,7 @@ def _rope_copy_kernel(
         Total column count (may be larger than tail_dim for padding).
     BLOCK_SIZE : constexpr int
         Elements per block for the pass-through copy.
+
     """
     token_idx = tl.program_id(axis=0)
     token_offset = token_idx * stride_dim
@@ -316,6 +318,7 @@ class _RoPETriton(torch.autograd.Function):
     -------
     torch.Tensor, shape (num_tokens, D)
         Rotated tensor.
+
     """
 
     @staticmethod
@@ -346,6 +349,7 @@ class _RoPETriton(torch.autograd.Function):
         ------
         ValueError
             If x is not 2D, not on CUDA, or head_dim not divisible by 4.
+
         """
         if x.device.type != "cuda":
             raise ValueError("x must be on CUDA")
@@ -408,6 +412,7 @@ class _RoPETriton(torch.autograd.Function):
             - dL/dx of same shape as input x (gradient w.r.t. Q/K)
             - None (no gradient w.r.t. cos)
             - None (no gradient w.r.t. sin)
+
         """
         cos, sin = ctx.saved_tensors
         # Reverse rotation: swap sin → -sin and apply forward kernel
@@ -477,6 +482,7 @@ def apply_rope(
     ---------
     Su et al. "RoFormer: Enhanced Transformer with Rotary Position Embedding"
     https://arxiv.org/abs/2104.09864
+
     """
     B, S, H, D = x.shape
 
@@ -555,6 +561,7 @@ def _compute_rope_frequencies(
     The 10000 base is empirically chosen — it creates a range of
     frequencies from period 2π (slowest) to period 2π/10000 (fastest),
     allowing the model to detect both local and distant position relations.
+
     """
     if head_dim < 2 or head_dim % 2 != 0:
         raise ValueError(f"head_dim must be >= 2 and even, got {head_dim}")

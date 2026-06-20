@@ -29,6 +29,7 @@ class Embedding:
     Notes
     -----
     This is a simple table lookup: out[b, s, :] = weight[tokens[b, s]].
+
     """
 
     def forward(
@@ -61,6 +62,7 @@ class Embedding:
         (2, 2, 3)
         >>> np.allclose(out[0, 0, :], W[0])
         True
+
         """
         # input_ids:  (batch_size, seq_len)
         # weight:     (vocab_size, embed_dim)
@@ -91,6 +93,7 @@ class RMSNorm:
     -----
     RMSNorm formula:  out = x / sqrt(mean(x^2) + eps) * gamma
     where mean is taken over the last dimension (embed_dim).
+
     """
 
     def forward(
@@ -111,6 +114,7 @@ class RMSNorm:
         -------
         np.ndarray, shape (..., embed_dim)
             RMS-normalized, scaled output.
+
         """
         # x:       (..., embed_dim)
         # mean(x^2): (..., 1) — mean over last dim
@@ -146,6 +150,7 @@ class SiLULayer:
       - For large negative x: f(x) ≈ 0 (suppressed)
       - For x = 0: f(0) = 0
       - Smooth, non-monotonic gating that enables feature selection
+
     """
 
     def forward(self, x: np.ndarray) -> np.ndarray:
@@ -160,6 +165,7 @@ class SiLULayer:
         -------
         np.ndarray, same shape as x
             SiLU(x) = x * sigmoid(x).
+
         """
         # x:   (..., embed_dim)
         # sigmoid(x): (..., embed_dim) = 1 / (1 + exp(-x))
@@ -205,6 +211,7 @@ class SwiGLUFFN:
       w1: (embed_dim, ff_dim)
       w3: (embed_dim, ff_dim)
       w2: (ff_dim, embed_dim)
+
     """
 
     def __init__(self, embed_dim: int, ff_dim: int, seed: int = 42) -> None:
@@ -218,6 +225,7 @@ class SwiGLUFFN:
             Hidden dimension.
         seed : int
             Random seed for reproducibility.
+
         """
         rng = np.random.default_rng(seed)
         # Xavier initialization to keep activations at reasonable scale
@@ -249,6 +257,7 @@ class SwiGLUFFN:
         -------
         np.ndarray, shape (..., embed_dim)
             Gated feedforward output.
+
         """
         # x:              (..., embed_dim)
         # w1 @ x:         (..., ff_dim)     — first linear projection
@@ -290,6 +299,7 @@ class RoPE:
     where θ = 10000^(-2k/d) for the k-th dimension pair.
     rope_dim=0 means full head_dim rotation; rope_dim=n means only the first
     rope_dim dimensions are rotated (last head_dim-rope_dim dims pass through).
+
     """
 
     def forward(
@@ -314,6 +324,7 @@ class RoPE:
         -------
         np.ndarray, shape (batch_size, seq_len, n_heads, head_dim)
             Rotary-embedded tensor with position-dependent rotation.
+
         """
         # x:          (B, S, H, D)  — batch, seq, heads, head_dim
         # position:   scalar or (S,) or (B, S)  — position indices
@@ -424,6 +435,7 @@ class MoE:
     Each expert is a SwiGLU FFN (SiLU(w1 @ x) * (w3 @ x) @ w2).
     Softmax is applied across ALL experts (not just top-k), but only top-k
     contribute to the output (others get multiplied by 0 via gating).
+
     """
 
     NP_ROUTER: str = "moe.router"
@@ -470,6 +482,7 @@ class MoE:
         Returns
         -------
         out : np.ndarray, shape (batch_size, seq_len, embed_dim)
+
         """
         batch_size, seq_len, embed_dim = x.shape
 
@@ -573,6 +586,7 @@ class MultiHeadAttention:
     -----
     head_dim = embed_dim // n_heads.
     All weights are trained via backpropagation.
+
     """
 
     NP_QW: str = "mha.Wq"
@@ -643,6 +657,7 @@ class MultiHeadAttention:
         Returns
         -------
         out : np.ndarray, shape (batch_size, seq_len, embed_dim)
+
         """
         batch_size, seq_len, embed_dim = x.shape
 
@@ -771,6 +786,7 @@ class Linear:
     Notes
     -----
     Standard affine transformation with broadcasting over leading dimensions.
+
     """
 
     def forward(
@@ -805,6 +821,7 @@ class Linear:
         >>> out = lin.forward(x, w, b)
         >>> out.shape
         (2, 4)
+
         """
         # x:     (..., input_dim)
         # W:     (input_dim, output_dim)
@@ -852,6 +869,7 @@ class TransformerBlock:
               ln1 = RMSNorm, ln2 = RMSNorm
               MHA = MultiHeadAttention (with optional RoPE)
               MoE = Mixture of Experts (with top-k routing)
+
     """
 
     def __init__(
@@ -900,6 +918,7 @@ class TransformerBlock:
         Returns
         -------
         out : np.ndarray, shape (batch_size, seq_len, embed_dim)
+
         """
         # ── Stream 1: Attention ─────────────────────────────────────
         # MHA: (B, S, D) → (B, S, D) — self-attention output
@@ -978,6 +997,7 @@ class DecoderStack:
 
     Each block:
       h = x + MHA(RMSNorm(x)) + MoE(RMSNorm(x + MHA(x)))
+
     """
 
     def __init__(
@@ -1018,6 +1038,7 @@ class DecoderStack:
         Returns
         -------
         out : np.ndarray, shape (batch_size, seq_len, embed_dim)
+
         """
         out = x  # (B, S, D)
 

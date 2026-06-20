@@ -37,6 +37,7 @@ class TritonModel(nn.Module):
         n_experts: Number of MoE experts per block.
         ff_dim: Feed-forward hidden dimension per expert.
         k: Number of top experts per token.
+
     """
 
     def __init__(
@@ -135,6 +136,7 @@ class TritonModel(nn.Module):
 
         Returns:
             The corresponding tensor.
+
         """
         if key == Transformer.EMBEDDING_WEIGHTS:
             return self.embedding.weight
@@ -250,6 +252,7 @@ class TritonModel(nn.Module):
 
         Returns:
             params: Dictionary mapping parameter names to NumPy arrays.
+
         """
         result: dict[str, np.ndarray] = {}
 
@@ -303,6 +306,7 @@ class TritonModel(nn.Module):
 
         Args:
             params: Dictionary mapping parameter names to NumPy arrays.
+
         """
         def load(key: str, tensor: torch.Tensor, transpose: bool = False) -> None:
             np_array = params[key]

@@ -63,6 +63,7 @@ class NumPyModel:
     - final_gamma: [D] — final LayerNorm gamma
     - output.W1: [D, ff_dim], output.W2: [ff_dim, D], output.W3: [D, ff_dim]
     - output.b1/b3: SwiGLU bias
+
     """
 
     NP_EMBEDDING: str = "model.embedding"
@@ -141,6 +142,7 @@ class NumPyModel:
         Returns
         -------
         logits : np.ndarray, shape (batch_size, seq_len, vocab_size)
+
         """
         w = embedding_weights or self.embedding_weights
 
@@ -186,6 +188,7 @@ class NumPyModel:
         -------
         params : dict[str, np.ndarray]
             Dictionary mapping parameter names to numpy arrays.
+
         """
         params: dict[str, np.ndarray] = {}
 
@@ -244,6 +247,7 @@ class NumPyModel:
         -------
         grads : dict[str, np.ndarray]
             Dictionary of gradients keyed by parameter name.
+
         """
         grads: dict[str, np.ndarray] = {}
 

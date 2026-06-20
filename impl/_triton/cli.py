@@ -17,6 +17,7 @@ def _get_device() -> torch.device:
     -------
     device : torch.device
         ``cuda:0`` if ``torch.cuda.is_available()``, else ``cpu``.
+
     """
     if torch.cuda.is_available():
         return torch.device("cuda:0")

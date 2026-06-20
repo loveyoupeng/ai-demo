@@ -45,6 +45,7 @@ class TrainingConfig:
         Clip gradients by global L2 norm. 1.0 (default).
     log_every : int
         Log training progress every N batches (default 10).
+
     """
 
     lr: float
@@ -148,6 +149,7 @@ def train_step(
     >>> loss = train_step(model, x, t, CrossEntropyLoss(), AdamW(lr=0.01))
     >>> isinstance(loss, float)
     True
+
     """
     # --- 1. Forward pass --------------------------------------------------
     # batch_input:  (B, S)     — token IDs, dtype int32
@@ -227,6 +229,7 @@ def compute_gradient_norm(grads: dict[str, np.ndarray]) -> float:
     >>> norm = compute_gradient_norm(grads)
     >>> abs(norm - 5.4772) < 1e-4
     True
+
     """
     # Compute the sum of squared norms across ALL gradient tensors.
     # For each grad tensor g: ||g||₂² = Σᵢⱼ gᵢⱼ²
@@ -274,6 +277,7 @@ def clip_gradients(grads: dict[str, np.ndarray], max_norm: float) -> None:
     >>> norm = compute_gradient_norm(grads)
     >>> abs(norm - 1.0) < 1e-6
     True
+
     """
     # Guard against zero max_norm — no clipping needed
     if max_norm <= 0.0:

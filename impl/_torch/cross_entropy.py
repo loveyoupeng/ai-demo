@@ -32,6 +32,7 @@ class CrossEntropyLoss:
     mask : torch.Tensor, shape (batch_size, seq_len) or None, optional
         Binary mask tensor (1 = include in loss, 0 = ignore).  If None,
         every position contributes equally to the final mean loss.
+
     """
 
     def __init__(self, shift: bool = True, ignore_index: int = -100) -> None:
@@ -61,6 +62,7 @@ class CrossEntropyLoss:
             Scalar mean loss, dtype float64, over all non-masked and
             non-ignored positions.  Returns 0.0 if no positions remain
             (all masked or ignored).
+
         """
         # --- 1. Optional autoregressive shift ---
         # In causal LM the model at position t predicts the token at t+1.

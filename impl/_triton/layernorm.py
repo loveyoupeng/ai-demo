@@ -156,6 +156,7 @@ def _rmsnorm_kernel(
     ---------
     Zhang & Sennrich, "Root Mean Square Layer Normalization" (2019)
     https://arxiv.org/abs/1910.07467
+
     """
     # ── Row assignment ─────────────────────────────────────────
     # Each program instance handles one row (e.g., one token's
@@ -290,6 +291,7 @@ class _RmsNormTriton(torch.autograd.Function):
     -------
     torch.Tensor, shape (..., D)
         Normalized, scaled output.
+
     """
 
     @staticmethod
@@ -323,6 +325,7 @@ class _RmsNormTriton(torch.autograd.Function):
         *x.shape[:-1]), processed row-by-row by the Triton kernel, then
         reshaped back to the original shape. Internal computation uses
         float32 for numerical stability regardless of input dtype.
+
         """
         # Validate shapes and device placement
         if x.dim() < 2:
@@ -414,6 +417,7 @@ class _RmsNormTriton(torch.autograd.Function):
             Gradient w.r.t. scale parameter.
         None : None
             Placeholder for eps (not learned).
+
         """
         x, gamma = ctx.saved_tensors
         eps = ctx.eps
@@ -504,5 +508,6 @@ def rmsnorm(
     ---------
     Zhang & Sennrich, "Root Mean Square Layer Normalization" (2019)
     https://arxiv.org/abs/1910.07467
+
     """
     return _RmsNormTriton.apply(x, gamma, eps)

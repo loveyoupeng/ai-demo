@@ -22,6 +22,7 @@ def initialize_linear(d_in: int, d_out: int, rng: np.random.Generator) -> np.nda
     -----
     Xavier uniform distribution: U(-limit, limit)
     where limit = sqrt(6 / (d_in + d_out)).
+
     """
     limit = np.sqrt(6.0 / (d_in + d_out))
     return rng.uniform(-limit, limit, size=(d_in, d_out))

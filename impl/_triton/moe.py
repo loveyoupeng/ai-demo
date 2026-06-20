@@ -48,6 +48,7 @@ def _compute_routing_weights(
     torch.Tensor, shape (batch, seq_len, n_experts)
         Normalized routing weights with exactly k non-zero entries per token
         when k < n_experts.
+
     """
     router_scores = x @ W_router + bias  # [B, S, E]
     # Stable softmax: subtract max, then softmax
@@ -84,6 +85,7 @@ def _top_k_routing(
     -------
     torch.Tensor, shape (batch, seq_len, n_experts)
         Top-k selected and renormalized routing weights.
+
     """
     n_experts = routing_weights.shape[-1]
     if k < n_experts:
@@ -136,6 +138,7 @@ def mixture_of_experts(
         For each expert i:
             expert_out_i = SiLU(x @ W1[i]) * (x @ W3[i]) @ W2[i] -> (B, S, D)
         output = sum(routing_weights_i * expert_out_i)           -> (B, S, D)
+
     """
     assert x.device.type == "cuda"
     W_router = W_router.to(x.dtype)

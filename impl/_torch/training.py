@@ -19,6 +19,7 @@ def clip_gradients(grads: dict[str, torch.Tensor], max_norm: float) -> None:
         Gradient dictionary — values are mutated in-place.
     max_norm : float
         Maximum allowed L2 norm.  If 0.0, no clipping is performed.
+
     """
     if max_norm <= 0.0:
         return
@@ -37,6 +38,7 @@ def compute_gradient_norm(grads: dict[str, torch.Tensor]) -> float:
     -------
     norm : float
         Scalar global L2 norm.  Returns 0.0 if all gradients are zero.
+
     """
     total_sq_norm = 0.0
     for grad in grads.values():
@@ -74,6 +76,7 @@ def train_step(
     -------
     loss : float
         The scalar loss value for this batch.
+
     """
     # 1. Forward pass
     logits = model(batch_input)

@@ -17,6 +17,7 @@ def _get_device() -> torch.device:
     -------
     device : torch.device
         ``cuda:0`` if ``torch.cuda.is_available()``, else ``cpu``.
+
     """
     if torch.cuda.is_available():
         return torch.device("cuda:0")
@@ -108,6 +109,7 @@ def text_to_tokens(text: str) -> list[int]:
     -------
     tokens : list[int]
         List of integer token IDs (one per UTF-8 byte).
+
     """
     return [b for b in text.encode("utf-8")]
 
@@ -124,6 +126,7 @@ def text_from_tokens(token_ids: list[int]) -> str:
     -------
     text : str
         Decoded text string.
+
     """
     return bytes(token_ids).decode("utf-8", errors="replace")
 

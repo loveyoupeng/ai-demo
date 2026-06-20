@@ -32,6 +32,7 @@ class TextGenerator:
     -----
     >>> generator = TextGenerator(model, max_new_tokens=20)
     >>> tokens = generator.generate(prompt)  # uses greedy if temperature=0
+
     """
 
     def __init__(
@@ -75,6 +76,7 @@ class TextGenerator:
         >>> result = gen.generate(prompt)
         >>> result.shape
         (1, 5)
+
         """
         prompt = _validate_prompt(prompt)
 
@@ -97,6 +99,7 @@ class TextGenerator:
         -------
         output : np.ndarray, shape (batch_size, prompt_len + new_tokens)
             Generated sequence including prompt.
+
         """
         prompt = _validate_prompt(prompt)
         batch_size, seq_len = prompt.shape
@@ -145,6 +148,7 @@ class TextGenerator:
         -------
         output : np.ndarray, shape (batch_size, prompt_len + new_tokens)
             Generated sequence including prompt.
+
         """
         prompt = _validate_prompt(prompt)
         batch_size, seq_len = prompt.shape
@@ -217,6 +221,7 @@ def _validate_prompt(prompt: np.ndarray) -> np.ndarray:
     ------
     ValueError
         If prompt has fewer than 2 dimensions or an integer dtype.
+
     """
     prompt = np.asarray(prompt, dtype=np.int32)
     if prompt.ndim == 1:
@@ -249,6 +254,7 @@ def _apply_top_k_mask(logits: np.ndarray, top_k: int) -> np.ndarray:
     1. Sort each row descending to find k-th threshold
     2. Zero out all values below the threshold
     3. Set remaining non-top-k values to -inf for clean softmax
+
     """
     batch_size, vocab_size = logits.shape
 

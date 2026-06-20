@@ -60,6 +60,7 @@ class TurboQuantKVCache:
         Number of tokens cached so far (shared across all layers).
     _batch_size : int
         Batch size established on first update (unknown until first update).
+
     """
 
     def __init__(
@@ -93,6 +94,7 @@ class TurboQuantKVCache:
             Dimension per attention head.
         device : str, default "cpu"
             Device string placeholder.
+
         """
         self.max_length = max_length  # scalar: max sequence length
         self.n_layers = n_layers  # scalar: number of layers
@@ -137,6 +139,7 @@ class TurboQuantKVCache:
             1-bit binary storage (int8), 1 for positive, 0 for non-positive.
         scale : np.ndarray, shape (batch_size, n_heads, 1, head_dim)
             Per-channel mean(|x|) float32 scale factor per (batch, head).
+
         """
         # Compute scale: mean absolute value per (batch, head) across
         # sequence (pos 1) and head_dim dims.
@@ -170,6 +173,7 @@ class TurboQuantKVCache:
         -------
         reconstructed : np.ndarray, shape (batch, heads, seq, head_dim)
             Dequantized float32 tensor.
+
         """
         # (0 or 1 as float32) × scale → scale where bit was 1, 0 where bit was 0
         return bits.astype(np.float32) * scale  # (batch, heads, seq, head_dim)
@@ -194,6 +198,7 @@ class TurboQuantKVCache:
         pos : int
             Position in the sequence to store at (0-indexed).
             Must satisfy 0 <= pos < max_length.
+
         """
         batch_size = k.shape[0]  # scalar: number of samples in this batch
 
@@ -237,6 +242,7 @@ class TurboQuantKVCache:
         v_cache : list of np.ndarray
             Each element shape (batch_size, n_heads, seq_len_so_far, head_dim).
             Dequantized to float32.
+
         """
         k_result: list[np.ndarray] = []
         v_result: list[np.ndarray] = []
@@ -298,6 +304,7 @@ class TurboQuantKVCache:
             scales_k + scales_v (each stores float32). The bits arrays use
             1 byte per element (8× compression) and the scale arrays use
             4 bytes per element.
+
         """
         # For one layer:
         #   bits_k + bits_v = 2 * max_length * n_heads * head_dim bytes (int8 each)

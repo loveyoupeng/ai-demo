@@ -35,6 +35,7 @@ class ModelConfig:
                   0 means full-dimension RoPE.
         max_length: Maximum sequence length for KV cache.
         seed: Random seed for weight initialization.
+
     """
 
     vocab_size: int = 4096

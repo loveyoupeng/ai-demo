@@ -47,6 +47,7 @@ class NaiveKVCache:
         Number of tokens currently cached (shared across all layers).
     max_length : int
         Maximum allowed sequence length.
+
     """
 
     def __init__(
@@ -71,6 +72,7 @@ class NaiveKVCache:
             Dimension per attention head.
         device : str, default "cpu"
             Device string placeholder.
+
         """
         self.max_length = max_length  # scalar: max sequence length
         self.n_layers = n_layers  # scalar: number of layers
@@ -112,6 +114,7 @@ class NaiveKVCache:
         pos : int
             Position in the autoregressive sequence (0-indexed). Must satisfy
             0 <= pos < max_length, and pos <= current_length (sequential fill).
+
         """
         batch_size = k.shape[0]  # scalar: number of samples in this batch
 
@@ -159,6 +162,7 @@ class NaiveKVCache:
             Each element shape (batch_size, n_heads, seq_len_so_far, head_dim).
         v_cache : list of np.ndarray
             Each element shape (batch_size, n_heads, seq_len_so_far, head_dim).
+
         """
         # Take the prefix (0..current_length) for each layer so that external
         # code receives exactly the sequence produced so far.
@@ -201,5 +205,6 @@ class NaiveKVCache:
         -------
         cloned : NaiveKVCache
             Independent copy with the same parameters and content.
+
         """
         return copy.deepcopy(self)

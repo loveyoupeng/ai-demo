@@ -225,6 +225,7 @@ def scaled_dot_product_attention(
     - Tensor dtype must be float16, bfloat16, or float32
     - All tensors must be on the same CUDA device
     - No causal mask is applied — use a pre-masked K if needed
+
     """
     assert q.device.type == "cuda"
     assert k.device.type == "cuda"
@@ -288,6 +289,7 @@ class _ScaledDotProductAttentionTF(torch.autograd.Function):
         - K and V are zero-padded to power-of-2 dimensions for tl.dot
         - Padded positions are masked with -inf before softmax
         - Output is cropped to [:, :, :, :D] after computation
+
         """
         B, H, Sq, D = q.shape
         _, _, Sk, _ = k.shape
@@ -389,6 +391,7 @@ class _ScaledDotProductAttentionTF(torch.autograd.Function):
         -------
         grad_q : torch.Tensor, grad_k : torch.Tensor, grad_v : torch.Tensor
             Gradients w.r.t. Q, K, V respectively.
+
         """
         dq, dk, dv = ctx.saved_tensors
         return grad_out * dq, grad_out * dk, grad_out * dv
@@ -532,6 +535,7 @@ def _attn_fwd_kernel(
     Return type
     -----------
     None. Writes directly to the Out tensor.
+
     """
     pid_b = tl.program_id(axis=0)
     pid_h = tl.program_id(axis=1)

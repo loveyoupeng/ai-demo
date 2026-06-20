@@ -34,6 +34,7 @@ class TorchTextGenerator:
     >>> model = TorchModel(config)
     >>> gen = TorchTextGenerator(model, max_new_tokens=20)
     >>> tokens = gen.generate(prompt)  # uses greedy if temperature=0
+
     """
 
     def __init__(
@@ -63,6 +64,7 @@ class TorchTextGenerator:
         -------
         output : torch.Tensor, shape (batch_size, prompt_len + new_tokens)
             Full sequence including the original prompt.
+
         """
         prompt = _validate_prompt(prompt)
 
@@ -85,6 +87,7 @@ class TorchTextGenerator:
         -------
         output : torch.Tensor, shape (batch_size, prompt_len + new_tokens)
             Generated sequence including prompt.
+
         """
         prompt = _validate_prompt(prompt)
         batch_size = prompt.shape[0]
@@ -133,6 +136,7 @@ class TorchTextGenerator:
         -------
         output : torch.Tensor, shape (batch_size, prompt_len + new_tokens)
             Generated sequence including prompt.
+
         """
         prompt = _validate_prompt(prompt)
         batch_size = prompt.shape[0]
@@ -199,6 +203,7 @@ def _validate_prompt(prompt: torch.Tensor) -> torch.Tensor:
     ------
     ValueError
         If prompt has fewer than 2 dimensions or a non-integer dtype.
+
     """
     prompt = torch.as_tensor(prompt, dtype=torch.int64)
     if prompt.ndim == 1:
@@ -230,6 +235,7 @@ def _apply_top_k_mask(logits: torch.Tensor, top_k: int) -> torch.Tensor:
     ---------
     1. Sort each row descending to find k-th threshold
     2. Keep values >= k-th threshold, set others to -inf
+
     """
     # Sort each row descending to find the k-th threshold
     # sorted_values: (B, V) — sorted logit values descending

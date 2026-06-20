@@ -53,6 +53,7 @@ class AdamW:
     -----
     >>> optimizer = AdamW(lr=1e-3, weight_decay=0.01)
     >>> optimizer.step(params_dict, grads_dict)
+
     """
 
     def __init__(
@@ -90,6 +91,7 @@ class AdamW:
             Gradients for each parameter (must have same keys as params).
             Each key maps to a numpy array of the same shape as the
             corresponding parameter.
+
         """
         self._count += 1  # increment step counter before computing bias correction
 
