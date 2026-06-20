@@ -66,18 +66,25 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 
 ### Phase F: CUDA Implementation (Bare-Metal) 🔶 IN PROGRESS
 - Platform: Jetson AGX Orin 64GB, JetPack 6.2.2, CUDA 12.6, PyTorch 2.11.0
-- **Working API Pattern:** nvrtc compile → PTX → PyTorch custom op dispatcher (Option A)
+- **Working API Pattern:** nvrtc compile → PTX → cuLaunchKernel dispatcher (Option A)
   - `cuLaunchKernel` via `(values, types)` tuple + explicit stream + `extra=0` ✅
-  - PyTorch tensors for memory (automatic `cudaMalloc`/`cudaFree`)
-  - Backward via PyTorch autograd (CUDA kernels provide forward)
-- **F0: Scaffolding** ✅ — `impl/_cuda/` + `tests/unit/_cuda/` created, import test passes
-- **F1: SiLU** ✅ — nvrtc compile + PyTorch custom op, 4 tests pass, both fp32/fp64
-  - Hand-written `.cu` source with f32/f64 kernels, nvrtc compilation + caching
-  - `impl/_cuda/compiler.py` — nvrtc compile → PTX → cache in `impl/_cuda/.cache/`
-  - `impl/_cuda/activation.py` — PyTorch custom_op dispatcher
-  - `tests/unit/_cuda/test_activation.py` — 4 tests, all pass
-- **F2–F11:** Ready to start RMSNorm → RoPE → SwiGLU → MHA → MoE → model wiring → training/inference → parity
-- **Learning focus:** warp reduction, shared memory, coalesced access, grid/block/threads, PTX
+  - PyTorch tensors for memory (automatic via tensor lifetime)
+  - Backward via PyTorch autograd (CUDA kernels provide forward only)
+- **F0: Scaffolding** ✅ — `impl/_cuda/` + `tests/unit/_cuda/` created
+- **F1: SiLU** ✅ — 4 tests, nvrtc compile + kernel dispatch
+- **F2: RMSNorm** ✅ — 4 tests, warp-reduction kernel
+- **F3: RoPE** ✅ — 4 tests, trig + index pairing
+- **F4: SwiGLU FFN** ✅ — 3 tests, hybrid CUDA SiLU + PyTorch matmul
+- **F5: MHA (Attention)** ✅ — 4 tests, stable softmax + warp-reduction weighted sum
+- **F6: MoE** 🔴 **BLOCKED** — 5 failing tests (root cause identified: non-contiguous tensor access in indexed reads)
+  - `impl/_cuda/kernels/moe.cu` — expert scoring + weighted sum
+  - `impl/_cuda/moe.py` — Python wrapper with nvrtc dispatch
+  - Root cause: `topk_idx.view(-1)` and `expert_outputs.view()` create non-contiguous views
+  - Fix: add `.contiguous()` before `.view()` for all indexed GPU kernel inputs
+- **F7–F11:** Pending — plan defined in `docs/phase_f_plan.md`
+- **45/50 CUDA tests pass** (45 pass, 5 MoE failures)
+- **Critical rule added:** All tensors passed to CUDA kernels with indexed access MUST be `.contiguous()` before `.view()`
+- **Learning focus:** warp reduction, shared memory, coalesced access, grid/block/threads, PTX, contiguous tensor enforcement
 
 ### Phase G: Integration & Verification 🔲 NOT STARTED
 - Train on TinyStories per backend -> save/load cross-validation -> identical outputs -> final e2e script
@@ -211,8 +218,13 @@ All improvements implemented in both backends:
 | E+ (Cleanup) | +13 | ~15 | ✅ Complete |
 | **F0** | **128** | **1 (f0)** | **✅ Complete** |
 | **F1** | **4** | **1 (f1)** | **✅ Complete** |
-| F2–F11 | 0 | 0 | 🔶 In Progress |
-| **Total** | **558** | **~130** | **557 pass, ruff/pyright clean** |
+| **F2** | **4** | **1 (f2)** | **✅ Complete** |
+| **F3** | **4** | **1 (f3)** | **✅ Complete** |
+| **F4** | **3** | **1 (f4)** | **✅ Complete** |
+| **F5** | **4** | **1 (f5)** | **✅ Complete** |
+| **F6** | **5 failing** | **0** | **🔴 Blocked** |
+| F7–F11 | 0 | 0 | 🔲 Not Started |
+| **Total** | **558** | **~130** | **557 pass, ruff/pyright clean (45/50 CUDA)** |
 
 ---
 

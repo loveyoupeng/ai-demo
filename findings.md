@@ -517,33 +517,47 @@ y_cpu = y_gpu.cpu().numpy()
 | `cuModuleGetFunction` with mangled name → not found | 1 | Function names not found; new API doesn't work at all |
 | `CUDA_ERROR_INVALID_CONTEXT` (201) | 1 | Need explicit `cuCtxCreate` before module loading — but context creation also fails for new API |
 
-## Phase F: CUDA Implementation — Reality Check
+## Phase F: CUDA Implementation — Reality Check (RESOLVED)
 
-### What Was Planned
-- Hand-written CUDA C (`.cu`) files via `cuda-python` Runtime API
-- Manual `cudaMalloc`/`cudaMemcpy`/`cudaFree`
-- Manual kernel launches via `cuLaunchKernel` / `cuLaunchKernelEx`
-- Manual stream management via `CUstream`
-- Manual error handling via `cudaError_t`
-- Full model with all kernels, training, inference, 4-way parity
+### Status: Option A Validated — Full Pipeline Working
 
-### What Actually Works
-- Legacy `cuLaunch` API: `cuParamSetSize` + `cuParamSetv` + `cuFuncSetBlockShape` + `cuLaunch`
-- Only 2-parameter kernels (two `float*` pointers) work reliably
-- No grid/launch config, no streams, no events
-- No working `cuLaunchKernel` or `cuLaunchKernelEx`
+The nvrtc compile → PTX → cuLaunchKernel pattern is **fully operational**. F0-F5 kernels all pass their tests.
 
-### What Doesn't Work
-- **All new CUDA driver API functions** (`cuLaunchKernel`, `cuLaunchKernelEx`, `cuLaunchKernelEx` with `CUlaunchConfig`, etc.)
-- **3-parameter kernels** with int parameters via legacy API
-- **Stream management** (no working `CUstream` API)
-- **Event management** (no working `cuEvent` API)
-- **Complex kernel launches** (MHA needs grid-stride loops + shared memory + different launch configs)
+- Legacy `cuLaunch` API: works for 2-param only
+- New `cuLaunchKernel` API: works with `(values, types)` tuple format + explicit stream + `extra=0`
+- nvrtc: `nvrtcCreateProgram` → `nvrtcCompileProgram` → `nvrtcGetPTX` ✅
+- NVRTC cache: PTX cached in `impl/_cuda/.cache/<sha>.ptx` ✅
+- Memory via PyTorch tensors ✅
+- 45 of 50 CUDA tests pass (F6 MoE has one bug)
 
-### Practical Assessment
-Phase F as originally planned is **not feasible on JetPack 6.2.2**. The `cuda-python` 12.6.2.post1 package is too broken for bare-metal CUDA. The legacy API is too limited for complex kernels.
+### Current MoE Bug (F6) — 2026-06-20 Analysis
 
-### Recommended Options (see above)
-- **Option A:** nvrtc + PyTorch custom kernel (preserves CUDA C learning)
-- **Option B:** Pure PyTorch CUDA with extensive comments (practical, simpler)
-- **Option C:** Skip Phase F; add more training/inference features instead (simplest)
+**Symptom:** `moe_weighted_sum` kernel produces wrong output — all tokens use only expert 0's output.
+**5 failing tests:** All in MoE-weighted-sum path.
+
+**Root Cause Hypothesis:** Non-contiguous tensor views passed to CUDA kernel's indexed read.
+- `expert_outputs.view(total_tokens, N, D)` — view of stacked tensor
+- `topk_idx.view(-1)` — view of topk result
+- `topk_weights.view(-1)` — view of softmax result
+
+When a non-contiguous view's `data_ptr()` is passed to CUDA, the kernel reads memory at the wrong offset because the actual data buffer starts at a different address than `data_ptr()` reports.
+
+**Rule to enforce:** Any tensor read via indexed access in a CUDA kernel MUST be `.contiguous()` before `.view()`.
+
+**Impact:** This is a pattern issue, not just MoE. Any kernel that does gathering/scattering (MoE top-k, attention masking) is at risk.
+
+### Working Pattern
+
+```python
+# Indexed access pattern (MoE, attention):
+idx = topk_idx.contiguous().view(-1)   # ensure contiguous
+weights = topk_weights.contiguous().view(-1)
+params = (c_void_p(idx.data_ptr()), c_void_p(weights.data_ptr()), ...)
+kernel(grid, block, None, params, 0)
+
+# Direct copy pattern (SiLU, RMSNorm, RoPE):
+# No indexed access needed — thread i reads/writes position i
+in_tensor = ...  # always contiguous by construction
+out_tensor = torch.empty_like(in_tensor)
+kernel(grid, block, None, (c_void_p(in_tensor.data_ptr()), c_void_p(out_tensor.data_ptr()), ...), 0)
+```

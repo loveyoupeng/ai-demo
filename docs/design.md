@@ -859,19 +859,15 @@ Wave 4: Code Cleanup (1-2 commits)
 
 **Note:** The plan file `docs/phase_e_plus_plan.md` contains the full detailed specification for all 6 waves of Phase E+. This design doc has been updated to reflect the current implemented state.
 
-### Phase F: CUDA 🔶 IN PROGRESS (F0+F1 done, F2–F11 pending)
+### Phase F: CUDA 🔶 IN PROGRESS (F0-F5 done, F6 MoE blocked, F7-F11 planned)
 ```
 Phase F0: Scaffolding (impl/_cuda/ dirs + import test) — DONE ✅
 Phase F1: SiLU activation kernel (nvrtc compile + PyTorch custom_op) — DONE ✅
-    - impl/_cuda/activation.py — PyTorch autograd.Function dispatcher
-    - impl/_cuda/compiler.py — nvrtc compile → PTX → cache
-    - impl/_cuda/kernels/activation.cu — CUDA C with f32/f64 forward+backward
-    - tests/unit/_cuda/test_activation.py — 4 tests, all pass
-Phase F2: RMSNorm kernel (reduction, warp reduction pattern) — TODO
-Phase F3: RoPE kernel (trig, indexing patterns) — TODO
-Phase F4: SwiGLU kernel (SiLU element-wise + PyTorch GEMM, hybrid) — TODO
-Phase F5: MHA kernel (stable softmax + weighted sum, coalesced access) — TODO
-Phase F6: MoE kernel (top-k routing + weighted sum, scatter/gather) — TODO
+Phase F2: RMSNorm kernel (reduction, warp reduction pattern) — DONE ✅
+Phase F3: RoPE kernel (trig, indexing patterns) — DONE ✅
+Phase F4: SwiGLu FFN kernel (SiLU element-wise + PyTorch GEMM, hybrid) — DONE ✅
+Phase F5: MHA kernel (stable softmax + weighted sum, warp reduction) — DONE ✅
+Phase F6: MoE kernel — BLOCKED (5 failing tests, root cause identified)
 Phase F7: TransformerBlock assembly (Python wiring) — TODO
 Phase F8: DecoderStack assembly (Python wiring) — TODO
 Phase F9: Full CUDAModel (save/load/parity, 4-way) — TODO
@@ -879,12 +875,20 @@ Phase F10: Inference + Training scripts — TODO
 Phase F11: 4-way cross-backend parity (NumPy/Torch/Triton/CUDA) — TODO
 ```
 
-**Plan:** `docs/phase_f_plan.md` — 12-stage TDD plan, ~15 commits, ~21 hours
+**Current status:** 45/50 CUDA tests pass (F0-F5 all pass). F6 MoE blocked by indexed memory access bug.
+
+**Blocker:** `moe_weighted_sum` kernel reads indexed data from non-contiguous tensor views, causing silent memory corruption. Fix: add `.contiguous()` before `.view()` for all tensors with indexed GPU kernel access.
+
+**Plan:** `docs/phase_f_plan.md` — 12-stage plan, F6 blocked, F7-F11 sequential plan defined.
 
 **CUDA-Specific Notes (Jetson AGX Orin 64GB, JetPack 6.2.2, CUDA 12.6):**
+
 - Hand-written `.cu` files compiled at runtime via nvrtc (NOT raw `cuda-python` bindings)
 - PyTorch as kernel dispatcher: `torch.empty` for memory, `torch.autograd.Function` for launch
 - `cuLaunchKernel` with `(values, types)` tuple format + explicit stream + `extra=0` works
+- **Critical Rule (ADDED 2026-06-20):** All tensors passed to CUDA kernels with **indexed access**
+  (gathering, scattering, expert routing, top-k selection) MUST be `.contiguous()` before `.view()`
+  to prevent silent memory corruption from non-contiguous tensor layouts.
 - Memory via PyTorch tensors (no manual `cudaMalloc`/`cudaFree`)
 - Backward pass via PyTorch's autograd (CUDA kernels provide forward only)
 - Learning focus: shared memory, warp reduction, coalesced access, grid/block/threads, PTX

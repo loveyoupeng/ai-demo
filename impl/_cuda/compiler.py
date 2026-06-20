@@ -96,7 +96,7 @@ def _ensure_cuda_context() -> None:
                 # Context might already exist — this is OK
                 return
             raise RuntimeError(f"Failed to create CUDA context: {status}")
-    except (OSError, RuntimeError) as e:
+    except (OSError, RuntimeError):
         # If context creation fails because one exists, that's fine
         pass
 
@@ -241,10 +241,7 @@ def compile_and_load(source: str | bytes) -> tuple[Any, bytes]:
     tuple
         (module, ptx_bytes) — loaded CUDA module and its PTX bytecode.
     """
-    if isinstance(source, str):
-        source_bytes = source.encode("utf-8")
-    else:
-        source_bytes = source
+    source_bytes = source.encode("utf-8") if isinstance(source, str) else source
     key = _cache_key(source_bytes)
 
     # Check cache first
@@ -282,7 +279,7 @@ def get_kernel_handle(module: Any, kernel_name: str, ptx_data: bytes) -> Any:
     """
     # Extract the lowered (mangled) name from PTX
     # Look for: .entry _Z{len}kernel_name{mangling}
-    pattern = f"_Z{len(kernel_name)}{kernel_name}".encode("utf-8")
+    pattern = f"_Z{len(kernel_name)}{kernel_name}".encode()
     lowered = ptx_data.find(pattern)
     if lowered == -1:
         raise RuntimeError(
