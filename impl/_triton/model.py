@@ -304,7 +304,7 @@ class TritonModel(nn.Module):
         Args:
             params: Dictionary mapping parameter names to NumPy arrays.
         """
-        def load(key: str, tensor: torch.Tensor, transpose: bool = True) -> None:
+        def load(key: str, tensor: torch.Tensor, transpose: bool = False) -> None:
             np_array = params[key]
             loaded = torch.from_numpy(np_array).to(tensor.dtype)
             if (tensor.dim() == 2 and transpose):
@@ -321,14 +321,14 @@ class TritonModel(nn.Module):
             load(Block.ln1_gamma(layer_idx), block.ln1.weight)
             load(Block.ln2_gamma(layer_idx), block.ln2.weight)
 
-            # MHA weights — Linear wrappers (skip transpose for Linear params)
-            load(Block.mha(layer_idx, Mha.WQ), block.mha.Wq.weight, transpose=False)
+            # MHA weights — NumPy stores (in, out), PyTorch stores (out, in)
+            load(Block.mha(layer_idx, Mha.WQ), block.mha.Wq.weight, transpose=True)
             load(Block.mha(layer_idx, Mha.BQ), block.mha.Wq.bias)
-            load(Block.mha(layer_idx, Mha.WK), block.mha.Wk.weight, transpose=False)
+            load(Block.mha(layer_idx, Mha.WK), block.mha.Wk.weight, transpose=True)
             load(Block.mha(layer_idx, Mha.BK), block.mha.Wk.bias)
-            load(Block.mha(layer_idx, Mha.WV), block.mha.Wv.weight, transpose=False)
+            load(Block.mha(layer_idx, Mha.WV), block.mha.Wv.weight, transpose=True)
             load(Block.mha(layer_idx, Mha.BV), block.mha.Wv.bias)
-            load(Block.mha(layer_idx, Mha.WO), block.mha.Wo.weight, transpose=False)
+            load(Block.mha(layer_idx, Mha.WO), block.mha.Wo.weight, transpose=True)
             load(Block.mha(layer_idx, Mha.BO), block.mha.Wo.bias)
 
             # MoE router and expert weights
