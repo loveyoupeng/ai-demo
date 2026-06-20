@@ -420,6 +420,92 @@ This is simpler and more practical while still being a distinct implementation.
 
 The user needs to decide which path to take.
 
+### Error (Fixed)
+- `cuLaunchKernel` → `CUDA_ERROR_INVALID_VALUE` (1) — occurred when using `ctypes` arrays instead of `(values, types)` tuples with explicit stream
+
+### Working cuLaunchKernel Pattern (CONFIRMED on JetPack 6.2.2)
+```python
+# 1. Create explicit stream
+stream_ret = _cuda_lib.cuStreamCreate(0)
+
+# 2. Prepare params as VALUE + TYPE tuples
+vals = [ctypes.c_void_p(ptr1), ctypes.c_void_p(ptr2), ctypes.c_int(n)]
+types = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+
+# 3. Launch with extra=0 (not None!)
+cuda_lib.cuLaunchKernel(
+    func,           # CUfunction handle
+    num_blocks_x, 0, 1,  # 1D grid
+    block_size, 1, 1,    # 1D block  
+    0,           # shared size (0 = default)
+    stream_ret,  # explicit stream handle (NOT None)
+    (vals, types), # VALUE + TYPE tuple format
+    0,             # extra=0 (NOT None) on Jetson
+)
+# 4. Destroy stream when done
+cuda_lib.cuStreamDestroy(stream_ret)
+```
+
+**Key requirements on this platform:**
+- `stream` must be created explicitly via `cuStreamCreate(0)` — passing `None` crashes
+- `extra` must be `0` (integer), not `None` — passing `None` causes errors
+- Param values must be ctypes objects (`c_void_p`, `c_int`)
+- Param types must be matching ctypes (`c_void_p`, `c_int`)
+- Must use `(values, types)` tuple format, NOT `ctypes` arrays or `c_void_p` lists
+- Works with 3+ parameter kernels (including `int size`)
+
+### Legacy cuLaunch (Still available)
+- `cuFuncSetBlockShape` + `cuLaunch` — works for 2-param only (two `float*` pointers)
+- `cuParamSeti` with int → `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES` — does NOT work
+- Limited to 1D grid, no grid config, no streams, no events
+- MHA kernel (complex kernels) NOT feasible with legacy API
+
+### What Doesn't Work
+- **All new CUDA driver API functions** when used the traditional way (without explicit stream, tuple format)
+- **3-parameter kernels** with int parameters via legacy API
+- **Stream management** without explicit `cuStreamCreate` + `cuStreamDestroy`
+- **Event management** in this platform configuration
+
+---
+
+## Phase F: CUDA Implementation — What Actually Works Now
+
+### What Works (Confirmed with Testing, 227 Tests)
+- **Legacy API:** `cuParamSetSize` + `cuParamSetv` + `cuFuncSetBlockShape` + `cuLaunch` — for 2-param kernels
+- **New API:** `cuModuleGetFunction` + `cuLaunchKernel` — when using proper `(values, types)` format with explicit stream
+- **nvrtc compilation:** `nvrtcCreateProgram` → `nvrtcCompileProgram` → `nvrtcGetPTX`
+- **NVRTC cache:** PTX cached in `impl/_cuda/.cache/<sha>.ptx` to avoid recompilation
+- **Memory via PyTorch tensors:** `torch.tensor(..., device='cuda')` — no manual `cudaMalloc`
+- **cudaMalloc/cudaFree/cudaMemcpy:** These work for pure CUDA workflows
+
+### nvrtc + PyTorch Custom Kernel Pattern (CONFIRMED WORKING)
+```python
+# 1. Read and compile CUDA C source at runtime
+source = open('kernels/activation.cu').read()
+ptx = compile_and_load(source)  # cached, only recompiles on source change
+
+# 2. Get kernel handle by name
+kernel = get_kernel_handle(ptx, 'silu_forward_f32_kernel')
+
+# 3. Launch via PyTorch tensor memory
+x_gpu = torch.tensor(data, dtype=torch.float32, device='cuda')
+y_gpu = torch.empty_like(x_gpu)
+
+# 4. Kernel launches on tensor memory
+_launch_kernel(kernel, x_gpu, y_gpu, x_gpu.numel(), stream=s)
+
+# 5. Copy results back
+y_cpu = y_gpu.cpu().numpy()
+```
+
+### Key Design Decisions for Option A
+1. **nvrtc compilation** — compile CUDA C at runtime, cache PTX in `impl/_cuda/.cache/`
+2. **PyTorch dispatcher** — use `torch.library.custom_op` or `cuda.library` for kernel invocation
+3. **Manual memory management** — PyTorch tensors for memory (not `cudaMalloc`), but CUDA C code is still pure
+4. **Hybrid kernels** — some kernels are pure CUDA (SiLU, RMSNorm, RoPE), some are CUDA + PyTorch mixed (SwiGLU, MHA)
+5. **Backward pass** — PyTorch autograd automatically handles backward; CUDA kernel provides forward only
+6. **Learning focus** — warp reduction, shared memory, coalesced access, grid/block/threads, PTX
+
 ## Errors Encountered
 
 | Error | Attempt | Resolution |

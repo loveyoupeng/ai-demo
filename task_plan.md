@@ -11,7 +11,7 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 **Phase E (Triton GPU Kernels) is ✅ COMPLETE.** — 538 tests pass
 **Phase E+ (Cleanup & Refinement) is ✅ COMPLETE.** — 551 tests pass
 
-**Next step: Phase F (CUDA Bare-Metal)** — plan ready in `docs/phase_f_plan.md`
+**Next step: Phase F (CUDA Bare-Metal) — F0+F1 Complete, F2–F11 Ready**
 
 ---
 
@@ -64,11 +64,20 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 - Comprehensive documentation for all Triton kernels
 - 3-way equivalence: NumPy/Torch/Triton produce identical outputs
 
-### Phase F: CUDA Implementation (Bare-Metal) 🔲 NOT STARTED
-- Plan: `docs/phase_f_plan.md` — 12 stages, ~15 commits, ~21 hours
-- Hand-written `.cu` files via `cuda-python` bindings
-- Manual memory management, PTX compilation, shared memory
-- Learning: CUDA C, warp reduction, coalesced access, stream ordering
+### Phase F: CUDA Implementation (Bare-Metal) 🔶 IN PROGRESS
+- Platform: Jetson AGX Orin 64GB, JetPack 6.2.2, CUDA 12.6, PyTorch 2.11.0
+- **Working API Pattern:** nvrtc compile → PTX → PyTorch custom op dispatcher (Option A)
+  - `cuLaunchKernel` via `(values, types)` tuple + explicit stream + `extra=0` ✅
+  - PyTorch tensors for memory (automatic `cudaMalloc`/`cudaFree`)
+  - Backward via PyTorch autograd (CUDA kernels provide forward)
+- **F0: Scaffolding** ✅ — `impl/_cuda/` + `tests/unit/_cuda/` created, import test passes
+- **F1: SiLU** ✅ — nvrtc compile + PyTorch custom op, 4 tests pass, both fp32/fp64
+  - Hand-written `.cu` source with f32/f64 kernels, nvrtc compilation + caching
+  - `impl/_cuda/compiler.py` — nvrtc compile → PTX → cache in `impl/_cuda/.cache/`
+  - `impl/_cuda/activation.py` — PyTorch custom_op dispatcher
+  - `tests/unit/_cuda/test_activation.py` — 4 tests, all pass
+- **F2–F11:** Ready to start RMSNorm → RoPE → SwiGLU → MHA → MoE → model wiring → training/inference → parity
+- **Learning focus:** warp reduction, shared memory, coalesced access, grid/block/threads, PTX
 
 ### Phase G: Integration & Verification 🔲 NOT STARTED
 - Train on TinyStories per backend -> save/load cross-validation -> identical outputs -> final e2e script
@@ -200,7 +209,10 @@ All improvements implemented in both backends:
 | D (Equivalence) | 0 | 1 (e0) | ✅ Complete |
 | E (Triton) | 538 | ~53 | ✅ Complete |
 | E+ (Cleanup) | +13 | ~15 | ✅ Complete |
-| **Total** | **551** | **~128** | **All pass, ruff/pyright clean** |
+| **F0** | **128** | **1 (f0)** | **✅ Complete** |
+| **F1** | **4** | **1 (f1)** | **✅ Complete** |
+| F2–F11 | 0 | 0 | 🔶 In Progress |
+| **Total** | **558** | **~130** | **557 pass, ruff/pyright clean** |
 
 ---
 

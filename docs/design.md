@@ -215,19 +215,21 @@ project-root/
 │   │   ├── inference.py          # Inference engine (same API as _torch)
 │   │   └── training.py           # Training loop (same API as _torch)
 │   │
-│   ├── _cuda/                    # Bare-metal CUDA C (NOT STARTED)
-│   │   ├── __init__.py
-│   │   ├── compiler.py           # CUDA source → PTX → runtime compilation
-│   │   ├── activation.py         # SiLU/CUDA wrapper
-│   │   ├── layernorm.py          # RMSNorm/CUDA wrapper
-│   │   ├── rope.py               # RoPE/CUDA wrapper
-│   │   ├── ffn.py                # SwiGLU/CUDA wrapper
-│   │   ├── attention.py          # MHA/CUDA wrapper
-│   │   ├── moe.py                # MoE/CUDA wrapper
-│   │   ├── transformer.py        # TransformerBlock wrapper
-│   │   ├── model.py              # CUDAModel → model integration
-│   │   ├── inference.py          # Inference engine
-│   │   └── training.py           # Training loop
+│   ├── _cuda/                    # Bare-metal CUDA C (IN PROGRESS — F0+F1 done)
+ │   │   ├── __init__.py
+ │   │   ├── compiler.py           # nvrtc compile → PTX → PTX cache (DONE ✅)
+ │   │   ├── kernels/              # Hand-written CUDA C source
+ │   │   │   ├── activation.cu     # SiLU forward+backward f32/f64 (DONE ✅)
+ │   │   ├── activation.py         # SiLU — nvrtc + PyTorch dispatcher (DONE ✅)
+ │   │   ├── layernorm.py          # RMSNorm/CUDA wrapper (TODO)
+ │   │   ├── rope.py               # RoPE/CUDA wrapper (TODO)
+ │   │   ├── ffn.py                # SwiGLU/CUDA wrapper (TODO)
+ │   │   ├── attention.py          # MHA/CUDA wrapper (TODO)
+ │   │   ├── moe.py                # MoE/CUDA wrapper (TODO)
+ │   │   ├── transformer.py        # TransformerBlock wrapper (TODO)
+ │   │   ├── model.py              # CUDAModel → model integration (TODO)
+ │   │   ├── inference.py          # Inference engine (TODO)
+ │   │   └── training.py           # Training loop (TODO)
 │   │
 │   └── cuda/                     # (Legacy/placeholder — use _cuda/)
 │       └── ...
@@ -857,30 +859,37 @@ Wave 4: Code Cleanup (1-2 commits)
 
 **Note:** The plan file `docs/phase_e_plus_plan.md` contains the full detailed specification for all 6 waves of Phase E+. This design doc has been updated to reflect the current implemented state.
 
-### Phase F: CUDA 🔲 NOT STARTED (Plan Ready)
+### Phase F: CUDA 🔶 IN PROGRESS (F0+F1 done, F2–F11 pending)
 ```
-F0: Scaffolding
-F1: SiLU kernel (element-wise CUDA C)
-F2: RMSNorm kernel (reduction)
-F3: RoPE kernel (trig, indexing)
-F4: SwiGLU kernel (SiLU + matmul)
-F5: MHA kernel (attention + GQA, tiled)
-F6: MoE kernel (top-k routing)
-F7: TransformerBlock assembly
-F8: DecoderStack assembly
-F9: Full CUDAModel (save/load/parity)
-F10: Inference + Training scripts
-F11: 4-way cross-backend parity (NumPy/Torch/Triton/CUDA)
+Phase F0: Scaffolding (impl/_cuda/ dirs + import test) — DONE ✅
+Phase F1: SiLU activation kernel (nvrtc compile + PyTorch custom_op) — DONE ✅
+    - impl/_cuda/activation.py — PyTorch autograd.Function dispatcher
+    - impl/_cuda/compiler.py — nvrtc compile → PTX → cache
+    - impl/_cuda/kernels/activation.cu — CUDA C with f32/f64 forward+backward
+    - tests/unit/_cuda/test_activation.py — 4 tests, all pass
+Phase F2: RMSNorm kernel (reduction, warp reduction pattern) — TODO
+Phase F3: RoPE kernel (trig, indexing patterns) — TODO
+Phase F4: SwiGLU kernel (SiLU element-wise + PyTorch GEMM, hybrid) — TODO
+Phase F5: MHA kernel (stable softmax + weighted sum, coalesced access) — TODO
+Phase F6: MoE kernel (top-k routing + weighted sum, scatter/gather) — TODO
+Phase F7: TransformerBlock assembly (Python wiring) — TODO
+Phase F8: DecoderStack assembly (Python wiring) — TODO
+Phase F9: Full CUDAModel (save/load/parity, 4-way) — TODO
+Phase F10: Inference + Training scripts — TODO
+Phase F11: 4-way cross-backend parity (NumPy/Torch/Triton/CUDA) — TODO
 ```
 
 **Plan:** `docs/phase_f_plan.md` — 12-stage TDD plan, ~15 commits, ~21 hours
 
-**CUDA-Specific Notes:**
-- Hand-written `.cu` files (not wrappers around cuBLAS/cuDNN)
-- Manual memory management via `cuda-python` bindings
-- Runtime PTX compilation via NVRTC
-- Learning: shared memory, warp reduction, coalesced access, stream ordering
-- Use `cuda-python` for CUDA C Runtime API access from Python
+**CUDA-Specific Notes (Jetson AGX Orin 64GB, JetPack 6.2.2, CUDA 12.6):**
+- Hand-written `.cu` files compiled at runtime via nvrtc (NOT raw `cuda-python` bindings)
+- PyTorch as kernel dispatcher: `torch.empty` for memory, `torch.autograd.Function` for launch
+- `cuLaunchKernel` with `(values, types)` tuple format + explicit stream + `extra=0` works
+- Memory via PyTorch tensors (no manual `cudaMalloc`/`cudaFree`)
+- Backward pass via PyTorch's autograd (CUDA kernels provide forward only)
+- Learning focus: shared memory, warp reduction, coalesced access, grid/block/threads, PTX
+- Cache path: `impl/_cuda/.cache/<sha>.ptx` — avoids recompilation
+- **cuLaunchKernel verified working in `tests/unit/_cuda/test_cuda_api_foundations.py`**
 
 ---
 
