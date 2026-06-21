@@ -480,7 +480,7 @@ Each backend produces identical outputs. Pick the one that matches your goal:
 
 **Status:** All NumPy vs PyTorch rows verified — 5 parity tests pass, `weight_diff=0.0`.
 Triton: ✅ Complete — 538 tests, parity with NumPy/PyTorch verified.
-CUDA: 🔲 Not started — Phase F plan ready.
+CUDA: 🔒 Blocked by test infrastructure — code complete (F0-F9), tests pass individually but not as full suite.
 
 **Tolerances (following AGENTS.md tiered policy):**
 - Standalone layer (tested in isolation): `rtol=1e-4, atol=1e-4`
@@ -545,12 +545,21 @@ Phase G: Integration & E2E 🔲 Not Started
 - Full model using Triton kernels + cross-backend parity tests + Training + Inference
 - **Reference:** `docs/phase_e_plan.md` — 12-stage plan (E0–E11), ~60-80 tests, ~15 commits
 
-### Phase F: CUDA 🔲 Not Started
-1. CUDA kernels (all compute ops)
-2. Python wrapper for kernels
-3. Full model
-4. Cross-backend parity tests
-5. Training + Inference
+### Phase F: CUDA 🔶 IN PROGRESS (F0–F9 complete, test infra blocked)
+```
+Phase F0: Scaffolding (impl/_cuda/ dirs + import test) — DONE ✅
+Phase F1: SiLU activation kernel (nvrtc compile + PyTorch custom_op) — DONE ✅
+Phase F2: RMSNorm kernel (reduction, warp reduction pattern) — DONE ✅
+Phase F3: RoPE kernel (trig, indexing patterns) — DONE ✅
+Phase F4: SwiGLu FFN kernel (SiLU element-wise + PyTorch GEMM, hybrid) — DONE ✅
+Phase F5: MHA kernel (stable softmax + weighted sum, warp reduction) — DONE ✅
+Phase F6: MoE kernel (top-k routing) — DONE ✅ (contiguous tensor fix)
+Phase F7: TransformerBlock (Python wiring) — DONE ✅
+Phase F8: DecoderStack (Python wiring) — DONE ✅
+Phase F9: Full CUDAModel (weights + forward) — DONE ✅
+Phase F10: Training + Inference scripts — 🔒 BLOCKED by test infrastructure
+Phase F11: 4-way cross-backend parity (NumPy/Torch/Triton/CUDA) — 🔒 BLOCKED
+```
 
 ---
 
@@ -859,7 +868,7 @@ Wave 4: Code Cleanup (1-2 commits)
 
 **Note:** The plan file `docs/phase_e_plus_plan.md` contains the full detailed specification for all 6 waves of Phase E+. This design doc has been updated to reflect the current implemented state.
 
-### Phase F: CUDA 🔶 IN PROGRESS (F0-F5 done, F6 MoE blocked, F7-F11 planned)
+### Phase F: CUDA 🔶 IN PROGRESS — F0–F9 COMPLETE, TEST INFRA BLOCKED
 ```
 Phase F0: Scaffolding (impl/_cuda/ dirs + import test) — DONE ✅
 Phase F1: SiLU activation kernel (nvrtc compile + PyTorch custom_op) — DONE ✅
@@ -867,19 +876,26 @@ Phase F2: RMSNorm kernel (reduction, warp reduction pattern) — DONE ✅
 Phase F3: RoPE kernel (trig, indexing patterns) — DONE ✅
 Phase F4: SwiGLu FFN kernel (SiLU element-wise + PyTorch GEMM, hybrid) — DONE ✅
 Phase F5: MHA kernel (stable softmax + weighted sum, warp reduction) — DONE ✅
-Phase F6: MoE kernel — BLOCKED (5 failing tests, root cause identified)
-Phase F7: TransformerBlock assembly (Python wiring) — TODO
-Phase F8: DecoderStack assembly (Python wiring) — TODO
-Phase F9: Full CUDAModel (save/load/parity, 4-way) — TODO
-Phase F10: Inference + Training scripts — TODO
-Phase F11: 4-way cross-backend parity (NumPy/Torch/Triton/CUDA) — TODO
+Phase F6: MoE kernel — DONE ✅ (non-contiguous tensor fix applied)
+Phase F7: TransformerBlock assembly (Python wiring) — DONE ✅
+Phase F8: DecoderStack assembly (Python wiring) — DONE ✅
+Phase F9: Full CUDAModel (save/load/parity, 4-way) — DONE ✅
+Phase F10: Inference + Training scripts — 🔒 BLOCKED by test infrastructure
+Phase F11: 4-way cross-backend parity (NumPy/Torch/Triton/CUDA) — 🔒 BLOCKED
 ```
 
-**Current status:** 45/50 CUDA tests pass (F0-F5 all pass). F6 MoE blocked by indexed memory access bug.
+**Current status:** F0–F9 code complete (~130+ unique CUDA tests). Individual tests all pass.
+Full suite at 140+ tests (with duplicate files) fails at 38-39% rate via per-test subprocess isolation.
 
-**Blocker:** `moe_weighted_sum` kernel reads indexed data from non-contiguous tensor views, causing silent memory corruption. Fix: add `.contiguous()` before `.view()` for all tensors with indexed GPU kernel access.
+**Test Infrastructure Blocker:** ~140 test subprocesses per full suite run exhausts Jetson's nvgpu driver state
+(NVRTC caches, module handles, `/dev/nvhost` references). 70 duplicate test files triple the subprocess count.
+70 unique test files exist across ~9 modules, but `test_zz_*` and `test_aa_*` duplicates run them 2-3×.
 
-**Plan:** `docs/phase_f_plan.md` — 12-stage plan, F6 blocked, F7-F11 sequential plan defined.
+**Solution needed (see `docs/phase_f_plan.md`):**
+- Remove duplicate test files (70 duplicates found, all identical)
+- Choose: per-file isolation (~70 tests) or manual batching (8-10 tests/subprocess, ~8 batches)
+
+**Plan:** `docs/phase_f_plan.md` — 12-stage plan, F0-F9 done, F10-F11 waiting on test infra.
 
 **CUDA-Specific Notes (Jetson AGX Orin 64GB, JetPack 6.2.2, CUDA 12.6):**
 
@@ -1069,4 +1085,5 @@ Why CUDA last?
 ├─ Requires CUDA toolkit installation
 ├─ Reference implementations already exist (numpy + torch + triton)
 └─ Best as a learning exercise after understanding the abstractions
+└─ ✅ Phase F0-F9 complete — F10-F11 blocked by test infrastructure (Jetson nvgpu driver limits)
 ```

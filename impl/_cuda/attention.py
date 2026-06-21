@@ -458,16 +458,14 @@ class _CUDASDPACudaFunction(torch.autograd.Function):
         q, k, v, scores = ctx.saved_tensors
         grad_output = grad_outputs[0]
 
+        # Compute gradients using torch.autograd.grad (works for any tensor in graph)
         import torch.nn.functional as F
 
-        # Compute gradients using PyTorch's built-in backward
-        # We compute grad by passing through PyTorch's SDPA with gradients
         with torch.enable_grad():
             out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
-            out.backward(grad_output)
-            grad_q = q.grad.clone()
-            grad_k = k.grad.clone()
-            grad_v = v.grad.clone()
+            grad_q, grad_k, grad_v = torch.autograd.grad(
+                out, (q, k, v), grad_output, retain_graph=False
+            )
 
         return grad_q, grad_k, grad_v
 

@@ -45,6 +45,7 @@ pythonpath = ["shared"]
 markers = [
     "gpu: marks tests as requiring GPU (deselect with '-m \"not gpu\"')",
 ]
+addopts = []
 
 [tool.pyright]
 include = ["shared"]
@@ -58,6 +59,7 @@ reportUnknownVariableType = false
 dev = [
     "pyright>=1.1",
     "pytest>=7.0",
+    "pytest-forked>=1.6.0",
     "pytest-timeout>=2.0",
     "ruff>=0.4",
 ]

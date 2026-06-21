@@ -431,7 +431,7 @@ class _RoPECudaFunction(torch.autograd.Function):
         rope_dim = input_tensor.shape[-1]
 
         # Flatten gradient
-        grad_flat = grad_outputs[0].view(-1, input_tensor.shape[-1])
+        grad_flat = grad_outputs[0].reshape(-1, input_tensor.shape[-1])
         n_tokens = grad_flat.shape[0]
 
         # Compute cos/sin tables (same as forward)
@@ -473,7 +473,7 @@ class _RoPECudaFunction(torch.autograd.Function):
                 rope_dim,
             )
 
-        return grad_x_flat, None
+        return grad_x_flat.reshape(input_tensor.shape), None
 
 
 # ---------------------------------------------------------------------------

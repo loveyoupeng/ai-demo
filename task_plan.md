@@ -11,7 +11,7 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 **Phase E (Triton GPU Kernels) is ✅ COMPLETE.** — 538 tests pass
 **Phase E+ (Cleanup & Refinement) is ✅ COMPLETE.** — 551 tests pass
 
-**Next step: Phase F (CUDA Bare-Metal) — F0+F1 Complete, F2–F11 Ready**
+**Next step: Phase F (CUDA Bare-Metal) — F0–F9 complete, test infrastructure in flux**
 
 ---
 
@@ -64,7 +64,7 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 - Comprehensive documentation for all Triton kernels
 - 3-way equivalence: NumPy/Torch/Triton produce identical outputs
 
-### Phase F: CUDA Implementation (Bare-Metal) 🔶 IN PROGRESS
+### Phase F: CUDA Implementation (Bare-Metal) 🔶 IN PROGRESS — TEST INFRASTRUCTURE IN FLUX
 - Platform: Jetson AGX Orin 64GB, JetPack 6.2.2, CUDA 12.6, PyTorch 2.11.0
 - **Working API Pattern:** nvrtc compile → PTX → cuLaunchKernel dispatcher (Option A)
   - `cuLaunchKernel` via `(values, types)` tuple + explicit stream + `extra=0` ✅
@@ -76,15 +76,14 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 - **F3: RoPE** ✅ — 4 tests, trig + index pairing
 - **F4: SwiGLU FFN** ✅ — 3 tests, hybrid CUDA SiLU + PyTorch matmul
 - **F5: MHA (Attention)** ✅ — 4 tests, stable softmax + warp-reduction weighted sum
-- **F6: MoE** 🔴 **BLOCKED** — 5 failing tests (root cause identified: non-contiguous tensor access in indexed reads)
-  - `impl/_cuda/kernels/moe.cu` — expert scoring + weighted sum
-  - `impl/_cuda/moe.py` — Python wrapper with nvrtc dispatch
-  - Root cause: `topk_idx.view(-1)` and `expert_outputs.view()` create non-contiguous views
-  - Fix: add `.contiguous()` before `.view()` for all indexed GPU kernel inputs
-- **F7–F11:** Pending — plan defined in `docs/phase_f_plan.md`
-- **45/50 CUDA tests pass** (45 pass, 5 MoE failures)
+- **F6: MoE** ✅ — 21 tests, expert scoring + weighted sum (fixed: non-contiguous tensor access)
+- **F7: TransformerBlock** ✅ — 19 tests, complete block with attention, MoE, layernorm, gated residuals
+- **F8: DecoderStack** ✅ — 12 tests, chained n_layers of CuTransformerBlock
+- **F9: CUDAModel** ✅ — 7 tests, full model: embedding → stack → layernorm → SwiGLU → output_proj
+- **F10–F11:** Pending — training/inference scripts + cross-backend parity
 - **Critical rule added:** All tensors passed to CUDA kernels with indexed access MUST be `.contiguous()` before `.view()`
 - **Learning focus:** warp reduction, shared memory, coalesced access, grid/block/threads, PTX, contiguous tensor enforcement
+- **🔴 TEST INFRASTRUCTURE BLOCKED:** ~140 CUDA tests (with duplicates) fail at 38-39% rate via per-test subprocess isolation due to nvgpu driver state exhaustion at 140+ process spawns per run. Per-file isolation works at ~70 tests but needs duplicate cleanup.
 
 ### Phase G: Integration & Verification 🔲 NOT STARTED
 - Train on TinyStories per backend -> save/load cross-validation -> identical outputs -> final e2e script
@@ -216,15 +215,18 @@ All improvements implemented in both backends:
 | D (Equivalence) | 0 | 1 (e0) | ✅ Complete |
 | E (Triton) | 538 | ~53 | ✅ Complete |
 | E+ (Cleanup) | +13 | ~15 | ✅ Complete |
-| **F0** | **128** | **1 (f0)** | **✅ Complete** |
-| **F1** | **4** | **1 (f1)** | **✅ Complete** |
-| **F2** | **4** | **1 (f2)** | **✅ Complete** |
-| **F3** | **4** | **1 (f3)** | **✅ Complete** |
-| **F4** | **3** | **1 (f4)** | **✅ Complete** |
-| **F5** | **4** | **1 (f5)** | **✅ Complete** |
-| **F6** | **5 failing** | **0** | **🔴 Blocked** |
-| F7–F11 | 0 | 0 | 🔲 Not Started |
-| **Total** | **558** | **~130** | **557 pass, ruff/pyright clean (45/50 CUDA)** |
+| | **F0** | **128** | **1 (f0)** | **✅ Complete** |
+| | **F1** | **4** | **1 (f1)** | **✅ Complete** |
+| | **F2** | **4** | **1 (f2)** | **✅ Complete** |
+| | **F3** | **4** | **1 (f3)** | **✅ Complete** |
+| | **F4** | **3** | **1 (f4)** | **✅ Complete** |
+| | **F5** | **4** | **1 (f5)** | **✅ Complete** |
+| | **F6** | **21** | **0** | **✅ Complete** |
+| | **F7** | **19** | **0** | **✅ Complete** |
+| | **F8** | **12** | **0** | **✅ Complete** |
+| | **F9** | **7** | **0** | **✅ Complete** |
+| | F10–F11 | 0 | 0 | 🔲 Blocked by CUDA test infrastructure |
+| **Total** | **565** | **~130** | **564 pass individually; 38-39% fail when full suite runs (nvgpu driver state)** |
 
 ---
 

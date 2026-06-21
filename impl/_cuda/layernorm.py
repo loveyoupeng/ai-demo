@@ -320,8 +320,15 @@ class _RmsNormCudaFunction(torch.autograd.Function):
         # d_x = gamma * inv_rms * (d_out - mean(d_out * x_norm) * x_norm)
         grad_input = gamma.unsqueeze(0) * inv_rms * (d_out_scaled - mean_val * x_norm)
 
-        # Gradient for gamma: sum over batch dimensions
-        grad_gamma = torch.sum(grad_output * normalized, dim=list(range(x.dim() - 1)))
+        # Gradient for gamma: sum over all dimensions except last (feature dimension)
+        # normalized has same shape as input (B, S, D) or (N, D)
+        # grad_output is reshaped to (N, D) for backward computation
+        # We must flatten normalized to match grad_output's (N, D) shape before multiplication
+        normalized_flat = normalized.view(N, D)
+        if input.dim() == 2:
+            grad_gamma = torch.sum(grad_output * normalized_flat, dim=0)
+        else:  # input is 3D, sum over batch dimensions to get (D,)
+            grad_gamma = torch.sum(grad_output * normalized_flat, dim=0)
 
         return grad_input.view(ctx.original_shape) if input.dim() > 2 else grad_input, grad_gamma
 
