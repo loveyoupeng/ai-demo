@@ -51,6 +51,10 @@ from impl._cuda.rope import apply_rope
 def _init_weight(rows: int, cols: int, seed: int) -> torch.Tensor:
     """Xavier/uniform initialization for attention/FFN weights.
 
+    Uses Kaiming (Xavier) uniform initialization with the bound:
+        bound = sqrt(6 / (fan_in + fan_out))
+    This is the same formula used by torch.nn.Linear default.
+
     Parameters
     ----------
     rows : int
@@ -63,11 +67,13 @@ def _init_weight(rows: int, cols: int, seed: int) -> torch.Tensor:
     Returns
     -------
     torch.Tensor
-        Initialized weight matrix of shape (rows, cols) on CPU.
+        Initialized weight matrix of shape (rows, cols) on CPU,
+        values in [-bound, +bound].
     """
-    # Use torch's default uniform initialization (same as nn.Linear default)
     bound = (6.0 / (rows + cols)) ** 0.5
-    return torch.empty(rows, cols) * 2 * bound - bound
+    tensor = torch.empty(rows, cols, dtype=torch.float32)
+    torch.nn.init.uniform_(tensor, -bound, bound, generator=torch.Generator().manual_seed(seed))
+    return tensor
 
 
 def _init_zeros(shape: tuple[int, ...]) -> torch.Tensor:

@@ -130,6 +130,34 @@ class TestInitHelpers:
         assert torch.allclose(z, torch.zeros(5, 10))
         assert z.device.type == "cpu"
 
+    def test_init_weight_no_nan_or_inf(self) -> None:
+        """_init_weight must produce finite values — no NaN or Inf."""
+        w = _init_weight(64, 64, seed=42)
+        assert not torch.isnan(w).any(), "Initialized weights contain NaN"
+        assert not torch.isinf(w).any(), "Initialized weights contain Inf"
+
+    def test_init_weight_finite_range(self) -> None:
+        """_init_weight produces values within [min, max] bounds."""
+        w = _init_weight(64, 64, seed=42)
+        bound = (6.0 / (64 + 64)) ** 0.5
+        assert w.min() >= -bound, f" Weight min {w.min().item():.4f} below lower bound {-bound:.4f}"
+        assert w.max() <= bound, f" Weight max {w.max().item():.4f} above upper bound {bound:.4f}"
+
+    def test_init_weight_reproducible(self) -> None:
+        """_init_weight with same seed produces identical output."""
+        w1 = _init_weight(64, 64, seed=99)
+        w2 = _init_weight(64, 64, seed=99)
+        assert torch.equal(w1, w2), "Same seed must produce identical weights"
+        assert not torch.equal(_init_weight(64, 64, seed=99), _init_weight(64, 64, seed=100)), "Different seeds must differ"
+
+    def test_init_weight_forward_no_nan(self) -> None:
+        """Block with _init_weight weights produces valid forward output (no NaN)."""
+        w = _init_weight(64, 64, seed=42)
+        x = torch.randn(2, 4, 64, device="cuda")
+        result = x @ w.cuda()
+        assert not torch.isnan(result).any(), "Forward through initialized weight produces NaN"
+        assert not torch.isinf(result).any(), "Forward through initialized weight produces Inf"
+
 
 class TestBlockForward:
     """Test TransformerBlock forward pass on CUDA."""

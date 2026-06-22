@@ -1,5 +1,23 @@
 # Findings & Decisions
 
+## Phase F — NaN Bug Findings (2026-06-22)
+
+### Problem
+NaN gradients in `TestDecoderStackGradients` — `Wq.grad` contained NaN with outlier `7.17e+05`, `gate1.grad` was exactly `NaN`.
+
+### Root Cause
+`impl/_cuda/block.py:_init_weight()` used `torch.empty()` which allocates uninitialized GPU memory. On GPU, memory is not zeroed — it contains garbage values from previous CUDA operations. Multiplying garbage by a small constant does NOT produce valid values; it scales the garbage which then propagates through forward → attention softmax → NaN → backward → NaN gradients.
+
+### Fix
+`torch.nn.init.uniform_()` with explicit seed provides proper Kaiming/Xavier initialization. Values land in [-bound, +bound] range (typically ±0.22 for 64-dim), ensuring stable forward/backward.
+
+### Impact
+All 96/96 CUDA tests now pass (100%). 2 previously failing tests now pass:
+- `test_gradient_no_nan_multi_layers` ✅
+- `test_gated_gradients` ✅
+
+---
+
 ## Requirements
 
 ### Core Architecture
