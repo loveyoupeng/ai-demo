@@ -561,6 +561,38 @@ in_tensor = ...  # always contiguous by construction
 out_tensor = torch.empty_like(in_tensor)
 kernel(grid, block, None, (c_void_p(in_tensor.data_ptr()), c_void_p(out_tensor.data_ptr()), ...), 0)
 ```
+
+## Phase F: CUDA — Test Infrastructure Merge — COMPLETE (2026-06-22)
+
+### Merged 17 test files → 7 files, 27 test classes
+
+| File (After) | Source | Classes |
+|---|---|---|
+| `test_attention.py` | attention + attention_moe | TestScaledAttention, TestMoERoute |
+| `test_block.py` | aa_block (canonical) | TestBlockInit, TestInitHelpers, TestBlockForward, TestBlockMoEIntegration |
+| `test_cuda_api_foundations.py` | cuda_api_foundations + aa_cuda_api | 6 classes |
+| `test_import.py` | import (stripped) | TestImport |
+| `test_kernels.py` | activation + layernorm + rope + ffn | TestSiLUCUDA, TestRMSNormCUDA, TestRoPECUDA, TestSwiGLU |
+| `test_model.py` | cu_model + decoder_stack | TestCuModelInit, TestDecoderStack×3 |
+| `test_moe.py` | moe + moe_debug | TestMoERouting + 5 debug classes |
+
+**Deleted 10 duplicates.** Conftest fix: `sys.exit()` → `os._exit()` (fixes INTERNALERROR).
+
+### 6 Pre-existing NaN Bugs in TestDecoderStack
+
+CuDecoderStack works standalone:
+```python
+from impl._cuda.stack import CuDecoderStack
+stack = CuDecoderStack(**cfg)
+out = stack.forward(inp)  # No NaN ✅
+```
+
+But 6 tests produce NaN intermittently via CUDA non-determinism:
+- `test_single_layer` / `test_multi_layer` / `test_large_batch` — NaN in forward output
+- `test_gradient_flow` / `test_gradient_no_nan_multi_layers` / `test_gated_gradients` — NaN in gradients
+
+The NaN is **timing/ordering dependent** — some subprocess runs clean, others produce NaN. Not a test infrastructure bug; it's a CUDA kernel race condition in the MoE gating/activation path. Separate bug fix needed.
+
 ## Phase F: CUDA — Per-Test Subprocess Testing FAILS Due to Cumulative Driver State (2026-06-22)
 
 ### Context

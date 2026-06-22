@@ -1,12 +1,11 @@
-"""Run CUDA tests in per-test subprocesses to prevent NVRTC context pollution.
+"""Run CUDA tests in batched subprocesses to prevent NVRTC context pollution.
 
 On Jetson (JetPack 6.2.2, CUDA 12.6), NVRTC driver state accumulates within
 a process as kernels are compiled, causing INVALID_HANDLE errors.
 
-Solution: the parent conftest spawns one subprocess per TEST FILE. Each of
-those subprocesses, instead of running tests directly, spawns one subprocess
-PER TEST using the _run_single_test.py helper. This gives complete per-test
-isolation while keeping the pytest infrastructure intact.
+Solution: the parent conftest spawns ONE subprocess per test FILE. Each
+subprocess runs ALL tests in that file at once. With merged test files,
+this yields a single subprocess for the entire suite (~71 tests in one run).
 """
 
 from __future__ import annotations
@@ -44,15 +43,15 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
-def _spawn_test_subprocess(test_id: str, cache_uid: str) -> int:
-    """Spawn a subprocess that runs a single test with a fresh CUDA context.
+def _spawn_file_subprocess(test_file: Path, batch_id: str) -> int:
+    """Spawn a subprocess that runs ALL tests in a single file with a fresh CUDA context.
 
     Parameters
     ----------
-    test_id : str
-        Full test identifier, e.g. 'tests/unit/_cuda/test_block.py::test_shape'
-    cache_uid : str
-        Unique cache directory suffix to prevent NVRTC cross-talk
+    test_file : Path
+        Path to the test file, e.g. Path("tests/unit/_cuda/test_all_cuda.py")
+    batch_id : str
+        Unique batch ID for cache directory isolation
 
     Returns
     -------
@@ -61,7 +60,7 @@ def _spawn_test_subprocess(test_id: str, cache_uid: str) -> int:
     """
     cmd = [
         PYTHON, "-m", "pytest",
-        test_id,
+        str(test_file),
         "-q",
         "--timeout=120",
         "--tb=short",
@@ -69,45 +68,30 @@ def _spawn_test_subprocess(test_id: str, cache_uid: str) -> int:
     ]
     env = _clean_env()
     env["CUDA_CACHE_DISABLE"] = "1"
-    env["CUDA_CACHE_PATH"] = str(Path(f"/tmp/.cuda_test_cache_{cache_uid}") / "__pid__")
+    env["CUDA_CACHE_PATH"] = str(Path(f"/tmp/.cuda_test_cache_{batch_id}") / "__pid__")
     return subprocess.run(cmd, env=env).returncode
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtestloop(session):  # noqa: ANN001, D103
-    """Run each test in its own subprocess for complete CUDA isolation."""
+    """Run each test FILE in its own subprocess for CUDA isolation."""
     if _IN_SUBPROCESS:
         yield
         return
 
-    test_ids: list[str] = []
-    for test_file in CUDA_DIR.glob("test_*.py"):
-        _collect_test_ids(str(test_file), test_ids)
+    test_files: list[Path] = sorted(CUDA_DIR.glob("test_*.py"))
 
-    if not test_ids:
+    if not test_files:
         return
 
     exit_code = 0
     uid = uuid.uuid4().hex[:8]
-    for i, test_id in enumerate(test_ids, 1):
-        short = test_id.split("::")[-1]
-        test_uid = f"{uid}_{i:04d}"
-        print(f"  [cuda] ({i:>3}/{len(test_ids)}) {short}", file=sys.stderr, flush=True)
-        rc = _spawn_test_subprocess(test_id, test_uid)
+    for i, test_file in enumerate(test_files, 1):
+        short = test_file.name.removesuffix(".py")
+        batch_id = f"{uid}_{i:03d}"
+        print(f"  [cuda] ({i:>3}/{len(test_files)}) {short}", file=sys.stderr, flush=True)
+        rc = _spawn_file_subprocess(test_file, batch_id)
         if rc != 0:
             exit_code = rc
 
-    sys.exit(exit_code)
-
-
-def _collect_test_ids(test_file: str, test_ids: list[str]) -> None:
-    """Collect one test ID per line from a test file's collection output."""
-    env = _clean_env()
-    env["CUDA_CACHE_DISABLE"] = "1"
-    env["CUDA_CACHE_PATH"] = str(Path(f"/tmp/.cuda_test_cache_collect_{uuid.uuid4().hex[:8]}") / "__pid__")
-    cmd = [PYTHON, "-m", "pytest", test_file, "--collect-only", "-q", "--tb=no"]
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
-    for line in result.stdout.strip().splitlines():
-        line = line.strip()
-        if "::test_" in line or (line.split() and "::test_" in line.split()[-1]):
-            test_ids.append(line)
+    os._exit(exit_code)
