@@ -689,13 +689,15 @@ class MultiHeadAttention:
             q = q.reshape(batch_size, self.n_heads, seq_len, self.head_dim)  # (B, H, S, d)
             k = k.reshape(batch_size, self.n_groups, seq_len, self.head_dim)  # (B, G, S, d)
 
-            # RoPE only on first rope_dim dims of head_dim
-            q = RoPE().forward(q, np.arange(seq_len), rope_dim=self.rope_dim)
-            k = RoPE().forward(k, np.arange(seq_len), rope_dim=self.rope_dim)
-
-            # Reshape back for the following transpose
-            q = q.reshape(batch_size, self.n_heads, seq_len, self.head_dim)
-            k = k.reshape(batch_size, self.n_groups, seq_len, self.head_dim)
+            # RoPE: transpose from (B, H, S, d) to (B, S, H, d) for RoPE call,
+            # then transpose back to (B, H, S, d) for the following attention.
+            # RoPE uses (B, S, H, d) as its contract shape.
+            q = q.transpose(0, 2, 1, 3)  # (B, H, S, d) → (B, S, H, d)
+            k = k.transpose(0, 2, 1, 3)  # (B, G, S, d) → (B, S, G, d)
+            q = RoPE().forward(q, np.arange(seq_len), rope_dim=self.rope_dim)  # (B, S, H, d)
+            k = RoPE().forward(k, np.arange(seq_len), rope_dim=self.rope_dim)  # (B, S, G, d)
+            q = q.transpose(0, 2, 1, 3)  # (B, S, H, d) → (B, H, S, d)
+            k = k.transpose(0, 2, 1, 3)  # (B, S, G, d) → (B, G, S, d)
 
         # Scaled dot-product attention: Q @ K^T / sqrt(d)
         # Q: (B, H, S, d), K^T: (B, G, d, S)
