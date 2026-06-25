@@ -143,6 +143,7 @@ class TestTurboQuantKVCache:
         cache.clear()
         assert cache.is_empty()
         assert cache.current_length() == 0
+        assert cache._batch_size == 0
         k_cache, v_cache = cache.get()
         assert len(k_cache) == 2
         assert all(kc.size == 0 for kc in k_cache)

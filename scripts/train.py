@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Unified training script for decoder-only transformer models.
 
-Supports both NumPy and PyTorch backends through a single entry point.
+Supports NumPy, PyTorch, Triton, and CUDA backends through a single entry point.
 
 Usage:
     # Train with defaults
@@ -20,7 +20,7 @@ Usage:
     uv run python scripts/train.py --backend torch --save_dir /tmp/my_model --seed 42
 
 Environment variables:
-    TORCH_N_LAYERS, TORCH_EMBED_DIM, etc. — override defaults for PyTorch
+    TORCH_N_LAYERS, TORCH_EMBED_DIM, etc. — override defaults for PyTorch/Triton/CUDA
     NPY_N_LAYERS, NPY_EMBED_DIM, etc.      — override defaults for NumPy
 """
 
@@ -75,9 +75,9 @@ examples:
     parser.add_argument(
         "-b",
         "--backend",
-        default="torch",
-        choices=["numpy", "torch"],
-        help="Backend implementation (default: torch)",
+        default="numpy",
+        choices=["numpy", "torch", "triton", "cuda"],
+        help="Backend implementation (default: numpy)",
     )
 
     # -- Architecture --
@@ -183,12 +183,14 @@ def build_model(backend: str, config: dict) -> tuple:
     """Build a model instance from config.
 
     Args:
-        backend: 'numpy' or 'torch'.
+        backend: 'numpy', 'torch', 'triton', or 'cuda'.
         config: Configuration dict.
 
     Returns:
         Tuple of (model_instance, config_for_logging).
     """
+    import torch
+
     if backend == "numpy":
         from impl._np.model import NumPyModel
         from shared.config import TransformerConfig
@@ -220,36 +222,151 @@ def build_model(backend: str, config: dict) -> tuple:
         )
         return model, cfg
 
-    # PyTorch
-    from impl._torch.layers import TorchModel
-    from shared.config import TransformerConfig
+    if backend == "torch":
+        from impl._torch.layers import TorchModel
+        from shared.config import TransformerConfig
 
-    cfg = TransformerConfig(
-        vocab_size=config.get("vocab_size", 256),
-        context_length=config.get("context_length", 128),
-        embed_dim=config.get("embed_dim", 256),
-        n_layers=config.get("n_layers", 4),
-        n_heads=config.get("n_heads", 8),
-        n_groups=config.get("n_groups", 8),
-        rope_dim=config.get("rope_dim", 0),
-        n_experts=config.get("n_experts", 4),
-        top_k=config.get("top_k", 2),
-        expert_dim=config.get("expert_dim", 0),
-        max_length=config.get("max_length", 512),
-        seed=config.get("seed", 42),
-    )
-    model = TorchModel(
-        vocab_size=cfg.vocab_size,
-        embed_dim=cfg.embed_dim,
-        n_layers=cfg.n_layers,
-        n_heads=cfg.n_heads,
-        n_experts=cfg.n_experts,
-        ff_dim=cfg.expert_dim or (cfg.embed_dim * 4),
-        k=cfg.top_k,
-        rope_dim=cfg.rope_dim,
-        seed=cfg.seed,
-    )
-    return model, cfg
+        cfg = TransformerConfig(
+            vocab_size=config.get("vocab_size", 256),
+            context_length=config.get("context_length", 128),
+            embed_dim=config.get("embed_dim", 256),
+            n_layers=config.get("n_layers", 4),
+            n_heads=config.get("n_heads", 8),
+            n_groups=config.get("n_groups", 8),
+            rope_dim=config.get("rope_dim", 0),
+            n_experts=config.get("n_experts", 4),
+            top_k=config.get("top_k", 2),
+            expert_dim=config.get("expert_dim", 0),
+            max_length=config.get("max_length", 512),
+            seed=config.get("seed", 42),
+        )
+        model = TorchModel(
+            vocab_size=cfg.vocab_size,
+            embed_dim=cfg.embed_dim,
+            n_layers=cfg.n_layers,
+            n_heads=cfg.n_heads,
+            n_experts=cfg.n_experts,
+            ff_dim=cfg.expert_dim or (cfg.embed_dim * 4),
+            k=cfg.top_k,
+            rope_dim=cfg.rope_dim,
+            seed=cfg.seed,
+        )
+        return model, cfg
+
+    if backend == "triton":
+        from impl._triton.model import TritonModel
+        from shared.config import TransformerConfig
+
+        cfg = TransformerConfig(
+            vocab_size=config.get("vocab_size", 256),
+            context_length=config.get("context_length", 128),
+            embed_dim=config.get("embed_dim", 256),
+            n_layers=config.get("n_layers", 4),
+            n_heads=config.get("n_heads", 8),
+            n_groups=config.get("n_groups", 8),
+            rope_dim=config.get("rope_dim", 0),
+            n_experts=config.get("n_experts", 4),
+            top_k=config.get("top_k", 2),
+            expert_dim=config.get("expert_dim", 0),
+            max_length=config.get("max_length", 512),
+            seed=config.get("seed", 42),
+        )
+        D = cfg.embed_dim
+        model = TritonModel(
+            vocab_size=cfg.vocab_size,
+            embed_dim=D,
+            n_layers=cfg.n_layers,
+            n_heads=cfg.n_heads,
+            n_experts=cfg.n_experts,
+            ff_dim=D * 2,
+            k=cfg.top_k,
+        )
+        return model, cfg
+
+    if backend == "cuda":
+        from impl._cuda.model import CUDAModel
+        from shared.config import TransformerConfig
+
+        cfg = TransformerConfig(
+            vocab_size=config.get("vocab_size", 256),
+            context_length=config.get("context_length", 128),
+            embed_dim=config.get("embed_dim", 256),
+            n_layers=config.get("n_layers", 4),
+            n_heads=config.get("n_heads", 8),
+            n_groups=config.get("n_groups", 8),
+            rope_dim=config.get("rope_dim", 0),
+            n_experts=config.get("n_experts", 4),
+            top_k=config.get("top_k", 2),
+            expert_dim=config.get("expert_dim", 0),
+            max_length=config.get("max_length", 512),
+            seed=config.get("seed", 42),
+        )
+
+        D = cfg.embed_dim
+        V = cfg.vocab_size
+        model = CUDAModel(
+            vocab_size=V,
+            embed_dim=D,
+            n_layers=cfg.n_layers,
+            n_heads=cfg.n_heads,
+            n_experts=cfg.n_experts,
+            ff_dim=D * 2,
+            k=cfg.top_k,
+            rope_dim=D // cfg.n_heads if cfg.n_heads > 0 else 0,
+            seed=cfg.seed,
+        )
+        for attr_name in [
+            "Wq",
+            "Wk",
+            "Wv",
+            "Wo",
+            "gate1",
+            "gate2",
+            "expert_weights",
+            "expert_bias",
+            "routing_weights",
+            "ln1_gamma",
+            "ln2_gamma",
+        ]:
+            attr = getattr(model.stacking.blocks[0], attr_name, None)
+            if attr is not None:
+                attr.requires_grad_(True)
+        for attr_name in [
+            "embedding_weights",
+            "final_ln_gamma",
+            "output_proj_weights",
+            "output_proj_bias",
+            "output_W1",
+            "output_W2",
+            "output_W3",
+        ]:
+            attr = getattr(model, attr_name, None)
+            if attr is not None:
+                attr.requires_grad_(True)
+
+        def _to_cuda(module, device: torch.device):
+            for attr_name in [
+                "embedding_weights",
+                "final_ln_gamma",
+                "output_proj_weights",
+                "output_proj_bias",
+                "output_W1",
+                "output_W2",
+                "output_W3",
+            ]:
+                attr = getattr(module, attr_name, None)
+                if attr is not None:
+                    setattr(module, attr_name, attr.to(device))
+            for block in module.stacking.blocks:
+                for sub_attr in block.__dict__:
+                    sub = getattr(block, sub_attr)
+                    if isinstance(sub, torch.Tensor):
+                        setattr(block, sub_attr, sub.to(device))
+
+        _to_cuda(model, torch.device("cuda:0"))
+        return model, cfg
+
+    raise ValueError(f"Unsupported backend: {backend}. Must be numpy, torch, triton, or cuda.")
 
 
 def get_dataset(dataset_path: str, synthetic: bool, vocab_size: int, context_length: int):
@@ -421,22 +538,88 @@ def run_training_torch(model, optimizer, loss_fn, config: dict, dataset) -> list
     return losses_per_epoch
 
 
+def run_training_cuda(model, optimizer, loss_fn, config: dict, dataset, max_norm: float = 1.0) -> list[float]:
+    """Run the training loop for CUDA backend.
+
+    Args:
+        model: The CUDAModel instance.
+        optimizer: The torch optimizer instance.
+        loss_fn: The nn.CrossEntropyLoss instance.
+        config: Training configuration dict.
+        dataset: List of numpy arrays (to be converted to CUDA torch tensors).
+        max_norm: Gradient clipping norm (default: 1.0).
+
+    Returns:
+        List of per-epoch average loss values.
+    """
+    import torch
+
+    from impl._cuda.training import train_step as cuda_train_step
+
+    epochs = config.get("epochs", 5)
+    batch_size = config.get("batch_size", 64)
+
+    losses_per_epoch: list[float] = []
+
+    for epoch in range(epochs):
+        epoch_start = time.time()
+        epoch_losses: list[float] = []
+        total_batches = 0
+        max_seq = config.get("context_length", 128)
+        device = torch.device("cuda:0")
+
+        for i in range(0, len(dataset), batch_size):
+            batch = dataset[i : i + batch_size]
+            padded = []
+            for b in batch:
+                if len(b) < max_seq:
+                    padded.append(np.pad(b, (0, max_seq - len(b)), constant_values=0))
+                else:
+                    padded.append(b[:max_seq])
+            batch_input = torch.stack([torch.tensor(p) for p in padded]).to(device)
+            targets = []
+            for p in padded:
+                t = np.append(p[1:], 0)
+                if len(t) < max_seq:
+                    t = np.pad(t, (0, max_seq - len(t)), constant_values=0)
+                targets.append(t)
+            batch_target = torch.stack([torch.tensor(t) for t in targets]).to(device)
+            batch_target = batch_target.long()
+            loss = float(cuda_train_step(model, batch_input, batch_target, optimizer, loss_fn, max_norm=max_norm))
+            epoch_losses.append(loss)
+            total_batches += 1
+
+            if total_batches % max(1, total_batches // 5) == 0 or total_batches == 1:
+                current_loss = float(torch.tensor(epoch_losses).mean().item())
+                total_steps = epoch * total_batches + total_batches
+                print(f"  Step {total_steps}: loss={current_loss:.4f}")
+
+        avg_loss = float(torch.tensor(epoch_losses).mean().item()) if epoch_losses else 0.0
+        epoch_time = time.time() - epoch_start
+        losses_per_epoch.append(avg_loss)
+        print(f"Epoch {epoch + 1}/{epochs}: avg_loss={avg_loss:.4f} time={epoch_time:.2f}s")
+
+    return losses_per_epoch
+
+
 def run_training(model, optimizer, loss_fn, config: dict, dataset, backend: str) -> list[float]:
     """Run the training loop for either backend.
 
     Args:
-        model: The model instance (NumPyModel or TorchModel).
+        model: The model instance (NumPyModel, TorchModel, TritonModel, or CUDAModel).
         optimizer: The optimizer instance.
         loss_fn: The loss function instance.
         config: Training configuration dict.
         dataset: List of numpy arrays or torch tensors.
-        backend: 'numpy' or 'torch'.
+        backend: 'numpy', 'torch', 'triton', or 'cuda'.
 
     Returns:
         List of per-epoch average loss values.
     """
     if backend == "numpy":
         return run_training_numpy(model, optimizer, loss_fn, config, dataset)
+    elif backend == "cuda":
+        return run_training_cuda(model, optimizer, loss_fn, config, dataset)
     else:
         return run_training_torch(model, optimizer, loss_fn, config, dataset)
 
@@ -449,7 +632,7 @@ def save_checkpoint(model, config: dict, cfg, save_dir: str, backend: str) -> st
         config: Training config dict.
         cfg: TransformerConfig instance.
         save_dir: Directory to save checkpoints.
-        backend: 'numpy' or 'torch'.
+        backend: 'numpy', 'torch', 'triton', or 'cuda'.
 
     Returns:
         Path to the saved checkpoint directory.
@@ -459,17 +642,59 @@ def save_checkpoint(model, config: dict, cfg, save_dir: str, backend: str) -> st
     seed = config.get("seed", 42)
     checkpoint_dir = Path(save_dir) / f"{backend}_{seed}"
 
-    # Save model parameters
     if backend == "numpy":
         params = model.get_all_parameters()
         save_ckpoint(checkpoint_dir, config=cfg, **params)
-    else:
-        # PyTorch: save state dict
+
+    elif backend == "torch":
         params: dict = {}
         for name, param in model.named_parameters():
             params[name] = param.detach().cpu()
-
         save_ckpoint(checkpoint_dir, config=cfg, **params)
+
+    elif backend == "triton":
+        np_params = model.save_as_numpy()
+        save_ckpoint(checkpoint_dir, config=cfg, **np_params)
+
+    elif backend == "cuda":
+        params: dict = {}
+
+        def _save_tensor(module, prefix: str):
+            for attr_name in [
+                "embedding_weights",
+                "final_ln_gamma",
+                "output_proj_weights",
+                "output_proj_bias",
+                "output_W1",
+                "output_W2",
+                "output_W3",
+            ]:
+                attr = getattr(module, attr_name, None)
+                if attr is not None:
+                    params[attr_name] = attr.detach().cpu()
+            for i, block in enumerate(module.stacking.blocks):
+                for attr_name in [
+                    "Wq",
+                    "Wk",
+                    "Wv",
+                    "Wo",
+                    "gate1",
+                    "gate2",
+                    "expert_weights",
+                    "expert_bias",
+                    "routing_weights",
+                    "ln1_gamma",
+                    "ln2_gamma",
+                ]:
+                    attr = getattr(block, attr_name, None)
+                    if attr is not None:
+                        params[f"{prefix}{i}.{attr_name}"] = attr.detach().cpu()
+
+        _save_tensor(model, "blocks")
+        save_ckpoint(checkpoint_dir, config=cfg, **params)
+
+    else:
+        raise ValueError(f"Unsupported backend for saving: {backend}")
 
     print(f"Checkpoint saved to {checkpoint_dir}")
     return str(checkpoint_dir)
@@ -515,11 +740,33 @@ def main() -> int:
             loss_fn = CrossEntropyLoss()
             optimizer = AdamW(lr=config.get("lr", 0.001))
         else:
+            import torch
             import torch.nn as nn
             import torch.optim as optim
 
             loss_fn = nn.CrossEntropyLoss()
-            optimizer = optim.AdamW(model.parameters(), lr=config.get("lr", 0.001))
+            if backend == "cuda":
+                params = [p for p in model.stacking.blocks[0].__dict__.values() if isinstance(p, torch.Tensor)]
+                for attr in [
+                    "embedding_weights",
+                    "final_ln_gamma",
+                    "output_proj_weights",
+                    "output_proj_bias",
+                    "output_W1",
+                    "output_W2",
+                    "output_W3",
+                ]:
+                    attr_obj = getattr(model, attr, None)
+                    if attr_obj is not None:
+                        params.append(attr_obj)
+                for block in model.stacking.blocks:
+                    for sub_attr in block.__dict__:
+                        sub = getattr(block, sub_attr)
+                        if isinstance(sub, torch.Tensor):
+                            params.append(sub)
+                optimizer = optim.AdamW(params, lr=config.get("lr", 0.001))
+            else:
+                optimizer = optim.AdamW(model.parameters(), lr=config.get("lr", 0.001))
 
         # Run training
         losses = run_training(model, optimizer, loss_fn, config, dataset, backend)

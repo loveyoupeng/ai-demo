@@ -21,11 +21,13 @@ https://arxiv.org/abs/1706.03762
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 
 from impl._cuda.ffn import swiglu_ffn
 from impl._cuda.layernorm import rmsnorm as _rmsnorm
 from impl._cuda.stack import CuDecoderStack
+from shared.constants import Block, Transformer
 
 
 class CUDAModel:
@@ -194,41 +196,36 @@ class CUDAModel:
         if hasattr(self, "embedding_weights"):
             return  # Already initialized
 
-        import numpy as np
+        import math
 
         rng = np.random.default_rng(seed)
         D = self.embed_dim
         V = self.vocab_size
 
-        # Token embedding: (V, D)
-        self.embedding_weights = torch.tensor(
-            rng.random((V, D)).astype(np.float32),
-            dtype=torch.float32,
+        # Token embedding: (V, D) — Kaiming uniform (same as PyTorch nn.Embedding)
+        self.embedding_weights = torch.empty(V, D).uniform_(
+            -math.sqrt(1.0 / D), math.sqrt(1.0 / D)
         )
 
         # Final RMSNorm gamma: (D,)
         self.final_ln_gamma = torch.ones(D, dtype=torch.float32)
 
         # Output projection: (D, V) + bias (V,)
-        self.output_proj_weights = torch.tensor(
-            rng.random((D, V)).astype(np.float32),
-            dtype=torch.float32,
+        self.output_proj_weights = torch.empty(D, V).uniform_(
+            -math.sqrt(1.0 / V), math.sqrt(1.0 / V)
         )
         self.output_proj_bias = torch.zeros(V, dtype=torch.float32)
 
         # Output SwiGLU: W1 (D, 2D), W2 (2D, D), W3 (D, 2D)
         ff_dim_out = D * 2
-        self.output_W1 = torch.tensor(
-            rng.random((D, ff_dim_out)).astype(np.float32),
-            dtype=torch.float32,
+        self.output_W1 = torch.empty(D, ff_dim_out).uniform_(
+            -math.sqrt(1.0 / ff_dim_out), math.sqrt(1.0 / ff_dim_out)
         )
-        self.output_W3 = torch.tensor(
-            rng.random((D, ff_dim_out)).astype(np.float32),
-            dtype=torch.float32,
+        self.output_W3 = torch.empty(D, ff_dim_out).uniform_(
+            -math.sqrt(1.0 / ff_dim_out), math.sqrt(1.0 / ff_dim_out)
         )
-        self.output_W2 = torch.tensor(
-            rng.random((ff_dim_out, D)).astype(np.float32),
-            dtype=torch.float32,
+        self.output_W2 = torch.empty(ff_dim_out, D).uniform_(
+            -math.sqrt(1.0 / ff_dim_out), math.sqrt(1.0 / ff_dim_out)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -270,3 +267,76 @@ class CUDAModel:
         logits = x @ self.output_proj_weights.to(x.device) + self.output_proj_bias.to(x.device)
 
         return logits  # (B, S, V)
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        """Make the model callable — delegates to forward.
+
+        Parameters
+        ----------
+        x : torch.Tensor, shape (B, S)
+            Token IDs.
+
+        Returns
+        -------
+        torch.Tensor, shape (B, S, V)
+            Predicted logits.
+        """
+        return self.forward(x)
+
+    def load_from_numpy_dict(self, params: dict[str, np.ndarray]) -> None:
+        """Load parameters from a NumPy-compatible dictionary.
+
+        Maps numpy-style keys (blocks.{i}.mha.Wq, blocks.{i}.moe.router, etc.)
+        to CUDA flat tensor attributes (block.Wq, block.routing_weights, etc.).
+
+        MoE expert weights: numpy stores per-expert W1/W2/W3 separately,
+        CUDA stacks them into flat tensor attributes.
+
+        Args:
+            params: Dictionary mapping parameter names to NumPy arrays.
+        """
+
+        def load_flat(key: str, tensor: torch.Tensor) -> None:
+            if key not in params:
+                return
+            t = torch.from_numpy(params[key]).to(tensor.dtype)
+            tensor.data.copy_(t)
+
+        device = self.embedding_weights.device
+
+        # Load model-level weights (CUDA stores tensors on CPU in __init__)
+        load_flat(Transformer.EMBEDDING_WEIGHTS, self.embedding_weights.to(device))
+        load_flat(Transformer.FINAL_GAMMA, self.final_ln_gamma.to(device))
+        load_flat(Transformer.OUTPUT_PROJ_W, self.output_proj_weights.to(device))
+        load_flat(Transformer.OUTPUT_PROJ_B, self.output_proj_bias.to(device))
+        load_flat(Transformer.OUTPUT_W1, self.output_W1.to(device))
+        load_flat(Transformer.OUTPUT_W3, self.output_W3.to(device))
+        load_flat(Transformer.OUTPUT_W2, self.output_W2.to(device))
+
+        for i, block in enumerate(self.stacking.blocks):
+            # Layer norm
+            load_flat(Block.ln1_gamma(i), block.ln1_gamma.to(device))
+            load_flat(Block.ln2_gamma(i), block.ln2_gamma.to(device))
+
+            # Gates
+            load_flat(Block.gate1(i), block.gate1.to(device))
+            load_flat(Block.gate2(i), block.gate2.to(device))
+
+            # MHA — weight matrices (CUDA MHA has no biases)
+            load_flat(Block.mha(i, "Wq"), block.Wq.to(device))
+            load_flat(Block.mha(i, "Wk"), block.Wk.to(device))
+            load_flat(Block.mha(i, "Wv"), block.Wv.to(device))
+            load_flat(Block.mha(i, "Wo"), block.Wo.to(device))
+
+            # Stack expert W1 → block.expert_weights, W2 → block.expert_bias, W3 → block.routing_weights
+            ws1 = np.stack([params[Block.moe_expert(i, e, "W1")] for e in range(self.n_experts)], axis=0)
+            ws2 = np.stack([params[Block.moe_expert(i, e, "W2")] for e in range(self.n_experts)], axis=0)
+            ws3 = np.stack([params[Block.moe_expert(i, e, "W3")] for e in range(self.n_experts)], axis=0)
+
+            block.expert_weights = torch.from_numpy(ws1).to(dtype=torch.float32, device=device)
+            # expert_bias: CUDA MoE asserts shape (N, D) but does not use it in computation.
+            # Numpy stores W2 (ff_dim, embed_dim) per expert — not compatible.
+            # Use zeros with correct shape for assertion compatibility.
+            block.expert_bias = torch.zeros(self.n_experts, self.embed_dim, dtype=torch.float32, device=device)
+            # routing_weights: transpose numpy router (embed_dim, n_experts) → (n_experts, embed_dim)
+            block.routing_weights = torch.from_numpy(params[Block.moe_router(i)].T).to(dtype=torch.float32, device=device)

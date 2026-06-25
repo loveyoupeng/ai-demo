@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Unified inference script for decoder-only transformer models.
 
-Supports both NumPy and PyTorch backends through a single entry point.
+Supports NumPy, PyTorch, Triton, and CUDA backends through a single entry point.
 
 Usage:
     # Single prompt with default greedy decoding
@@ -56,6 +56,12 @@ examples:
 
   # NumPy backend with custom context length
   %(prog)s --model resource/models/numpy_42/ --backend numpy --context_length 256
+
+  # CUDA backend inference
+  %(prog)s --model resource/models/cuda_42/ --backend cuda --prompt "hello"
+
+  # Triton backend inference
+  %(prog)s --model resource/models/triton_42/ --backend triton --prompt "world"
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -65,7 +71,7 @@ examples:
         "-b",
         "--backend",
         default="torch",
-        choices=["numpy", "torch"],
+        choices=["numpy", "torch", "triton", "cuda"],
         help="Backend implementation (default: torch)",
     )
 
@@ -92,7 +98,7 @@ def load_model_from_checkpoint(model_path: str, backend: str):
 
     Args:
         model_path: Path to the checkpoint directory.
-        backend: Either 'numpy' or 'torch'.
+        backend: One of 'numpy', 'torch', 'triton', or 'cuda'.
 
     Returns:
         Tuple of (model_instance, config_dict).
@@ -102,12 +108,9 @@ def load_model_from_checkpoint(model_path: str, backend: str):
         print(f"Error: Model directory not found: {model_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Import and use shared checkpoint loading
     from shared.checkpoint import load_checkpoint
 
-    # load_checkpoint returns (params_dict, config)
     params, cfg = load_checkpoint(str(model_dir))
-    # Handle case where config might be None
     if cfg is None:
         raise ValueError(f"Config missing in checkpoint: {model_dir}")
 
@@ -125,14 +128,11 @@ def load_model_from_checkpoint(model_path: str, backend: str):
             rope_dim=cfg.rope_dim,
             seed=cfg.seed,
         )
-        # Load parameters into model by name
         loaded = model.get_all_parameters()
         for key, value in loaded.items():
-            # Check if we have a matching checkpoint key (with or without _npz suffix)
             if key in params:
                 value[:] = params[key]
             else:
-                # Try with normalized key
                 normalized = key.replace("blocks.", "layers.")
                 if normalized in params:
                     value[:] = params[normalized]
@@ -143,31 +143,113 @@ def load_model_from_checkpoint(model_path: str, backend: str):
         }
         return model, config_dict
 
-    # PyTorch
     import torch
 
-    from impl._torch.layers import TorchModel
+    if backend == "torch":
+        from impl._torch.layers import TorchModel
 
-    model = TorchModel(
-        vocab_size=cfg.vocab_size,
-        embed_dim=cfg.embed_dim,
-        n_layers=cfg.n_layers,
-        n_heads=cfg.n_heads,
-        n_experts=cfg.n_experts,
-        ff_dim=cfg.expert_dim or (cfg.embed_dim * 4),
-        k=cfg.top_k,
-        rope_dim=cfg.rope_dim,
-        seed=cfg.seed,
-    )
-    # Load parameters into model
-    params_torch = {k: torch.tensor(v) for k, v in params.items()}
-    model.load_state_dict(params_torch)
-    config_dict = {
-        "vocab_size": cfg.vocab_size,
-        "context_length": cfg.context_length,
-        "embed_dim": cfg.embed_dim,
-    }
-    return model, config_dict
+        model = TorchModel(
+            vocab_size=cfg.vocab_size,
+            embed_dim=cfg.embed_dim,
+            n_layers=cfg.n_layers,
+            n_heads=cfg.n_heads,
+            n_experts=cfg.n_experts,
+            ff_dim=cfg.expert_dim or (cfg.embed_dim * 4),
+            k=cfg.top_k,
+            rope_dim=cfg.rope_dim,
+            seed=cfg.seed,
+        )
+        params_torch = {k: torch.tensor(v) for k, v in params.items()}
+        model.load_state_dict(params_torch)
+        config_dict = {
+            "vocab_size": cfg.vocab_size,
+            "context_length": cfg.context_length,
+            "embed_dim": cfg.embed_dim,
+        }
+        return model, config_dict
+
+    if backend == "triton":
+        from impl._triton.model import TritonModel
+
+        model = TritonModel(
+            vocab_size=cfg.vocab_size,
+            embed_dim=cfg.embed_dim,
+            n_layers=cfg.n_layers,
+            n_heads=cfg.n_heads,
+            n_experts=cfg.n_experts,
+            ff_dim=cfg.expert_dim or (cfg.embed_dim * 2),
+            k=cfg.top_k,
+        )
+        model.load_from_numpy_dict(params)
+        config_dict = {
+            "vocab_size": cfg.vocab_size,
+            "context_length": cfg.context_length,
+            "embed_dim": cfg.embed_dim,
+        }
+        return model, config_dict
+
+    if backend == "cuda":
+        from impl._cuda.model import CUDAModel
+
+        D = cfg.embed_dim
+        V = cfg.vocab_size
+        model = CUDAModel(
+            vocab_size=V,
+            embed_dim=D,
+            n_layers=cfg.n_layers,
+            n_heads=cfg.n_heads,
+            n_experts=cfg.n_experts,
+            ff_dim=D * 2,
+            k=cfg.top_k,
+            rope_dim=D // cfg.n_heads if cfg.n_heads > 0 else 0,
+            seed=42,
+        )
+
+        def _load_tensor(module, src_dict, key):
+            attr = getattr(module, key, None)
+            if attr is not None and key in src_dict:
+                tensor = torch.from_numpy(src_dict[key]).to(attr.device)
+                attr.data.copy_(tensor)
+            elif key in src_dict:
+                setattr(module, key, torch.from_numpy(src_dict[key]).float())
+
+        # Load model-level params
+        for key in [
+            "embedding_weights",
+            "final_ln_gamma",
+            "output_proj_weights",
+            "output_proj_bias",
+            "output_W1",
+            "output_W2",
+            "output_W3",
+        ]:
+            _load_tensor(model, params, key)
+
+        # Load block-level params
+        for i, block in enumerate(model.stacking.blocks):
+            for attr_name in [
+                "Wq",
+                "Wk",
+                "Wv",
+                "Wo",
+                "gate1",
+                "gate2",
+                "expert_weights",
+                "expert_bias",
+                "routing_weights",
+                "ln1_gamma",
+                "ln2_gamma",
+            ]:
+                _load_tensor(block, params, f"blocks.{i}.{attr_name}")
+
+        config_dict = {
+            "vocab_size": cfg.vocab_size,
+            "context_length": cfg.context_length,
+            "embed_dim": cfg.embed_dim,
+        }
+        return model, config_dict
+
+    raise ValueError(f"Unsupported backend: {backend}. Must be numpy, torch, triton, or cuda.")
 
 
 def encode_prompt(text: str, vocab_size: int = 256) -> list[int]:
@@ -211,17 +293,19 @@ def generate_single(
     """Run inference on a single prompt.
 
     Args:
-        model: The model instance (NumPyModel or TorchModel).
+        model: The model instance (NumPyModel, TorchModel, TritonModel, or CUDAModel).
         config: Model config dict with vocab_size, context_length, etc.
         prompt_text: The input prompt string.
         max_new_tokens: Maximum tokens to generate.
         temperature: Sampling temperature (0.0 = greedy).
         top_k: Top-k filter (0 = disabled).
-        backend: 'numpy' or 'torch'.
+        backend: 'numpy', 'torch', 'triton', or 'cuda'.
 
     Returns:
         Dict with keys: input_tokens, generated_tokens, full_tokens, prompt_text, generated_text
     """
+    import torch
+
     vocab_size = config.get("vocab_size", 256)
     prompt_tokens = encode_prompt(prompt_text, vocab_size)
 
@@ -229,21 +313,46 @@ def generate_single(
         from impl._np.inference import TextGenerator as NpGen
 
         generator = NpGen(model, max_new_tokens, temperature, top_k)
-        prompt_np = np.array([prompt_tokens], dtype=np.int32)  # (1, seq)
-        all_tokens_np = generator.generate(prompt_np)  # (1, seq)
+        prompt_np = np.array([prompt_tokens], dtype=np.int32)
+        all_tokens_np = generator.generate(prompt_np)
         all_tokens = all_tokens_np.flatten().tolist()
-    else:
-        import torch
 
+    elif backend == "torch":
         from impl._torch.inference import TorchTextGenerator as TorchGen
 
         generator = TorchGen(model, max_new_tokens, temperature, top_k)
-        torch_prompt = torch.tensor([prompt_tokens])  # (1, seq)
-        result = generator.generate(torch_prompt)  # (1, seq)
+        torch_prompt = torch.tensor([prompt_tokens])
+        result = generator.generate(torch_prompt)
         if isinstance(result, torch.Tensor):
             all_tokens = result.flatten().detach().cpu().tolist()
         else:
             all_tokens = list(torch.tensor(result).flatten().tolist())
+
+    elif backend == "triton":
+        from impl._triton.inference import TritonTextGenerator as TritonGen
+
+        generator = TritonGen(model, max_new_tokens, temperature, top_k)
+        torch_prompt = torch.tensor([prompt_tokens])
+        result = generator.generate(torch_prompt)
+        if isinstance(result, torch.Tensor):
+            all_tokens = result.flatten().detach().cpu().tolist()
+        else:
+            all_tokens = list(torch.tensor(result).flatten().tolist())
+
+    elif backend == "cuda":
+        from impl._cuda.inference import CudaTextGenerator as CudaGen
+
+        device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        generator = CudaGen(model, max_new_tokens, temperature, top_k)
+        torch_prompt = torch.tensor([prompt_tokens], device=device)
+        result = generator.generate(torch_prompt)
+        if isinstance(result, torch.Tensor):
+            all_tokens = result.flatten().tolist()
+        else:
+            all_tokens = list(torch.tensor(result).flatten().tolist())
+
+    else:
+        raise ValueError(f"Unsupported backend: {backend}")
 
     generated = all_tokens[len(prompt_tokens) :] if len(all_tokens) > len(prompt_tokens) else []
 

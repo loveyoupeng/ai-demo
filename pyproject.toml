@@ -37,6 +37,7 @@ ignore = ["E501"]  # let formatter handle line lengths
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
+"scripts/auto_test_equivalence.py" = ["C901"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

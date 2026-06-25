@@ -103,6 +103,7 @@ class TestTorchTurboQuantKVCache:
 
         assert cache.is_empty()
         assert cache.current_length() == 0
+        assert cache._batch_size == 0
 
         k_result, v_result = cache.get()
         assert k_result[0].shape[2] == 0

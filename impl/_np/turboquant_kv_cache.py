@@ -282,6 +282,7 @@ class TurboQuantKVCache:
             self.scales_k[i].fill(0)
             self.scales_v[i].fill(0)
         self._current_length = 0
+        self._batch_size = 0
 
     def is_empty(self) -> bool:
         """Return True if no tokens have been cached yet."""
