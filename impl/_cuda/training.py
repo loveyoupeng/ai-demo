@@ -55,6 +55,35 @@ def compute_gradient_norm(grads: dict[str, torch.Tensor]) -> float:
     return result
 
 
+def _log_grad_stats(grads: dict[str, torch.Tensor]) -> None:
+    """Log per-layer gradient L2 norms for debugging vanishing/exploding gradients.
+
+    Extracts layer index from keys like ``blocks.0.Wq`` where the second
+    dotted segment is the layer number.
+
+    Parameters
+    ----------
+    grads : dict[str, torch.Tensor]
+        Gradient dictionary.
+    """
+    layer_norms: dict[int, float] = {}
+    for key, grad in grads.items():
+        parts = key.split(".")
+        if len(parts) >= 2 and parts[1].isdigit():
+            layer_idx = int(parts[1])
+            if layer_idx not in layer_norms:
+                layer_norms[layer_idx] = 0.0
+            layer_norms[layer_idx] += float(torch.sum(grad ** 2))
+    for layer_idx in layer_norms:
+        layer_norms[layer_idx] = float(torch.sqrt(torch.tensor(layer_norms[layer_idx], dtype=torch.float64)))
+    if not layer_norms:
+        return
+    max_layer = max(layer_norms)
+    parts = [f"layer{i}={layer_norms[i]:.4f}" for i in range(max_layer + 1)]
+    avg = float(torch.mean(torch.tensor(list(layer_norms.values()), dtype=torch.float64)).item())
+    logger.debug("grad_stats() %s avg=%.4f", " ".join(parts), avg)
+
+
 def clip_gradients(grads: dict[str, torch.Tensor], max_norm: float) -> None:
     """Clip gradients by global L2 norm, modifying the dict in-place.
 
@@ -180,6 +209,7 @@ def train_step(
     clip_gradients(grads, max_norm=max_norm)
     grad_norm = compute_gradient_norm(grads)
     logger.debug("train_step() post_clip_grad_norm=%.6f", grad_norm)
+    _log_grad_stats(grads)
 
     # 6. Optimizer step and clear for next batch
     logger.debug("train_step() optimizer_step n_grads=%d", len(grads))

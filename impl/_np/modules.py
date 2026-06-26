@@ -4,7 +4,11 @@ All forward passes accept numpy arrays and return numpy arrays.
 Matrix dimensions are annotated in docstrings for clarity.
 """
 
+import logging
+
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class Embedding:
@@ -748,6 +752,25 @@ class MultiHeadAttention:
         scores_sum = np.sum(exp_scores, axis=-1, keepdims=True)  # (B, H, S, 1)
         attn_weights = exp_scores / scores_sum  # (B, H, S, S) — softmax over keys
 
+        # ── Attention entropy logging ────────────────────────────────
+        eps = 1e-9
+        attn_log_prob = np.log(attn_weights + eps)  # (B, H, S, S)
+        entropy = -np.sum(attn_weights * attn_log_prob, axis=-1)  # (B, H, S) — per (head, query_pos)
+        if entropy.size > 0:
+            mean_entropy = float(entropy.mean())
+            min_entropy = float(entropy.min())
+            max_entropy = float(entropy.max())
+            max_seq = int(attn_weights.shape[-1])  # key sequence length
+            if max_seq <= 256:
+                logger.debug(
+                    "attention_entropy() avg=%.2f min=%.2f max=%.2f range_entropy=%.2f",
+                    mean_entropy,
+                    min_entropy,
+                    max_entropy,
+                    max_entropy - min_entropy,
+                )
+        # ── End attention entropy logging ────────────────────────────
+
         # Attention output: attn_weights @ V
         # (B, H, S, S) @ (B, H, S, d) → (B, H, S, d)
         attn_out = attn_weights @ v  # (B, H, S, d)
@@ -927,6 +950,12 @@ class TransformerBlock:
         # ── Stream 1: Attention ─────────────────────────────────────
         # MHA: (B, S, D) → (B, S, D) — self-attention output
         attn_out = self.mha.forward(x)  # (B, S, D)
+        logger.debug(
+            "act_stats() module=mha_output x_min=%.4f x_max=%.4f x_mean=%.4f",
+            float(attn_out.min()),
+            float(attn_out.max()),
+            float(attn_out.mean()),
+        )
 
         # First residual: x + attn_out  — (B, S, D)
         h = x + attn_out  # (B, S, D)
@@ -950,6 +979,12 @@ class TransformerBlock:
         # ── Stream 2: MoE ──────────────────────────────────────────
         # MoE: (B, S, D) → (B, S, D) — mixture of experts output
         moe_out = self.moe.forward(h)  # (B, S, D)
+        logger.debug(
+            "act_stats() module=moe_output x_min=%.4f x_max=%.4f x_mean=%.4f",
+            float(moe_out.min()),
+            float(moe_out.max()),
+            float(moe_out.mean()),
+        )
 
         # Second residual: h + moe_out  — (B, S, D)
         out = h + moe_out  # (B, S, D)
@@ -1054,7 +1089,14 @@ class DecoderStack:
         """
         out = x  # (B, S, D)
 
-        for block in self.blocks:
+        for layer_idx, block in enumerate(self.blocks):
             out = block.forward(out)  # (B, S, D) → (B, S, D)
+            logger.debug(
+                "act_stats() layer=%d module=stack_output x_min=%.4f x_max=%.4f x_mean=%.4f",
+                layer_idx,
+                float(out.min()),
+                float(out.max()),
+                float(out.mean()),
+            )
 
         return out

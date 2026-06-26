@@ -18,6 +18,7 @@ Training loop:
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING
 
 import torch
@@ -71,6 +72,35 @@ def compute_gradient_norm(grads: dict[str, torch.Tensor]) -> float:
         total_sq_norm += sq
         logger.debug("compute_gradient_norm() tensor[%d] sq_norm=%.6f running_total=%.6f", i, sq, total_sq_norm)
     return float(torch.sqrt(torch.tensor(total_sq_norm, dtype=torch.float64)))
+
+
+def _log_grad_stats(grads: dict[str, torch.Tensor]) -> None:
+    """Log per-layer gradient L2 norms for debugging vanishing/exploding gradients.
+
+    Extracts layer index from keys matching the ``*.layers.<N>.*`` pattern.
+
+    Parameters
+    ----------
+    grads : dict[str, torch.Tensor]
+        Gradient dictionary from ``model.named_parameters()``.
+    """
+    pattern = re.compile(r"\.layers\.(\d+)\.")
+    layer_norms: dict[int, float] = {}
+    for name, grad in grads.items():
+        match = pattern.search(name)
+        if match:
+            layer_idx = int(match.group(1))
+            if layer_idx not in layer_norms:
+                layer_norms[layer_idx] = 0.0
+            layer_norms[layer_idx] += float(torch.sum(grad ** 2))
+    for layer_idx in layer_norms:
+        layer_norms[layer_idx] = float(torch.sqrt(torch.tensor(layer_norms[layer_idx], dtype=torch.float64)))
+    if not layer_norms:
+        return
+    max_layer = max(layer_norms)
+    parts = [f"layer{i}={layer_norms[i]:.4f}" for i in range(max_layer + 1)]
+    avg = float(torch.mean(torch.tensor(list(layer_norms.values()), dtype=torch.float64)).item())
+    logger.debug("grad_stats() %s avg=%.4f", " ".join(parts), avg)
 
 
 def train_step(
@@ -142,6 +172,7 @@ def train_step(
     clip_gradients(grads, max_norm=max_norm)
     grad_norm = compute_gradient_norm(grads)
     logger.debug("train_step() post_clip_grad_norm=%.6f", grad_norm)
+    _log_grad_stats(grads)
 
     # 5. Optimizer step: apply gradients
     logger.debug("train_step() optimizer_step n_params=%d", len(grads))

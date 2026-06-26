@@ -10,6 +10,7 @@ nn.Parameter for autograd.
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
@@ -17,6 +18,8 @@ import torch
 import torch.nn as nn
 
 from shared.constants import Block, Mha, Transformer
+
+logger = logging.getLogger(__name__)
 
 # pyright: reportAttributeAccessIssue=false
 
@@ -493,6 +496,26 @@ class MultiHeadAttention(nn.Module):
         exp_scores = torch.exp(scores)  # (B, H, S, S)
         attn_weights = exp_scores / exp_scores.sum(dim=-1, keepdim=True)  # (B, H, S, S)
 
+        # ── Attention entropy logging ────────────────────────────────
+        eps = 1e-9
+        attn_log_prob = torch.log(attn_weights + eps)  # (B, H, S, S)
+        entropy = -(attn_weights * attn_log_prob).sum(dim=-1)  # (B, H, S) — per (head, query_pos)
+        if entropy.numel() > 0:
+            entropy = entropy.detach()  # avoid warning on requires_grad tensor
+            mean_entropy = float(entropy.mean())
+            min_entropy = float(entropy.min())
+            max_entropy = float(entropy.max())
+            max_seq = int(attn_weights.shape[-1])
+            if max_seq <= 256:
+                logger.debug(
+                    "attention_entropy() avg=%.2f min=%.2f max=%.2f range_entropy=%.2f",
+                    mean_entropy,
+                    min_entropy,
+                    max_entropy,
+                    max_entropy - min_entropy,
+                )
+        # ── End attention entropy logging ────────────────────────────
+
         # Attention: score @ V
         # scores: (B, H, S, S), V: (B, H, S, hd) → output: (B, H, S, hd)
         context = attn_weights @ v  # (B, H, S, hd)
@@ -687,6 +710,12 @@ class TransformerBlock(nn.Module):
         # ── Stream 1: Attention ─────────────────────────────────────
         # MHA: (B, S, D) → (B, S, D) — attention output
         attn_out, _ = self.mha(x)  # (B, S, D), (B, H, S, S)
+        logger.debug(
+            "act_stats() module=mha_output x_min=%.4f x_max=%.4f x_mean=%.4f",
+            float(attn_out.min()),
+            float(attn_out.max()),
+            float(attn_out.mean()),
+        )
 
         # Residual FIRST (post-norm): x + attn_out
         h = x + attn_out  # (B, S, D)
@@ -704,6 +733,12 @@ class TransformerBlock(nn.Module):
         # ── Stream 2: MoE ──────────────────────────────────────────
         # MoE: (B, S, D) → (B, S, D)
         moe_out = self.moe(h)  # (B, S, D)
+        logger.debug(
+            "act_stats() module=moe_output x_min=%.4f x_max=%.4f x_mean=%.4f",
+            float(moe_out.min()),
+            float(moe_out.max()),
+            float(moe_out.mean()),
+        )
 
         # Residual FIRST (post-norm): h + moe_out
         out = h + moe_out  # (B, S, D)
@@ -780,8 +815,15 @@ class DecoderStack(nn.Module):
 
         """
         out = x
-        for block in self.layers:
+        for layer_idx, block in enumerate(self.layers):
             out = block(out)
+            logger.debug(
+                "act_stats() layer=%d module=stack_output x_min=%.4f x_max=%.4f x_mean=%.4f",
+                layer_idx,
+                float(out.min()),
+                float(out.max()),
+                float(out.mean()),
+            )
         return out
 
 

@@ -12,6 +12,7 @@ Architecture (same as _torch TransformerBlock):
 No new Triton kernels — this is pure PyTorch module wiring.
 """
 
+import logging
 import math
 
 import torch
@@ -20,6 +21,8 @@ import torch.nn as nn
 from impl._torch.layers import Linear
 from impl._triton.attn import scaled_dot_product_attention
 from impl._triton.ffn import swiglu_ffn
+
+logger = logging.getLogger(__name__)
 
 
 class TritonMultiHeadAttention(nn.Module):
@@ -69,6 +72,27 @@ class TritonMultiHeadAttention(nn.Module):
 
         # Attention: [B, H, S, S] x [B, H, S, head_dim] -> [B, H, S, head_dim]
         attn_out = scaled_dot_product_attention(q, k, v)
+
+        # ── Attention entropy logging (recompute weights for logging) ─
+        eps = 1e-9
+        scores = (q @ k.transpose(-2, -1)) * (self.head_dim ** -0.5)  # (B, H, S, S)
+        scores = scores - scores.max(dim=-1, keepdim=True).values  # stable
+        attn_weights = torch.nn.functional.softmax(scores, dim=-1)  # (B, H, S, S)
+        attn_log_prob = torch.log(attn_weights + eps)  # (B, H, S, S)
+        entropy = -(attn_weights * attn_log_prob).sum(dim=-1)  # (B, H, S)
+        if entropy.numel() > 0:
+            entropy = entropy.detach()
+            mean_entropy = float(entropy.mean())
+            min_entropy = float(entropy.min())
+            max_entropy = float(entropy.max())
+            max_seq = int(attn_weights.shape[-1])
+            if max_seq <= 256:
+                logger.debug(
+                    "attention_entropy() avg=%.2f min=%.2f max=%.2f range_entropy=%.2f",
+                    mean_entropy, min_entropy, max_entropy,
+                    max_entropy - min_entropy,
+                )
+        # ── End attention entropy logging ────────────────────────────
 
         # Reshape back: [B, H, S, head_dim] -> [B, S, D]
         attn_out = attn_out.transpose(1, 2).contiguous().view(B, S, D)

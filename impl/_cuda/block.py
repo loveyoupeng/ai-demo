@@ -38,6 +38,7 @@ https://arxiv.org/abs/2002.05202
 
 from __future__ import annotations
 
+import logging
 import math
 
 import numpy as np
@@ -47,6 +48,8 @@ from impl._cuda.attention import scaled_dot_product_attention as cuda_sdp_attent
 from impl._cuda.layernorm import rmsnorm
 from impl._cuda.moe import moe_forward
 from impl._cuda.rope import apply_rope
+
+logger = logging.getLogger(__name__)
 
 # ── Weight initialization helpers ──────────────────────────────────────────────
 
@@ -327,6 +330,27 @@ class CuTransformerBlock:
         # Scaled dot-product attention — CUDA softmax + weighted-sum kernels
         # q, k, v: (B, H, S, hd) — no causal mask (caller can pre-mask if needed)
         attn_out = cuda_sdp_attention(q, k, v)  # (B, H, S, hd)
+
+        # ── Attention entropy logging (recompute weights for logging) ─
+        eps = 1e-9
+        scores = (q @ k.transpose(-2, -1)) * (self.head_dim ** -0.5)  # (B, H, S, S)
+        scores = scores - scores.max(dim=-1, keepdim=True).values  # stable
+        attn_weights = torch.nn.functional.softmax(scores, dim=-1)  # (B, H, S, S)
+        attn_log_prob = torch.log(attn_weights + eps)  # (B, H, S, S)
+        entropy = -(attn_weights * attn_log_prob).sum(dim=-1)  # (B, H, S)
+        if entropy.numel() > 0:
+            entropy = entropy.detach()
+            mean_entropy = float(entropy.mean())
+            min_entropy = float(entropy.min())
+            max_entropy = float(entropy.max())
+            max_seq = int(attn_weights.shape[-1])
+            if max_seq <= 256:
+                logger.debug(
+                    "attention_entropy() avg=%.2f min=%.2f max=%.2f range_entropy=%.2f",
+                    mean_entropy, min_entropy, max_entropy,
+                    max_entropy - min_entropy,
+                )
+        # ── End attention entropy logging ────────────────────────────
 
         # Output projection: (B, H, S, hd) → (B, S, D)
         attn_out = (

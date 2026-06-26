@@ -62,7 +62,7 @@ uv run pytest tests/cross_backend/ -v
 | Training on TinyStories | Medium | Currently synthetic data only |
 | 4-way equivalence | Medium | Verify all backends produce same model |
 | Clean up old phase plans | Low | Consolidate into design.md |
-| Special educational logs (H.6) | Low | Attention entropy, activation stats, loss curve, LR schedule |
+| Special educational logs (H.6) | Low | LR schedule info (requires scheduler implementation) |
 
 ## Phase H: Logging Architecture — How to Add Debug Logging for Training & Inference
 
@@ -232,7 +232,27 @@ These are **non-standard** log types that help learners understand *why* the mod
 | **Activation stats** | TRACE | `modules.py` | Min/max/mean/percentiles of activations at each layer | `act_stats() layer=2 module=rms_norm x_min=-2.34 x_max=5.67 x_mean=0.01` |
 | **Token sampling** | DEBUG | `inference.py` | Top-5 token probabilities at each generation step | `sample_top5() top5=[7851(0.12), 17(0.08), 307(0.05), 4521(0.03), 64(0.02)]` |
 
-### H.7 Implementation Status — ALL COMPLETE
+### H.6 Implementation Status — ALL COMPLETE
+
+| # | Educational Log | Level | Status | Location |
+|---|----------------|-------|--------|----------|
+| 1 | **Attention entropy** (Shannon entropy of attention distribution) | DEBUG | ✅ Done | `impl/_np/modules.py` (MHA.forward), `impl/_torch/layers.py` (MHA.forward), `impl/_triton/transformer.py` (TritonMHA.forward), `impl/_cuda/block.py` (CuTransformerBlock.forward) |
+| 2 | **Gradient norm stats** (per-layer gradient L2 norms) | DEBUG | ✅ Done | `impl/_np/training.py`, `impl/_torch/training.py`, `impl/_triton/training.py`, `impl/_cuda/training.py` |
+| 3 | **Loss curve** (rolling avg 50, trend direction) | INFO | ✅ Done | `scripts/train.py` (`_compute_loss_curve()`, batch loop) |
+| 4 | **LR schedule** | DEBUG | ⏸️ Deferred | Requires scheduler implementation (currently fixed LR) |
+| 5 | **Activation stats** (min/max/mean per module) | DEBUG | ✅ Done | `impl/_np/modules.py` (TransformerBlock + DecoderStack), `impl/_torch/layers.py` (TransformerBlock + DecoderStack) |
+| 6 | **Token sampling top-5** (probabilities per step) | DEBUG | ✅ Done | `impl/_np/inference.py`, `impl/_torch/inference.py`, `impl/_triton/inference.py`, `impl/_cuda/inference.py` |
+
+**Log format examples:**
+```
+attention_entropy() avg=2.39 min=1.53 max=2.69 range_entropy=1.16
+grad_stats() layer0=0.1234 layer1=0.5678 avg=0.3456
+loss_curve() current=2.3456 rolling_avg=2.4123 trend=down
+act_stats() layer=2 module=mha_output x_min=-2.34 x_max=5.67 x_mean=0.01
+act_stats() layer=2 module=moe_output x_min=-1.23 x_max=3.45 x_mean=0.05
+```
+
+### H.7 Implementation Status — ALL COMPLETE (incl. H.6 educational logs)
 
 | # | Item | Status | Files Modified |
 |---|------|--------|----------------|
@@ -244,6 +264,10 @@ These are **non-standard** log types that help learners understand *why* the mod
 | 6 | **P2 — `impl/_np/inference.py`** | ✅ Done | `impl/_np/inference.py` |
 | 7 | **P2 — `impl/_torch/*`** | ✅ Done | `impl/_torch/training.py`, `impl/_torch/inference.py` |
 | 8 | **P2 — `impl/_triton/*` + `impl/_cuda/*`** | ✅ Done | All 4 files in both directories |
+| 9 | **H.6 — Attention entropy** | ✅ Done | `impl/_np/modules.py`, `impl/_torch/layers.py`, `impl/_triton/transformer.py`, `impl/_cuda/block.py` |
+| 10 | **H.6 — Grad norm stats** | ✅ Done | `impl/_np/training.py`, `impl/_torch/training.py`, `impl/_triton/training.py`, `impl/_cuda/training.py` |
+| 11 | **H.6 — Loss curve** | ✅ Done | `scripts/train.py` |
+| 12 | **H.6 — Activation stats** | ✅ Done | `impl/_np/modules.py`, `impl/_torch/layers.py` |
 
 ### H.7.1 Logging Architecture Summary
 
@@ -280,6 +304,19 @@ forward() input_ids=[1,128] → embedding=[1,128,256] → stack=[1,128,256] → 
 train_step() input=[16,128] → logits=[16,128,256] loss=2.3456 grad_norm=0.789
 ```
 
+### H.6 Educational Logs — Complete Summary
+
+| Log Type | Format | Example Output |
+|----------|--------|----------------|
+| attention_entropy | `avg=X.XX min=X.XX max=X.XX range_entropy=X.XX` | `attention_entropy() avg=2.39 min=1.53 max=2.69 range_entropy=1.16` |
+| grad_stats | Per-layer L2 norms | `grad_stats() layer0=0.1234 layer1=0.5678 avg=0.3456` |
+| loss_curve | Rolling avg 50, trend | `loss_curve() current=2.3456 rolling_avg=2.4123 trend=down` |
+| act_stats (MHA) | Per-module act stats | `act_stats() layer=2 module=mha_output x_min=-2.34 x_max=5.67 x_mean=0.01` |
+| act_stats (MoE) | Per-module act stats | `act_stats() layer=2 module=moe_output x_min=-1.23 x_max=3.45 x_mean=0.05` |
+| token_sample_top5 | Top-5 token probs (inference) | `generate_sampled() step=1 probs_entropy=2.34 probs_top5=[7851(0.12), 17(0.08), ...]` |
+
+Note: Attention entropy only logs when sequence length ≤ 256 (avoids noise on long sequences).
+
 ### H.8 Testing Status
 
 | Test | What | Location | Status |
@@ -302,7 +339,11 @@ INFERENCE:
   impl/_*/kv_cache.py → cache alloc/append (DEBUG)
 
 EDUCATIONAL:
-  Attention entropy, gradient stats, activation stats, token sampling top-5 (DEBUG/TRACE)
+  attention_entropy() → per-head attention entropy, focused vs diffuse (DEBUG)
+  grad_stats() → per-layer gradient norms, vanishing/exploding detection (DEBUG)
+  loss_curve() → rolling average loss, trend direction up/stable/down (INFO)
+  act_stats() → activation stats per module, layer-by-layer (DEBUG)
+  token sampling top-5 → per-token probability distribution (DEBUG)
 ```
 
 ## Key Decisions

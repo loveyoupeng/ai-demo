@@ -195,6 +195,7 @@ def train_step(
     clip_gradients(grads, max_norm=max_norm)
     grad_norm = compute_gradient_norm(grads)
     logger.debug("train_step() post_clip_norm=%.6f", grad_norm)
+    _log_grad_stats(grads)
 
     # --- 4. Optimizer step ---------------------------------------------------
     # Gather the current parameter dictionary from the model.  The optimizer
@@ -323,3 +324,31 @@ def clip_gradients(grads: dict[str, np.ndarray], max_norm: float) -> None:
     for grad in grads.values():
         # grad: ndarray of any shape — element-wise multiply by scalar
         grad *= scaling_factor  # in-place scalar multiplication
+
+
+def _log_grad_stats(grads: dict[str, np.ndarray]) -> None:
+    """Log per-layer gradient L2 norms for debugging vanishing/exploding gradients.
+
+    Parameters
+    ----------
+    grads : dict[str, np.ndarray]
+        Gradient dictionary.  Keys follow the pattern like
+        ``blocks.0.Wq``, ``blocks.1.ln1_gamma``, etc.  Layer index is the
+        second segment of the dotted key (``key.split(".")[1]``).
+    """
+    layer_norms: dict[int, float] = {}
+    for key, grad in grads.items():
+        parts = key.split(".")
+        if len(parts) >= 2 and parts[1].isdigit():
+            layer_idx = int(parts[1])
+            if layer_idx not in layer_norms:
+                layer_norms[layer_idx] = 0.0
+            layer_norms[layer_idx] += float(np.sum(grad ** 2))
+    for layer_idx in layer_norms:
+        layer_norms[layer_idx] = float(np.sqrt(layer_norms[layer_idx]))
+    if not layer_norms:
+        return
+    max_layer = max(layer_norms)
+    parts = [f"layer{i}={layer_norms[i]:.4f}" for i in range(max_layer + 1)]
+    avg = float(np.mean(list(layer_norms.values())))
+    logger.debug("grad_stats() %s avg=%.4f", " ".join(parts), avg)

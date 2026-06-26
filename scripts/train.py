@@ -30,6 +30,7 @@ import argparse
 import logging
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 # Add project root to path for imports
@@ -409,6 +410,40 @@ def get_dataset(dataset_path: str, synthetic: bool, vocab_size: int, context_len
     return data
 
 
+def _compute_loss_curve(losses: deque[float], current: float) -> dict[str, float | str]:
+    """Compute current loss, rolling average, and trend direction.
+
+    Parameters
+    ----------
+    losses : deque[float]
+        Rolling window of recent batch losses (maxsize=50).
+    current : float
+        Current batch loss.
+
+    Returns
+    -------
+    dict with keys:
+        current: current batch loss
+        rolling_avg: mean of last window losses, or all if fewer
+        trend: "down", "stable", or "up"
+
+    Notes
+    -----
+    Trend is determined by comparing rolling_avg to current:
+      - "down" if rolling_avg < current * 0.99
+      - "up" if rolling_avg > current * 1.01
+      - "stable" otherwise
+    """
+    rolling_avg = float(np.mean(losses)) if losses else current
+    if rolling_avg < current * 0.99:
+        trend = "down"
+    elif rolling_avg > current * 1.01:
+        trend = "up"
+    else:
+        trend = "stable"
+    return {"current": current, "rolling_avg": rolling_avg, "trend": trend}
+
+
 def run_training_numpy(model, optimizer, loss_fn, config: dict, dataset) -> list[float]:
     """Run the training loop for NumPy backend.
 
@@ -432,6 +467,7 @@ def run_training_numpy(model, optimizer, loss_fn, config: dict, dataset) -> list
     for epoch in range(epochs):
         epoch_start = time.time()
         epoch_losses: list[float] = []
+        losses_buffer: deque[float] = deque(maxlen=50)
         total_batches = 0
         max_seq = config.get("context_length", 128)
 
@@ -458,10 +494,12 @@ def run_training_numpy(model, optimizer, loss_fn, config: dict, dataset) -> list
 
             loss = float(numpy_train_step(model, batch_input, batch_target, loss_fn, optimizer))
             epoch_losses.append(loss)
+            losses_buffer.append(loss)
             total_batches += 1  # noqa: SIM113
 
             # Log progress
-            if total_batches % max(1, total_batches // 5) == 0 or total_batches == 1:
+            if total_batches % 50 == 0 or total_batches % max(1, total_batches // 5) == 0 or total_batches == 1:
+                loss_curve = _compute_loss_curve(losses_buffer, loss)
                 current_loss = float(np.mean(epoch_losses))
                 total_steps = epoch * total_batches + total_batches
                 logger.info(
@@ -472,6 +510,12 @@ def run_training_numpy(model, optimizer, loss_fn, config: dict, dataset) -> list
                     total_batches,
                     total_steps,
                     current_loss,
+                )
+                logger.info(
+                    "loss_curve() current=%.4f rolling_avg=%.4f trend=%s",
+                    loss_curve["current"],
+                    loss_curve["rolling_avg"],
+                    loss_curve["trend"],
                 )
                 print(f"  Step {total_steps}: loss={current_loss:.4f}")
 
@@ -515,6 +559,7 @@ def run_training_torch(model, optimizer, loss_fn, config: dict, dataset) -> list
     for epoch in range(epochs):
         epoch_start = time.time()
         epoch_losses: list[float] = []
+        losses_buffer: deque[float] = deque(maxlen=50)
         total_batches = 0
         max_seq = config.get("context_length", 128)
 
@@ -541,10 +586,12 @@ def run_training_torch(model, optimizer, loss_fn, config: dict, dataset) -> list
             batch_target = batch_target.long()
             loss = float(torch_train_step(model, batch_input, batch_target, optimizer, loss_fn))
             epoch_losses.append(loss)
+            losses_buffer.append(loss)
             total_batches += 1  # noqa: SIM113
 
             # Log progress
-            if total_batches % max(1, total_batches // 5) == 0 or total_batches == 1:
+            if total_batches % 50 == 0 or total_batches % max(1, total_batches // 5) == 0 or total_batches == 1:
+                loss_curve = _compute_loss_curve(losses_buffer, loss)
                 current_loss = float(torch.tensor(epoch_losses).mean().item())
                 total_steps = epoch * total_batches + total_batches
                 logger.info(
@@ -555,6 +602,12 @@ def run_training_torch(model, optimizer, loss_fn, config: dict, dataset) -> list
                     total_batches,
                     total_steps,
                     current_loss,
+                )
+                logger.info(
+                    "loss_curve() current=%.4f rolling_avg=%.4f trend=%s",
+                    loss_curve["current"],
+                    loss_curve["rolling_avg"],
+                    loss_curve["trend"],
                 )
                 print(f"  Step {total_steps}: loss={current_loss:.4f}")
 
@@ -599,6 +652,7 @@ def run_training_cuda(model, optimizer, loss_fn, config: dict, dataset, max_norm
     for epoch in range(epochs):
         epoch_start = time.time()
         epoch_losses: list[float] = []
+        losses_buffer: deque[float] = deque(maxlen=50)
         total_batches = 0
         max_seq = config.get("context_length", 128)
         device = torch.device("cuda:0")
@@ -622,9 +676,11 @@ def run_training_cuda(model, optimizer, loss_fn, config: dict, dataset, max_norm
             batch_target = batch_target.long()
             loss = float(cuda_train_step(model, batch_input, batch_target, optimizer, loss_fn, max_norm=max_norm))
             epoch_losses.append(loss)
-            total_batches += 1
+            losses_buffer.append(loss)
+            total_batches += 1  # noqa: SIM113
 
-            if total_batches % max(1, total_batches // 5) == 0 or total_batches == 1:
+            if total_batches % 50 == 0 or total_batches % max(1, total_batches // 5) == 0 or total_batches == 1:
+                loss_curve = _compute_loss_curve(losses_buffer, loss)
                 current_loss = float(torch.tensor(epoch_losses).mean().item())
                 total_steps = epoch * total_batches + total_batches
                 logger.info(
@@ -635,6 +691,12 @@ def run_training_cuda(model, optimizer, loss_fn, config: dict, dataset, max_norm
                     total_batches,
                     total_steps,
                     current_loss,
+                )
+                logger.info(
+                    "loss_curve() current=%.4f rolling_avg=%.4f trend=%s",
+                    loss_curve["current"],
+                    loss_curve["rolling_avg"],
+                    loss_curve["trend"],
                 )
                 print(f"  Step {total_steps}: loss={current_loss:.4f}")
 
@@ -786,9 +848,7 @@ def main() -> int:
 
         # Build model
         model, cfg = build_model(backend, config)
-        logger.info(
-            "train() model_built backend=%s", backend
-        )
+        logger.info("train() model_built backend=%s", backend)
         print("Model built successfully")
 
         # Get dataset
