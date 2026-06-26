@@ -38,6 +38,9 @@ https://arxiv.org/abs/2002.05202
 
 from __future__ import annotations
 
+import math
+
+import numpy as np
 import torch
 
 from impl._cuda.attention import scaled_dot_product_attention as cuda_sdp_attention
@@ -202,13 +205,26 @@ class CuTransformerBlock:
         self.Wo.requires_grad_(True)
 
         # ── MoE weights ────────────────────────────────────────────────
-        # Each expert has: W (D, D), bias (D,), routing (D,)
-        # All experts share the same W and bias (like NumPy impl)
-        self.expert_weights = torch.zeros(n_experts, embed_dim, embed_dim)
+        # Expert weights: (N, D, D) — Xavier uniform for each expert
+        # Expert bias: (N, D) — zeros
+        # Routing weights: (N, D) — Xavier uniform
+        rng = np.random.default_rng(seed + 7)
+        bound = math.sqrt(6.0 / (embed_dim + embed_dim))
+
+        self.expert_weights = torch.empty(
+            n_experts, embed_dim, embed_dim, dtype=torch.float32
+        )
+        torch.nn.init.uniform_(
+            self.expert_weights, -bound, bound,
+            generator=torch.Generator().manual_seed(seed + 7)
+        )
         self.expert_weights.requires_grad_(True)
-        self.expert_bias = torch.zeros(n_experts, embed_dim)
+
+        self.expert_bias = torch.zeros(n_experts, embed_dim, dtype=torch.float32)
         self.expert_bias.requires_grad_(True)
-        self.routing_weights = torch.zeros(n_experts, embed_dim)
+
+        self.routing_weights = _init_weight(embed_dim, n_experts, seed=seed + 8).T
+        # _init_weight returns (D, N), transpose to (N, D) to match NumPy
         self.routing_weights.requires_grad_(True)
 
         # Compute RoPE tables cache (shared across all calls for one block)

@@ -833,6 +833,9 @@ class TorchModel(nn.Module):
         self.k = k
         self.seed = seed
 
+        # Set global random seed for deterministic initialization
+        torch.manual_seed(seed)
+
         # Embedding layer
         self.embedding = Embedding(vocab_size, embed_dim)
 

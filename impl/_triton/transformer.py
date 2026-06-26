@@ -12,6 +12,8 @@ Architecture (same as _torch TransformerBlock):
 No new Triton kernels — this is pure PyTorch module wiring.
 """
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -36,10 +38,10 @@ class TritonMultiHeadAttention(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        nn.init.kaiming_uniform_(self.Wq.weight, a=0.01)
-        nn.init.kaiming_uniform_(self.Wk.weight, a=0.01)
-        nn.init.kaiming_uniform_(self.Wv.weight, a=0.01)
-        nn.init.kaiming_uniform_(self.Wo.weight, a=0.01)
+        nn.init.kaiming_uniform_(self.Wq.weight, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(self.Wk.weight, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(self.Wv.weight, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(self.Wo.weight, a=math.sqrt(5))
 
     def _move_to_device(self, x: torch.Tensor) -> None:
         """Move parameters to the same device and dtype as x on first forward pass."""
@@ -130,6 +132,10 @@ class TritonTransformerBlock(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
+    def reset_parameters(self) -> None:
+        self.mha.reset_parameters()
+        self.moe.reset_parameters()
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         device = x.device
         dtype = x.dtype if x.dtype.is_floating_point or x.dtype.is_complex else None
@@ -190,9 +196,9 @@ class TritonExpert(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        nn.init.kaiming_uniform_(self.W1, a=0.01)
-        nn.init.kaiming_uniform_(self.W3, a=0.01)
-        nn.init.kaiming_uniform_(self.W2, a=0.01)
+        nn.init.kaiming_uniform_(self.W1, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(self.W3, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(self.W2, a=math.sqrt(5))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return swiglu_ffn(x, self.W1, self.W3, self.W2)
@@ -215,6 +221,13 @@ class TritonMoE(nn.Module):
         self.W_router = nn.Parameter(torch.empty(embed_dim, n_experts))
         self.b_router = nn.Parameter(torch.zeros(n_experts))
         self.experts = nn.ModuleList([TritonExpert(embed_dim, ff_dim) for _ in range(n_experts)])
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(self.W_router, a=math.sqrt(5))
+        # b_router stays at zeros
+        for expert in self.experts:
+            expert.reset_parameters()
 
     def _move_to_device(self, x: torch.Tensor) -> None:
         """Move all MoE parameters to the same device and dtype as x (skip if int)."""
@@ -306,6 +319,10 @@ class TritonDecoderStack(nn.Module):
                 for _ in range(n_layers)
             ]
         )
+
+    def reset_parameters(self) -> None:
+        for block in self.layers:
+            block.reset_parameters()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = x

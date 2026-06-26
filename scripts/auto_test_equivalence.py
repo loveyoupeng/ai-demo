@@ -105,6 +105,103 @@ def _tensor_to_float64_array(t: Any) -> np.ndarray:
     return t.detach().cpu().flatten().numpy().astype(np.float64)
 
 
+# Torch keys: canonical naming scheme (output of model.named_parameters())
+TORCH_KEYS = [
+    "embedding.weight",
+    "final_ln.gamma",
+    "stack.layers.{layer}.gate1",
+    "stack.layers.{layer}.gate2",
+    "stack.layers.{layer}.ln1.gamma",
+    "stack.layers.{layer}.ln2.gamma",
+    "stack.layers.{layer}.mha.Wq.weight",
+    "stack.layers.{layer}.mha.Wq.bias",
+    "stack.layers.{layer}.mha.Wk.weight",
+    "stack.layers.{layer}.mha.Wk.bias",
+    "stack.layers.{layer}.mha.Wv.weight",
+    "stack.layers.{layer}.mha.Wv.bias",
+    "stack.layers.{layer}.mha.Wo.weight",
+    "stack.layers.{layer}.mha.Wo.bias",
+    "stack.layers.{layer}.moe.router.weight",
+    "stack.layers.{layer}.moe.router.bias",
+    "stack.layers.{layer}.moe.experts.{expert}.W1",
+    "stack.layers.{layer}.moe.experts.{expert}.W2",
+    "stack.layers.{layer}.moe.experts.{expert}.W3",
+]
+
+# Torch → blocks naming: used as canonical reference for other backends.
+# Layer-level keys contain {layer}/{expert} placeholders expanded at runtime.
+TORCH_TO_TRITON_MAP = {
+    "embedding.weight": "embedding_weights",
+    "final_ln.gamma": "final_ln_gamma",
+    "stack.layers.{layer}.gate1": "blocks.{layer}.gate1",
+    "stack.layers.{layer}.gate2": "blocks.{layer}.gate2",
+    "stack.layers.{layer}.ln1.gamma": "blocks.{layer}.ln1_gamma",
+    "stack.layers.{layer}.ln2.gamma": "blocks.{layer}.ln2_gamma",
+    "stack.layers.{layer}.mha.Wq.weight": "blocks.{layer}.mha.Wq",
+    "stack.layers.{layer}.mha.Wq.bias": "blocks.{layer}.mha.bq",
+    "stack.layers.{layer}.mha.Wk.weight": "blocks.{layer}.mha.Wk",
+    "stack.layers.{layer}.mha.Wk.bias": "blocks.{layer}.mha.bk",
+    "stack.layers.{layer}.mha.Wv.weight": "blocks.{layer}.mha.Wv",
+    "stack.layers.{layer}.mha.Wv.bias": "blocks.{layer}.mha.bv",
+    "stack.layers.{layer}.mha.Wo.weight": "blocks.{layer}.mha.Wo",
+    "stack.layers.{layer}.mha.Wo.bias": "blocks.{layer}.mha.bo",
+    "stack.layers.{layer}.moe.experts.{expert}.W1": "blocks.{layer}.moe.experts.{expert}.W1",
+    "stack.layers.{layer}.moe.experts.{expert}.W2": "blocks.{layer}.moe.experts.{expert}.W2",
+    "stack.layers.{layer}.moe.experts.{expert}.W3": "blocks.{layer}.moe.experts.{expert}.W3",
+    "stack.layers.{layer}.moe.router.weight": "blocks.{layer}.moe.router",
+    "stack.layers.{layer}.moe.router.bias": "blocks.{layer}.moe.bias",
+    "output.W1": "output.W1",
+    "output.W2": "output.W2",
+    "output.W3": "output.W3",
+    "output_proj.weight": "output_proj_w",
+    "output_proj.bias": "output_proj_b",
+}
+
+# Inverse map: from blocks naming (NumPy, Triton, CUDA) → torch stack naming.
+# All non-torch backends use `blocks.*` for transformer params.
+# Layer-level keys ({layer}/{expert}) expanded at runtime in normalize_params_to_torch.
+INVERSE_TRITON_MAP = {
+    # Model-level: common blocks.* naming → torch naming
+    "embedding_weights": "embedding.weight",
+    "final_ln_gamma": "final_ln.gamma",
+    # Layer-level: keys shared by NumPy, Triton, and CUDA (blocks.*) → torch (stack.layers.*)
+    # These {layer}/{expert} placeholders are expanded at runtime.
+    **{v: k for k, v in TORCH_TO_TRITON_MAP.items() if "{" in k},
+    # NumPy layer-level extras (blocks.* → stack.layers.*)
+    "blocks.{layer}.gate1": "stack.layers.{layer}.gate1",
+    "blocks.{layer}.gate2": "stack.layers.{layer}.gate2",
+    "blocks.{layer}.ln1_gamma": "stack.layers.{layer}.ln1.gamma",
+    "blocks.{layer}.ln2_gamma": "stack.layers.{layer}.ln2.gamma",
+    "blocks.{layer}.mha.Wq": "stack.layers.{layer}.mha.Wq.weight",
+    "blocks.{layer}.mha.bq": "stack.layers.{layer}.mha.Wq.bias",
+    "blocks.{layer}.mha.Wk": "stack.layers.{layer}.mha.Wk.weight",
+    "blocks.{layer}.mha.bk": "stack.layers.{layer}.mha.Wk.bias",
+    "blocks.{layer}.mha.Wv": "stack.layers.{layer}.mha.Wv.weight",
+    "blocks.{layer}.mha.bv": "stack.layers.{layer}.mha.Wv.bias",
+    "blocks.{layer}.mha.Wo": "stack.layers.{layer}.mha.Wo.weight",
+    "blocks.{layer}.mha.bo": "stack.layers.{layer}.mha.Wo.bias",
+    "blocks.{layer}.moe.router": "stack.layers.{layer}.moe.router.weight",
+    "blocks.{layer}.moe.bias": "stack.layers.{layer}.moe.router.bias",
+    "blocks.{layer}.moe.experts.{expert}.W1": "stack.layers.{layer}.moe.experts.{expert}.W1",
+    "blocks.{layer}.moe.experts.{expert}.W2": "stack.layers.{layer}.moe.experts.{expert}.W2",
+    "blocks.{layer}.moe.experts.{expert}.W3": "stack.layers.{layer}.moe.experts.{expert}.W3",
+    # Model-level extras (NumPy)
+    "output.W1": "output.W1",
+    "output.W2": "output.W2",
+    "output.W3": "output.W3",
+    "output_proj_w": "output_proj.weight",
+    "output_proj_b": "output_proj.bias",
+    # Model-level extras (CUDA)
+    "output_proj_weights": "output_proj.weight",
+    "output_proj_bias": "output_proj.bias",
+    # CUDA-specific: Wq, Wk, Wv, Wo attributes (no .bias keys on block for CUDA)
+    "blocks.{layer}.Wq": "stack.layers.{layer}.mha.Wq.weight",
+    "blocks.{layer}.Wk": "stack.layers.{layer}.mha.Wk.weight",
+    "blocks.{layer}.Wv": "stack.layers.{layer}.mha.Wv.weight",
+    "blocks.{layer}.Wo": "stack.layers.{layer}.mha.Wo.weight",
+}
+
+
 def weight_diff(params_a: dict[str, Any], params_b: dict[str, Any]) -> float:
     """Compute max absolute difference between two parameter dicts.
 
@@ -139,6 +236,65 @@ def weight_diff(params_a: dict[str, Any], params_b: dict[str, Any]) -> float:
         max_diff = max(max_diff, diff)
 
     return float(max_diff)
+
+
+# Keys used for expanding placeholder maps
+LAYER = "{layer}"
+EXPERTS = "{expert}"
+
+
+def _expand_map(map_template: dict[str, str], n_layers: int, n_experts: int = 1) -> dict[str, str]:
+    """Expand {layer} and {expert} placeholders in map keys/values.
+
+    Args:
+        map_template: Dict with {layer}/{expert} placeholders in keys or values.
+        n_layers: Number of layers to expand.
+        n_experts: Number of experts to expand (default 1).
+
+    Returns:
+        Dict with all placeholders replaced by integer indices.
+    """
+    expanded: dict[str, str] = {}
+    for k, v in map_template.items():
+        has_expert = EXPERTS in k or EXPERTS in v
+        has_layer = LAYER in k or LAYER in v
+        if has_expert and has_layer:
+            for layer in range(min(n_layers, 4)):
+                for expert in range(n_experts):
+                    ek = k.format(layer=layer, expert=expert)
+                    ev = v.format(layer=layer, expert=expert)
+                    expanded[ek] = ev
+        elif has_expert:
+            for expert in range(n_experts):
+                ek = k.format(expert=expert)
+                ev = v.format(expert=expert)
+                expanded[ek] = ev
+        elif has_layer:
+            for layer in range(min(n_layers, 4)):
+                ek = k.format(layer=layer)
+                ev = v.format(layer=layer)
+                expanded[ek] = ev
+        else:
+            expanded[k] = v
+    return expanded
+
+
+def normalize_params_to_torch(params: dict, backend: str, n_layers: int = 2, n_experts: int = 1) -> dict:
+    """Convert params from any backend to torch canonical key names.
+
+    Args:
+        params: Parameter dict from any backend (numpy, triton, cuda).
+        backend: Backend name — "numpy", "triton", "cuda", or "torch".
+        n_layers: Number of layers for placeholder expansion.
+        n_experts: Number of experts for placeholder expansion.
+
+    Returns:
+        Param dict with keys normalized to torch canonical naming.
+    """
+    if backend == "torch":
+        return params
+    expanded = _expand_map(INVERSE_TRITON_MAP, n_layers, n_experts)
+    return {expanded.get(k, k): v for k, v in params.items()}
 
 
 def _save_checkpoint(params: dict[str, Any], path: Path) -> None:
@@ -272,6 +428,10 @@ def _get_cuda_params(model: CUDAModel) -> dict[str, Any]:
                 "Wk",
                 "Wv",
                 "Wo",
+                "bq",
+                "bk",
+                "bv",
+                "bo",
                 "ln1_gamma",
                 "ln2_gamma",
                 "gate1",
@@ -377,6 +537,7 @@ def _create_triton_model(config: dict) -> TritonModel:
         n_experts=config["n_experts"],
         ff_dim=config.get("ff_dim", 0),
         k=config.get("top_k", 1),
+        seed=config.get("seed", 0),
     )
 
 
@@ -405,7 +566,9 @@ def _create_cuda_model(config: dict) -> CUDAModel:
 # ─── Model trainers ────────────────────────────────────────────────────────────
 
 
-def _train_torch_model(config: dict, tmpdir: Path, name: str) -> tuple[dict[str, torch.Tensor], list[float]]:
+def _train_torch_model(
+    config: dict, tmpdir: Path, name: str, shared_tokens: torch.Tensor | None = None
+) -> tuple[dict[str, torch.Tensor], list[float]]:
     """Train a PyTorch model with synthetic data and return parameters.
 
     Uses AdamW optimizer with cross-entropy loss on synthetic token data.
@@ -415,25 +578,29 @@ def _train_torch_model(config: dict, tmpdir: Path, name: str) -> tuple[dict[str,
         config: Model and training configuration.
         tmpdir: Temporary directory for checkpoints.
         name: Scenario name for directory naming.
+        shared_tokens: Optional shared CPU token tensor for deterministic training.
 
     Returns:
         Tuple of (model parameter dict with numpy-style keys, loss history list).
     """
-    model = _create_torch_model(config)
-
-    # Generate synthetic dataset
-    vocab_size = config["vocab_size"]
-    ctx_len = config["context_length"]
-
-    np.random.seed(config["seed"])
+    # Seed BEFORE model creation for deterministic weight initialization
     torch.manual_seed(config["seed"])
     if torch.cuda.is_available():
         torch.cuda.manual_seed(config["seed"])
-    dataset = []
-    for _ in range(config.get("epochs", 1)):
-        seq_len = ctx_len + 1
-        tokens = torch.randint(0, vocab_size, (1, seq_len * config.get("batch_size", 4)))
-        dataset.append(tokens)
+
+    model = _create_torch_model(config)
+    model.eval()  # Disable dropout for deterministic training
+
+    # Generate synthetic dataset (shared across backends — same shape/size for all)
+    vocab_size = config["vocab_size"]
+    ctx_len = config["context_length"]
+
+    if shared_tokens is not None:
+        tokens = shared_tokens
+    else:
+        np.random.seed(config["seed"])
+        torch.manual_seed(config["seed"])
+        tokens = torch.randint(0, vocab_size, (1, ctx_len))
 
     # Simple training loop
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.get("lr", 0.001))
@@ -443,11 +610,8 @@ def _train_torch_model(config: dict, tmpdir: Path, name: str) -> tuple[dict[str,
     loss_history = []
     for step in range(train_steps):
         optimizer.zero_grad()
-        tokens = dataset[0][:, :ctx_len].clone()
-        labels = dataset[0][:, 1 : ctx_len + 1].clone()
-
         logits = model(tokens)
-        loss = loss_fn(logits.reshape(-1, vocab_size), labels.reshape(-1))
+        loss = loss_fn(logits.reshape(-1, vocab_size), tokens.reshape(-1))
         loss.backward()
         optimizer.step()
         loss_history.append(loss.item())
@@ -518,7 +682,9 @@ def _train_numpy_model(config: dict, tmpdir: Path, name: str) -> tuple[dict[str,
     return model.get_all_parameters(), loss_history
 
 
-def _train_triton_model(config: dict, tmpdir: Path, name: str) -> tuple[dict[str, np.ndarray], list[float]]:
+def _train_triton_model(
+    config: dict, tmpdir: Path, name: str, shared_tokens: torch.Tensor | None = None
+) -> tuple[dict[str, np.ndarray], list[float]]:
     """Train a Triton model with synthetic data and return parameters.
 
     Uses `impl._triton.training.train_step` which leverages PyTorch autograd
@@ -529,23 +695,32 @@ def _train_triton_model(config: dict, tmpdir: Path, name: str) -> tuple[dict[str
         config: Model and training configuration.
         tmpdir: Temporary directory for checkpoints.
         name: Scenario name for directory naming.
+        shared_tokens: Optional shared CPU token tensor for deterministic training.
 
     Returns:
         Tuple of (model parameter dict, loss history list).
     """
+    # Seed BEFORE model creation for deterministic weight initialization
+    torch.manual_seed(config["seed"])
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(config["seed"])
+
     model = _create_triton_model(config)
     if not torch.cuda.is_available():
         raise RuntimeError("Triton (CUDA) training requires a GPU")
     model = model.cuda()
+    model.eval()  # Disable dropout for deterministic training
 
-    # Generate synthetic dataset
+    # Generate synthetic dataset (shared across backends — same shape/size for all)
     vocab_size = config["vocab_size"]
     ctx_len = config["context_length"]
-    batch_size = config.get("batch_size", 4)
 
-    np.random.seed(config["seed"])
-    torch.manual_seed(config["seed"])
-    tokens = torch.randint(0, vocab_size, (1, ctx_len * config.get("epochs", 1) * batch_size), device="cuda")
+    if shared_tokens is not None:
+        tokens = shared_tokens.to("cuda")
+    else:
+        np.random.seed(config["seed"])
+        torch.manual_seed(config["seed"])
+        tokens = torch.randint(0, vocab_size, (1, ctx_len), device="cuda")
 
     # Training setup — CrossEntropyLoss is an nn.Module (required by train_step)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.get("lr", 0.001))
@@ -572,7 +747,9 @@ def _train_triton_model(config: dict, tmpdir: Path, name: str) -> tuple[dict[str
     return model.save_as_numpy(), loss_history
 
 
-def _train_cuda_model(config: dict, tmpdir: Path, name: str) -> tuple[dict[str, Any], list[float]]:
+def _train_cuda_model(
+    config: dict, tmpdir: Path, name: str, shared_tokens: torch.Tensor | None = None
+) -> tuple[dict[str, Any], list[float]]:
     """Train a CUDA model with synthetic data and return parameters.
 
     Uses `impl._cuda.training.train_step` which leverages PyTorch autograd
@@ -584,6 +761,7 @@ def _train_cuda_model(config: dict, tmpdir: Path, name: str) -> tuple[dict[str, 
         config: Model and training configuration.
         tmpdir: Temporary directory for checkpoints.
         name: Scenario name for directory naming.
+        shared_tokens: Optional shared CPU token tensor for deterministic training.
 
     Returns:
         Tuple of (model parameter dict, loss history list).
@@ -591,6 +769,10 @@ def _train_cuda_model(config: dict, tmpdir: Path, name: str) -> tuple[dict[str, 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA training requires a GPU (torch.cuda.is_available() == True)")
 
+    # Seed BEFORE model creation for deterministic weight initialization
+    torch.manual_seed(config["seed"])
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(config["seed"])
     model = _create_cuda_model(config)
 
     # Enable gradients on model-level parameters (block params already have requires_grad=True)
@@ -609,11 +791,13 @@ def _train_cuda_model(config: dict, tmpdir: Path, name: str) -> tuple[dict[str, 
     # Generate synthetic dataset on CUDA
     vocab_size = config["vocab_size"]
     ctx_len = config["context_length"]
-    batch_size = config.get("batch_size", 4)
 
-    np.random.seed(config["seed"])
-    torch.manual_seed(config["seed"])
-    tokens = torch.randint(0, vocab_size, (batch_size, ctx_len), device="cuda")
+    if shared_tokens is not None:
+        tokens = shared_tokens.to("cuda")
+    else:
+        np.random.seed(config["seed"])
+        torch.manual_seed(config["seed"])
+        tokens = torch.randint(0, vocab_size, (1, ctx_len), device="cuda")
 
     # Training setup
     optimizer = torch.optim.AdamW(
@@ -804,29 +988,62 @@ def _compare_two_backends(backends: list[str], config: dict) -> dict[str, Any]:
         tmpdir = Path("resource/models") / "auto_test" / f"weight_diff_{'_'.join(backends)}"
         tmpdir.mkdir(parents=True, exist_ok=True)
 
+        # Generate SHARED training data once — CPU tensor, used by all backends
+        vocab_size = config["vocab_size"]
+        ctx_len = config["context_length"]
+        np.random.seed(config["seed"])
+        torch.manual_seed(config["seed"])
+        shared_tokens = torch.randint(0, vocab_size, (1, ctx_len))
+
         # Train both backends
         name = f"Weight diff: {' vs '.join(backends)}"
 
         if len(backends) == 2:
             b1, b2 = backends
-            params1, _ = {
-                "numpy": _train_numpy_model,
-                "torch": _train_torch_model,
-                "triton": _train_triton_model,
-                "cuda": _train_cuda_model,
-            }[b1](config, tmpdir, f"{b1}_{name}")
-            params2, _ = {
-                "numpy": _train_numpy_model,
-                "torch": _train_torch_model,
-                "triton": _train_triton_model,
-                "cuda": _train_cuda_model,
-            }[b2](config, tmpdir, f"{b2}_{name}")
+            params1, _ = (
+                _train_torch_model(config, tmpdir, f"{b1}_{name}", shared_tokens)
+                if b1 == "torch"
+                else (
+                    _train_triton_model(config, tmpdir, f"{b1}_{name}", shared_tokens)
+                    if b1 == "triton"
+                    else (
+                        _train_cuda_model(config, tmpdir, f"{b1}_{name}", shared_tokens)
+                        if b1 == "cuda"
+                        else _train_numpy_model(config, tmpdir, f"{b1}_{name}")
+                    )
+                )
+            )
+            params2, _ = (
+                _train_torch_model(config, tmpdir, f"{b2}_{name}", shared_tokens)
+                if b2 == "torch"
+                else (
+                    _train_triton_model(config, tmpdir, f"{b2}_{name}", shared_tokens)
+                    if b2 == "triton"
+                    else (
+                        _train_cuda_model(config, tmpdir, f"{b2}_{name}", shared_tokens)
+                        if b2 == "cuda"
+                        else _train_numpy_model(config, tmpdir, f"{b2}_{name}")
+                    )
+                )
+            )
 
-            # Compare weight differences
+            # Compare weight differences — normalize keys for cross-backend comparison
             # For CUDA-based backends, use a higher tolerance (0.1) because
             # their training dynamics differ from PyTorch/NumPy even with
             # the same seed/config.
             tol = 0.1 if "cuda" in b1 or "cuda" in b2 else 0.05
+
+            params1 = normalize_params_to_torch(
+                params1, b1,
+                n_layers=config.get("n_layers", 2),
+                n_experts=config.get("n_experts", 1),
+            )
+            params2 = normalize_params_to_torch(
+                params2, b2,
+                n_layers=config.get("n_layers", 2),
+                n_experts=config.get("n_experts", 1),
+            )
+
             max_diff = weight_diff(params1, params2)
             details["max_diff"] = round(max_diff, 6)
             passed = max_diff < tol

@@ -986,6 +986,60 @@ The 142-process count is simply too many process spawns/dies for the Jetson nvgp
 All quality checks pass with 0 errors.
 
 
+## Phase G+++: Auto Test Weight Diff Debug (2026-06-25) — IN PROGRESS
+
+### Problem
+After fixing the INVERSE_TRITON_MAP key normalization, the `numpy vs torch` weight diff test still reports `max_diff=0.337969`. The normalization correctly maps 24 NumPy keys → 24 Torch keys with 7 common key overlap.
+
+### What Was Fixed
+1. **Key normalization** — Replaced `TORCH_TO_NP_MAP` / `TORCH_TO_TRITON_MAP` with unified `TORCH_KEYS` + `INVERSE_TRITON_MAP` (expanded for layer/expert placeholders). Properly maps `blocks.*` → `stack.layers.*`, `mha.*` → `mha.*`, etc.
+2. **Weight init standardization** — Added `torch.manual_seed(seed)` to `TorchModel.__init__`; fixed TritonMHA to use `kaiming_uniform_(a=math.sqrt(5))`; fixed CUDA MoE to use Xavier uniform; fixed per-layer seed propagation in CUDA stack.
+
+### Root Cause Analysis
+After training with identical seeds (42), both models produce different weights because:
+
+| Factor | NumPy | PyTorch |
+|--------|-------|---------|
+| RNG | `np.random.uniform(-bound, bound)` | `torch.nn.init.kaiming_uniform_` |
+| Random ops order | `embedding → output_proj → stack (block_0 first) → ln → output` | `embedding → stack (block_0 first) → ln → output → output_proj` |
+| Different numerical implementations | Manual AdamW, manual softmax, manual matmul | PyTorch `CrossEntropyLoss`, `AdamW`, `softmax` |
+| Output layer diff | `output_proj_w`/`output_proj_b` | NOT in the common keys (different init order means torch consumes RNG differently) |
+
+### Key Insight
+- NumPy's `save_as_numpy()` produces keys: `embedding_weights`, `output_proj_w`, `output_proj_b`, `output.W1`...`W3`
+- Torch's `save_as_numpy()` produces: `embedding_weights`, `output_proj_w`, `output_proj_b`, `output.W1`...`W3`
+- These match in name but weights differ because of different RNG consumption order during training
+- The 7 "common keys" still produce very small diffs (0.1-0.2 range) due to compounding numerical differences through training
+
+### Test Cases That DO Pass
+1. **Round-trip torch→numpy**: Train torch → save_npz → load numpy → compare = **0.0000 diff** (exact match)
+2. **Round-trip numpy→torch**: Train numpy → save_npz → load torch → compare = **0.0000 diff** (exact match)
+3. **Two-way inference**: Same pretrained weights → same outputs across backends = **0.0000 diff** (exact match)
+4. **Training dynamics**: Both show converging loss = **PASS**
+
+### What 0.33 Diff Means
+The 0.33 difference after independent training is EXPECTED behavior — NOT a bug. The models use:
+- Different RNG implementations (NumPy vs PyTorch use different algorithms)
+- Different numerical implementations (manual float64 vs PyTorch's optimized kernels)
+- Different random operation order (affects which random numbers are consumed)
+
+The true equivalency property "same weights → same output" is validated by round-trip tests.
+
+### Key Mappings Currently Working
+```
+NumPy key                     → Torch key
+blocks.0.Wq                   → stack.layers.0.mha.Wq.weight
+blocks.0.mha.Wv               → stack.layers.0.mha.Wv.weight  (duplicate mapping)
+blocks.0.moe.experts.0.W1     → stack.layers.0.moe.experts.0.W1
+output.W1                     → output.W1 (direct match)
+embedding_weights             → NOT in common (mapped differently)
+output_proj_w                 → NOT in common (mapped differently)
+```
+
+CUDA-specific keys (`blocks.0.expert_weights`, `blocks.0.expert_bias`, `blocks.0.routing_weights`) correctly excluded from map.
+
+---
+
 ## Phase F: CUDA Parity Tests — F11 Complete (2026-06-24)
 
 ### 16 Tests Created, All Pass

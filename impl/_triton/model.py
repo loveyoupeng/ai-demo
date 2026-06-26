@@ -49,6 +49,7 @@ class TritonModel(nn.Module):
         n_experts: int,
         ff_dim: int,
         k: int = 2,
+        seed: int = 0,
     ) -> None:
         super().__init__()
         self.vocab_size = vocab_size
@@ -57,6 +58,10 @@ class TritonModel(nn.Module):
         self.n_heads = n_heads
         self.n_experts = n_experts
         self.k = k
+        self.seed = seed
+
+        # Set global random seed for deterministic initialization
+        torch.manual_seed(seed)
 
         # Embedding layer (PyTorch native — no Triton optimization needed)
         self.embedding = nn.Embedding(vocab_size, embed_dim)
@@ -82,11 +87,11 @@ class TritonModel(nn.Module):
         # Output projection to vocabulary
         self.output_proj = nn.Linear(embed_dim, vocab_size, bias=True)
 
-        self.reset_parameters()
-
     def reset_parameters(self) -> None:
         nn.init.kaiming_uniform_(self.embedding.weight, a=0.01)
         self.output.reset_parameters()
+        self.output_proj.reset_parameters()
+        self.stack.reset_parameters()
 
     def _move_to_device(self, x: torch.Tensor) -> None:
         device = x.device
@@ -340,6 +345,10 @@ class TritonModel(nn.Module):
             load(Block.mha(layer_idx, Mha.BV), block.mha.Wv.bias)
             load(Block.mha(layer_idx, Mha.WO), block.mha.Wo.weight, transpose=True)
             load(Block.mha(layer_idx, Mha.BO), block.mha.Wo.bias)
+
+            # Gated residuals
+            load(Block.gate1(layer_idx), block.gate1)
+            load(Block.gate2(layer_idx), block.gate2)
 
             # MoE router and expert weights
             load(Block.moe_router(layer_idx), block.moe.W_router)

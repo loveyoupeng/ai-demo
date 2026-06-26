@@ -96,9 +96,9 @@ class CuDecoderStack:
                 ff_dim=ff_dim,
                 k=k,
                 rope_dim=rope_dim,
-                seed=0,
+                seed=100 + layer_idx,  # Same offset scheme as NumPy/PyTorch
             )
-            for _ in range(n_layers)
+            for layer_idx in range(n_layers)
         ]
 
     def forward(

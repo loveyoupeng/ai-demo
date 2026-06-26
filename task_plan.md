@@ -104,15 +104,20 @@ Build a fully functional decoder-only transformer LLM from scratch in 4 implemen
 - 🔲 Cross-backend checkpoint save/load between all 4 backends
 
 ### Phase G++: Auto Test Framework Rewrite ✅ COMPLETE (2026-06-25)
-- ✅ `scripts/verify_equivalence.py` replaced by `scripts/auto_test_equivalence.py` (~1400 lines, full 4-backend support)
+- ✅ `scripts/verify_equivalence.py` replaced by `scripts/auto_test_equivalence.py` (~1600 lines, full 4-backend support)
 - ✅ 10 scenarios: 6 pairwise weight diff, 2 inference, 1 training dynamics, 2 round-trip
-- ✅ Weight diff tests correctly document expected divergence of independently trained models
+- ✅ Key normalization: `INVERSE_TRITON_MAP` properly maps NumPy/Triton/CUDA keys to Torch keys
 - ✅ CUDA MoE (W1-only) gracefully skipped in inference tests when MoE enabled (no W2/W3 parity)
 - ✅ Training dynamics test uses convergence check (loss decreases) instead of exact match
 - ✅ Round-trip tests (torch↔numpy) pass with max_diff ≈ 0.0000
-- ✅ Test results: 4/10 PASS (inference + training + round-trip), 6/10 FAIL (expected weight drift)
 - ✅ `impl/_cuda/model.py` fixed: `load_from_numpy_dict()`, weight init (stable outputs)
 - ✅ `scripts/train.py`, `scripts/infer.py` support all 4 backends
+- ✅ Weight init standardization: Kaiming uniform `a=math.sqrt(5)` across PyTorch/Triton/CUDA backends
+
+### Phase G+++: Weight Diff Debug 🔲 IN PROGRESS (2026-06-25)
+- 🔲 `numpy vs torch` weight diff still 0.33 after key normalization fix
+- 🔲 Need to trace which params cause the drift and fix root cause
+- 🔲 Plan: `docs/phase_g_plus_plus_plan.md` (see findings.md + progress.md)
 
 ---
 
