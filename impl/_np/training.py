@@ -16,11 +16,15 @@ Training loop:
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
 from impl._np.cross_entropy import CrossEntropyLoss
 from impl._np.model import NumPyModel
 from impl._np.optimizer import AdamW
+
+logger = logging.getLogger(__name__)
 
 
 class TrainingConfig:
@@ -152,13 +156,11 @@ def train_step(
 
     """
     # --- 1. Forward pass --------------------------------------------------
-    # batch_input:  (B, S)     — token IDs, dtype int32
-    # model.forward maps token IDs through embedding → transformer stack →
-    # output projection to produce logits over the vocabulary.
-    #
-    # Output shape:   (B, S, V)  where V = vocab_size
-    # Each element logits[b, s, v] is the unnormalized log-probability
-    # that the model assigns to vocabulary token v at position s of batch b.
+    logger.debug(
+        "train_step() forward batch_input=%s → logits=%s",
+        list(batch_input.shape),
+        "logits shape TBD (see NumPyModel forward log)",
+    )
     logits = model.forward(batch_input)  # (B, S, V)
 
     # --- 2. Loss computation -------------------------------------------------
@@ -168,6 +170,11 @@ def train_step(
     # Shape of intermediate computation: (B, S, 1) — per-position loss
     # Output: scalar float (mean over all positions)
     loss = loss_fn.forward(logits, batch_target)  # scalar float
+    logger.info(
+        "train_step() forward completed batch=%s loss=%.6f",
+        list(batch_input.shape),
+        loss,
+    )
 
     # --- 3. Backward pass (numerical gradients) ------------------------------
     # model.backward recomputes the forward pass internally and uses
@@ -176,11 +183,18 @@ def train_step(
     # grads[k] has the same shape as params[k], i.e. the gradient of the
     # scalar loss with respect to each element of the parameter tensor.
     grads = model.backward(logits, batch_target, batch_input)  # dict[str, ndarray]
+    logger.info(
+        "train_step() backward completed param_grads=%d",
+        len(grads),
+    )
 
     # --- 3.5. Gradient clipping ----------------------------------------------
     # Clip gradients by global L2 norm to stabilise training (especially
     # with Post-Norm architecture).  Modified in-place.
+    logger.debug("train_step() gradient_clip max_norm=%f", max_norm)
     clip_gradients(grads, max_norm=max_norm)
+    grad_norm = compute_gradient_norm(grads)
+    logger.debug("train_step() post_clip_norm=%.6f", grad_norm)
 
     # --- 4. Optimizer step ---------------------------------------------------
     # Gather the current parameter dictionary from the model.  The optimizer
@@ -195,6 +209,7 @@ def train_step(
     #   θ ← θ − lr · (m̂ / (v̂ + ε)¹ᐟ² + wd · θ)
     # where m̂, v̂ are bias-corrected first/second moment estimates.
     params = model.get_all_parameters()
+    logger.debug("train_step() optimizer_step params=%d", len(params))
     optimizer.step(params, grads)  # in-place modification
 
     # --- 5. Return the scalar loss value for logging -------------------------
@@ -281,15 +296,21 @@ def clip_gradients(grads: dict[str, np.ndarray], max_norm: float) -> None:
     """
     # Guard against zero max_norm — no clipping needed
     if max_norm <= 0.0:
+        logger.debug("clip_gradients() max_norm=0.0 skipping")
         return
 
     # Step 1: Compute current global gradient norm
     # global_norm is the L2 norm of all gradient elements concatenated
     global_norm = compute_gradient_norm(grads)  # scalar float
+    logger.debug("clip_gradients() pre_clip_norm=%.6f max_norm=%.4f", global_norm, max_norm)
 
     # If norm is already below max_norm, nothing to do
     if global_norm <= max_norm:
+        logger.debug("clip_gradients() norm %.6f <= max_norm %.4f skipping", global_norm, max_norm)
         return
+
+    # Step 2: Scale all gradients uniformly toward max_norm
+    logger.info("clip_gradients() clipping global_norm=%.6f → max_norm=%.4f factor=%.6f", global_norm, max_norm, max_norm / global_norm)
 
     # Step 2: Scale all gradients uniformly toward max_norm
     # scaling_factor = max_norm / global_norm  (always < 1.0 here)

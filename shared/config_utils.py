@@ -26,11 +26,14 @@ Phase keys in DEFAULTS:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["DEFAULTS", "ConfigSource", "load_config", "parse_config_file", "parse_cli_to_config"]
 
@@ -342,18 +345,27 @@ def load_config(
     merged: dict[str, TrackedValue] = {}
     for key, value in defaults_data.items():
         merged[key] = TrackedValue.from_default(key, value)
+    logger.info("config_load() defaults_count=%d phase=%s", len(defaults_data), phase)
 
     # 2) Config file
+    logger.debug("config_load() loading_file config_file=%s", config_file)
     _apply_file(merged, config_file)
+    logger.debug("config_load() file_applied")
 
     # 3) Environment variables
+    logger.debug("config_load() loading_env env_prefix=%s", env_prefix)
     _apply_env(merged, env_prefix)
+    logger.debug("config_load() env_applied")
 
     # 4) CLI args (highest priority)
+    logger.debug("config_load() loading_cli")
     cli_data = parse_cli_to_config(args, phase)
+    merged_cli_count = 0
     for key, value in cli_data.items():
         if key == "phase":
             continue
         merged[key] = TrackedValue.from_cli(key, value)
+        merged_cli_count += 1
+    logger.info("config_load() cli_overrides=%d merged_total=%d", merged_cli_count, len(merged))
 
     return merged

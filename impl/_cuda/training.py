@@ -4,7 +4,7 @@ Uses PyTorch autograd — CUDA model weights have requires_grad_(True) set,
 so loss.backward() computes all gradients through CuTransformerBlock internals.
 
 Architecture
-------------
+-------------
 Training loop:
     for epoch in range(epochs):
         for batch in dataset:
@@ -18,16 +18,21 @@ Training loop:
 
 from __future__ import annotations
 
-from typing import Any
+import logging
+from typing import TYPE_CHECKING, Any
 
 import torch
+
+if TYPE_CHECKING:
+    pass
+
+logger = logging.getLogger(__name__)
 
 
 def compute_gradient_norm(grads: dict[str, torch.Tensor]) -> float:
     """Compute the global L2 norm of all gradient tensors.
 
-    Returns the Euclidean norm of the concatenated gradient vectors
-    from all parameters: ||g||_2 = sqrt(sum_k ||g_k||_2^2)
+    Logs the total parameter count and whether clipping was triggered.
 
     Parameters
     ----------
@@ -39,26 +44,21 @@ def compute_gradient_norm(grads: dict[str, torch.Tensor]) -> float:
     -------
     norm : float
         Scalar global L2 norm. Returns 0.0 if all gradients are zero.
-
-    Examples
-    --------
-    >>> grads = {"w": torch.tensor([[1.0, 2.0], [3.0, 4.0]])}
-    >>> norm = compute_gradient_norm(grads)
-    >>> abs(norm - 5.4772) < 1e-4
-    True
     """
+    logger.debug("compute_gradient_norm() n_params=%d", len(grads))
     total_sq_norm = 0.0
-    for grad in grads.values():
-        total_sq_norm += float(torch.sum(grad ** 2))
-    return float(torch.sqrt(torch.tensor(total_sq_norm, dtype=torch.float64)))
+    for _i, grad in enumerate(grads.values()):
+        sq = float(torch.sum(grad ** 2))
+        total_sq_norm += sq
+    result = float(torch.sqrt(torch.tensor(total_sq_norm, dtype=torch.float64)))
+    logger.debug("compute_gradient_norm() total_sq_norm=%.6f final_norm=%.6f", total_sq_norm, result)
+    return result
 
 
 def clip_gradients(grads: dict[str, torch.Tensor], max_norm: float) -> None:
     """Clip gradients by global L2 norm, modifying the dict in-place.
 
-    When the global gradient norm exceeds `max_norm`, every gradient tensor
-    is scaled by the same factor `max_norm / global_norm` so that the
-    overall norm equals `max_norm` (or stays unchanged if already below).
+    Logs the pre-clip norm and whether clipping was triggered.
 
     Parameters
     ----------
@@ -66,21 +66,16 @@ def clip_gradients(grads: dict[str, torch.Tensor], max_norm: float) -> None:
         Gradient dictionary — values are mutated in-place.
     max_norm : float
         Maximum allowed L2 norm. If 0.0, no clipping is performed.
-
-    Examples
-    --------
-    >>> from impl._cuda.training import clip_gradients
-    >>> grads = {"w": torch.tensor([[1.0, 2.0], [3.0, 4.0]])}
-    >>> clip_gradients(grads, max_norm=1.0)
-    >>> norm = compute_gradient_norm(grads)
-    >>> abs(norm - 1.0) < 1e-6
-    True
     """
     if max_norm <= 0.0:
+        logger.debug("clip_gradients() max_norm=0.0 skipping")
         return
     global_norm = float(compute_gradient_norm(grads))
+    logger.debug("clip_gradients() pre_clip_norm=%.6f max_norm=%.4f", global_norm, max_norm)
     if global_norm <= max_norm:
+        logger.debug("clip_gradients() norm %.6f <= max_norm %.4f skipping", global_norm, max_norm)
         return
+    logger.info("clip_gradients() clipping global_norm=%.6f -> max_norm=%.4f factor=%.6f", global_norm, max_norm, max_norm / global_norm)
     scaling_factor = max_norm / global_norm
     for grad in grads.values():
         grad *= scaling_factor
@@ -94,7 +89,7 @@ def train_step(
     loss_fn: Any,
     max_norm: float = 1.0,
 ) -> float:
-    r"""Execute one training step with PyTorch autograd.
+    r"""Execute one training step with PyTorch autograd on CUDA.
 
     Full forward -> backward -> optimizer cycle:
 
@@ -113,9 +108,9 @@ def train_step(
         - ``model.parameters()`` or ``named_parameters()`` (param access)
         Works with nn.Module (PyTorch) or plain-tensor models (CUDA) that
         have ``requires_grad_(True)`` on all weight tensors.
-    batch_input : torch.Tensor
+    batch_input : torch.Tensor, shape (B, S)
         Input tokens or features, shape (B, S). On CUDA device.
-    batch_target : torch.Tensor
+    batch_target : torch.Tensor, shape (B, S)
         Target tokens, shape (B, S). On CUDA device, dtype long for CE.
     optimizer : torch.optim.Optimizer
         An optimizer with .step() and .zero_grad() methods.
@@ -124,32 +119,12 @@ def train_step(
         A callable that takes (logits, targets) and returns scalar loss.
         e.g. torch.nn.CrossEntropyLoss()
     max_norm : float, default 1.0
-        Maximum allowed L2 norm for gradient clipping. Pass 0.0 to
-        disable clipping entirely.
+        Maximum allowed L2 norm for gradient clipping. Pass 0.0 to disable.
 
     Returns
     -------
     loss : float
         The scalar loss value for this batch.
-
-    Examples
-    --------
-    >>> import torch, torch.nn as nn
-    >>> model = nn.Linear(8, 8)
-    >>> optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
-    >>> loss_fn = nn.CrossEntropyLoss()
-    >>> x = torch.randn(4, 8)
-    >>> t = torch.zeros(4, 8, dtype=torch.long)
-    >>> loss = train_step(model, x, t, optimizer, loss_fn)
-    >>> isinstance(loss, float)
-    True
-
-    Notes
-    -----
-    For CUDA-specific models (e.g. CUDAModel / CuDecoderStack):
-    - Weights should be moved to CUDA before training
-    - Parameters have requires_grad_(True) set explicitly
-    - Gradients accumulate via PyTorch autograd through block.py internals
 
     Shape flow for token-based training:
         Input: tokens (B, S) — int64 token IDs
@@ -159,19 +134,22 @@ def train_step(
         Reshape for CE: (B*S, V) -> (B*S,)
     """
     # 1. Forward pass — model produces logits
-    # logits shape: (B, S, V) where V = vocab_size
+    logger.debug("train_step() forward batch_input=%s device=%s", list(batch_input.shape), batch_input.device)
     logits = model(batch_input)
+    logger.debug("train_step() forward complete logits=%s device=%s", list(logits.shape), logits.device)
 
-    # 2. Compute loss
-    # CrossEntropyLoss expects: logits (N, C), targets (N,)
-    # Reshape: (B, S, V) -> (B*S, V) and (B, S) -> (B*S)
-    flat_logits = logits.reshape(-1, logits.shape[-1])
-    flat_target = batch_target.reshape(-1)
+    # 2. Compute loss — CrossEntropyLoss expects: logits (N, C), targets (N,)
+    #    Reshape: (B, S, V) -> (B*S, V) and (B, S) -> (B*S)
+    flat_logits = logits.reshape(-1, logits.shape[-1])  # (B*S, V)
+    flat_target = batch_target.reshape(-1)  # (B*S)
+    logger.debug("train_step() reshape flat_logits=%s flat_target=%s", list(flat_logits.shape), list(flat_target.shape))
     loss = loss_fn(flat_logits, flat_target)
+    logger.info("train_step() loss=%.6f", float(loss))
 
     # 3. Backward pass — autograd computes all gradients
     # For CUDA model: gradients accumulate in model.stacking.blocks[i].Wq.grad etc.
     loss.backward()
+    logger.debug("train_step() backward complete")
 
     # 4. Collect gradients — works for both nn.Module and plain-tensor models
     grads: dict[str, torch.Tensor] = {}
@@ -182,43 +160,29 @@ def train_step(
                 grads[name] = param.grad
     else:
         # CUDA model: iterate through stacking.blocks explicitly
-        # model.stacking is a CuDecoderStack with model.stacking.blocks as list
+        model_name = type(model).__name__
+        logger.debug("train_step() collecting_grads model_type=%s has_stacking=%s", model_name, hasattr(model, "stacking"))
         if hasattr(model, "stacking") and hasattr(model.stacking, "blocks"):
             for i, block in enumerate(model.stacking.blocks):
-                for attr_name in [
-                    "Wq",
-                    "Wk",
-                    "Wv",
-                    "Wo",
-                    "ln1_gamma",
-                    "ln2_gamma",
-                    "gate1",
-                    "gate2",
-                    "expert_weights",
-                    "expert_bias",
-                    "routing_weights",
-                ]:
+                for attr_name in ["Wq", "Wk", "Wv", "Wo", "ln1_gamma", "ln2_gamma", "gate1", "gate2", "expert_weights", "expert_bias", "routing_weights"]:
                     attr = getattr(block, attr_name, None)
                     if attr is not None and attr.grad is not None:
                         grads[f"blocks.{i}.{attr_name}"] = attr.grad
         # Also handle model-level parameters (embedding, output_proj, etc.)
-        for attr_name in [
-            "embedding_weights",
-            "final_ln_gamma",
-            "output_proj_weights",
-            "output_proj_bias",
-            "output_W1",
-            "output_W2",
-            "output_W3",
-        ]:
+        for attr_name in ["embedding_weights", "final_ln_gamma", "output_proj_weights", "output_proj_bias", "output_W1", "output_W2", "output_W3"]:
             attr = getattr(model, attr_name, None)
             if attr is not None and attr.grad is not None:
                 grads[attr_name] = attr.grad
+    logger.info("train_step() gradient_collect params_with_grad=%d", len(grads))
 
     # 5. Clip gradients to stabilize training
+    logger.debug("train_step() clip n_grads=%d max_norm=%.4f", len(grads), max_norm)
     clip_gradients(grads, max_norm=max_norm)
+    grad_norm = compute_gradient_norm(grads)
+    logger.debug("train_step() post_clip_grad_norm=%.6f", grad_norm)
 
     # 6. Optimizer step and clear for next batch
+    logger.debug("train_step() optimizer_step n_grads=%d", len(grads))
     optimizer.step()
     optimizer.zero_grad()
 

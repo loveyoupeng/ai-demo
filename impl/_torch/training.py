@@ -6,8 +6,12 @@ use with the PyTorch decoder-only transformer.
 
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 
 def clip_gradients(grads: dict[str, torch.Tensor], max_norm: float) -> None:
@@ -22,10 +26,14 @@ def clip_gradients(grads: dict[str, torch.Tensor], max_norm: float) -> None:
 
     """
     if max_norm <= 0.0:
+        logger.debug("clip_gradients() max_norm=0.0 skipping")
         return
     global_norm = float(compute_gradient_norm(grads))
+    logger.debug("clip_gradients() pre_clip_norm=%.6f max_norm=%.4f", global_norm, max_norm)
     if global_norm <= max_norm:
+        logger.debug("clip_gradients() norm %.6f <= max_norm %.4f skipping", global_norm, max_norm)
         return
+    logger.info("clip_gradients() clipping global_norm=%.6f → max_norm=%.4f factor=%.6f", global_norm, max_norm, max_norm / global_norm)
     scaling_factor = max_norm / global_norm
     for grad in grads.values():
         grad *= scaling_factor  # in-place scalar multiplication
@@ -79,25 +87,33 @@ def train_step(
 
     """
     # 1. Forward pass
+    logger.debug("train_step() forward batch_input=%s", list(batch_input.shape))
     logits = model(batch_input)
+    logger.debug("train_step() forward complete logits=%s", list(logits.shape))
 
     # 2. Compute loss — reshape logits (B, S, V) → (B*S, V) and
     #    targets (B, S) → (B*S) for CrossEntropyLoss compatibility
     flat_logits = logits.reshape(-1, logits.shape[-1])
     flat_target = batch_target.reshape(-1)
     loss = loss_fn(flat_logits, flat_target)
+    logger.info("train_step() loss=%.6f", float(loss))
 
     # 3. Backward pass: autograd computes all gradients
     loss.backward()
+    logger.debug("train_step() backward complete")
 
     # 4. Clip gradients to stabilize training (especially with Post-Norm)
     grads: dict[str, torch.Tensor] = {}
     for name, param in model.named_parameters():
         if param.grad is not None:
             grads[name] = param.grad
+    logger.debug("train_step() gradient_clip n_params=%d max_norm=%.4f", len(grads), max_norm)
     clip_gradients(grads, max_norm=max_norm)
+    grad_norm = compute_gradient_norm(grads)
+    logger.debug("train_step() post_clip_grad_norm=%.6f", grad_norm)
 
     # 5. Optimizer step: apply gradients
+    logger.debug("train_step() optimizer_step n_params=%d", len(grads))
     optimizer.step()
 
     # 6. Clear gradients for next step

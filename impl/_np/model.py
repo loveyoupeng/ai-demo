@@ -3,10 +3,14 @@
 Forward: tokens → embedding → stack → layernorm → SwiGLU(output_proj) → logits [B, S, V]
 """
 
+import logging
+
 import numpy as np
 
 from impl._np.modules import DecoderStack, Embedding, RMSNorm, SwiGLUFFN
 from shared.constants import Block, Transformer
+
+logger = logging.getLogger(__name__)
 
 
 class NumPyModel:
@@ -129,7 +133,6 @@ class NumPyModel:
         self,
         input_ids: np.ndarray,
         embedding_weights: np.ndarray | None = None,
-        **kwargs,
     ) -> np.ndarray:
         """Forward pass through the complete model.
 
@@ -138,6 +141,7 @@ class NumPyModel:
         input_ids : np.ndarray, shape (batch_size, seq_len), dtype int32
             Token IDs.
         embedding_weights : np.ndarray, shape (vocab_size, embed_dim) — if None, use self.weights
+            Optional custom embedding weights matrix.
 
         Returns
         -------
@@ -178,6 +182,16 @@ class NumPyModel:
 
         # Reshape back: (B*S, V) → (B, S, V)
         logits = logits_flat.reshape(batch_size, seq_len, self.vocab_size)  # (B, S, V)
+
+        logger.debug(
+            "NumPyModel.forward() input_ids=%s → embedding=%s → stack=%s → final_rmsnorm=%s → SwiGLU=%s → logits=%s",
+            [batch_size, seq_len],
+            [batch_size, seq_len, self.embed_dim],
+            [batch_size, seq_len, self.embed_dim],
+            [batch_size, seq_len, self.embed_dim],
+            [batch_size, seq_len, self.embed_dim],
+            [batch_size, seq_len, self.vocab_size],
+        )
 
         return logits
 
@@ -254,21 +268,21 @@ class NumPyModel:
         for layer_idx, block in enumerate(self.stack.blocks):
             ln1_key = Block.ln1_gamma(layer_idx)
             ln2_key = Block.ln2_gamma(layer_idx)
-            block.ln1_gamma = np.copy(params_dict[ln1_key])
-            block.ln2_gamma = np.copy(params_dict[ln2_key])
+            block.ln1_gamma = np.copy(params_dict[ln1_key])  # type: ignore[reportAttributeAccessIssue]
+            block.ln2_gamma = np.copy(params_dict[ln2_key])  # type: ignore[reportAttributeAccessIssue]
 
             # Gate parameters
-            block.gate1 = np.copy(params_dict[Block.gate1(layer_idx)])
-            block.gate2 = np.copy(params_dict[Block.gate2(layer_idx)])
+            block.gate1 = np.copy(params_dict[Block.gate1(layer_idx)])  # type: ignore[reportAttributeAccessIssue]
+            block.gate2 = np.copy(params_dict[Block.gate2(layer_idx)])  # type: ignore[reportAttributeAccessIssue]
 
             # MHA weights
             for param_name in ("Wq", "bq", "Wk", "bk", "Wv", "bv", "Wo", "bo"):
                 key = Block.mha(layer_idx, param_name)
-                setattr(block.mha, param_name, np.copy(params_dict[key]))
+                setattr(block.mha, param_name, np.copy(params_dict[key]))  # type: ignore[reportAttributeAccessIssue]
 
             # MoE
-            block.moe.router = np.copy(params_dict[Block.moe_router(layer_idx)])
-            block.moe.bias = np.copy(params_dict[Block.moe_bias(layer_idx)])
+            block.moe.router = np.copy(params_dict[Block.moe_router(layer_idx)])  # type: ignore[reportAttributeAccessIssue]
+            block.moe.bias = np.copy(params_dict[Block.moe_bias(layer_idx)])  # type: ignore[reportAttributeAccessIssue]
             for expert_idx, expert in enumerate(block.moe.experts):
                 for pw in ("W1", "W2", "W3"):
                     key = Block.moe_expert(layer_idx, expert_idx, pw)
@@ -292,11 +306,11 @@ class NumPyModel:
             params_dict[Transformer.OUTPUT_PROJ_B],
         )
 
-    def backward(self, logits: np.ndarray, targets: np.ndarray, input_ids: np.ndarray) -> dict[str, np.ndarray]:
+    def backward(self, _logits: np.ndarray, targets: np.ndarray, input_ids: np.ndarray) -> dict[str, np.ndarray]:
         """Compute gradients for all parameters using numerical differentiation.
 
         Since NumPy doesn't have autograd, we use finite-difference to compute
-        gradients. The logits parameter is kept for API compatibility but gradients
+        gradients. The _logits parameter is kept for API compatibility but gradients
         are computed by re-running the forward pass.
 
         Parameters
@@ -314,6 +328,12 @@ class NumPyModel:
             Dictionary of gradients keyed by parameter name.
 
         """
+        logger.debug(
+            "NumPyModel.backward() input_shape=%s param_count=%d",
+            list(input_ids.shape),
+            sum(p.size for p in self.get_all_parameters().values()),
+        )
+
         grads: dict[str, np.ndarray] = {}
 
         # For testing purposes, we need all parameters to have gradients

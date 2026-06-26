@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -29,6 +30,8 @@ _project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_project_root))
 
 import numpy as np  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 
 def create_argparser() -> argparse.ArgumentParser:
@@ -373,14 +376,20 @@ def main() -> int:
         Exit code (0 for success, 1 for user error, 2 for runtime error).
     """
     try:
+        from shared.utils.logger_setup import setup_logging
+
+        setup_logging()
         parser = create_argparser()
         args = parser.parse_args()
 
         backend = args.backend
         model_path = args.model
+        logger.info("run_inference() starting backend=%s model=%s", backend, model_path)
 
         # Load model and config
+        logger.info("run_inference() loading_model path=%s backend=%s", model_path, backend)
         model, config = load_model_from_checkpoint(model_path, backend)
+        logger.info("run_inference() model_loaded vocab=%d context=%d", config.get("vocab_size", 256), config.get("context_length", 128))
 
         # Decode strategy from args
         temp = args.temperature if not args.greedy else 0.0
@@ -391,16 +400,24 @@ def main() -> int:
         print(f"Vocab: {config.get('vocab_size', 256)}")
         print(f"Context: {config.get('context_length', 128)}")
         print(f"Embed: {config.get('embed_dim', 256)}, Layers: {config.get('n_layers', 4)}")
+        logger.info("run_inference() config backend=%s vocab=%d context=%d layers=%d", backend, config.get("vocab_size", 256), config.get("context_length", 128), config.get("n_layers", 4))
         print()
 
         if args.prompt:
             # Single prompt mode
+            logger.info("run_inference() single_prompt mode prompt=%r max_tokens=%d temp=%.2f top_k=%d", args.prompt, args.max_new_tokens, args.temperature if not args.greedy else 0.0, args.top_k)
             result = generate_single(model, config, args.prompt, args.max_new_tokens, temp, top_k_val, backend)
+            logger.info(
+                "run_inference() generation_complete prompt_len=%d gen_len=%d",
+                len(result["input_tokens"]),
+                len(result["generated_tokens"]),
+            )
             print(f"Prompt:     {result['prompt_text']}")
             print(f"Generated:  {result['generated_text']}")
             print(f"Full seq:   {result['full_text']}")
         else:
             # Interactive mode
+            logger.info("run_inference() interactive_mode")
             print("Interactive mode — type prompts (Ctrl+D to exit):")
             print()
 
@@ -408,15 +425,23 @@ def main() -> int:
                 line = line.rstrip("\n")
                 if not line:
                     continue
+                logger.info("run_inference() interactive input prompt=%r", line)
                 result = generate_single(model, config, line, args.max_new_tokens, temp, top_k_val, backend)
+                logger.info(
+                    "run_inference() interactive output prompt_len=%d gen_len=%d",
+                    len(result["input_tokens"]),
+                    len(result["generated_tokens"]),
+                )
                 print(f"Prompt:     {result['prompt_text']}")
                 print(f"Generated:  {result['generated_text']}")
                 print(f"Full seq:   {result['full_text']}")
                 print()
 
+        logger.info("run_inference() completed successfully")
         return 0
 
     except Exception as e:
+        logger.error("run_inference() error exception=%s", str(e))
         print(f"Error: {e}", file=sys.stderr)
         import traceback
 

@@ -27,6 +27,7 @@ Environment variables:
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import time
 from pathlib import Path
@@ -36,6 +37,8 @@ _project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_project_root))
 
 import numpy as np  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 
 def create_argparser() -> argparse.ArgumentParser:
@@ -461,11 +464,27 @@ def run_training_numpy(model, optimizer, loss_fn, config: dict, dataset) -> list
             if total_batches % max(1, total_batches // 5) == 0 or total_batches == 1:
                 current_loss = float(np.mean(epoch_losses))
                 total_steps = epoch * total_batches + total_batches
+                logger.info(
+                    "run_training_numpy() epoch=%d/%d batch=%d/%d step=%d loss=%.4f",
+                    epoch + 1,
+                    epochs,
+                    total_batches,
+                    total_batches,
+                    total_steps,
+                    current_loss,
+                )
                 print(f"  Step {total_steps}: loss={current_loss:.4f}")
 
         avg_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0
         epoch_time = time.time() - epoch_start
         losses_per_epoch.append(avg_loss)
+        logger.info(
+            "run_training_numpy() epoch=%d/%d avg_loss=%.4f time=%.2fs",
+            epoch + 1,
+            epochs,
+            avg_loss,
+            epoch_time,
+        )
         print(f"Epoch {epoch + 1}/{epochs}: avg_loss={avg_loss:.4f} time={epoch_time:.2f}s")
 
     return losses_per_epoch
@@ -528,11 +547,27 @@ def run_training_torch(model, optimizer, loss_fn, config: dict, dataset) -> list
             if total_batches % max(1, total_batches // 5) == 0 or total_batches == 1:
                 current_loss = float(torch.tensor(epoch_losses).mean().item())
                 total_steps = epoch * total_batches + total_batches
+                logger.info(
+                    "run_training_torch() epoch=%d/%d batch=%d/%d step=%d loss=%.4f",
+                    epoch + 1,
+                    epochs,
+                    total_batches,
+                    total_batches,
+                    total_steps,
+                    current_loss,
+                )
                 print(f"  Step {total_steps}: loss={current_loss:.4f}")
 
         avg_loss = float(torch.tensor(epoch_losses).mean().item()) if epoch_losses else 0.0
         epoch_time = time.time() - epoch_start
         losses_per_epoch.append(avg_loss)
+        logger.info(
+            "run_training_torch() epoch=%d/%d avg_loss=%.4f time=%.2fs",
+            epoch + 1,
+            epochs,
+            avg_loss,
+            epoch_time,
+        )
         print(f"Epoch {epoch + 1}/{epochs}: avg_loss={avg_loss:.4f} time={epoch_time:.2f}s")
 
     return losses_per_epoch
@@ -592,11 +627,27 @@ def run_training_cuda(model, optimizer, loss_fn, config: dict, dataset, max_norm
             if total_batches % max(1, total_batches // 5) == 0 or total_batches == 1:
                 current_loss = float(torch.tensor(epoch_losses).mean().item())
                 total_steps = epoch * total_batches + total_batches
+                logger.info(
+                    "run_training_cuda() epoch=%d/%d batch=%d/%d step=%d loss=%.4f",
+                    epoch + 1,
+                    epochs,
+                    total_batches,
+                    total_batches,
+                    total_steps,
+                    current_loss,
+                )
                 print(f"  Step {total_steps}: loss={current_loss:.4f}")
 
         avg_loss = float(torch.tensor(epoch_losses).mean().item()) if epoch_losses else 0.0
         epoch_time = time.time() - epoch_start
         losses_per_epoch.append(avg_loss)
+        logger.info(
+            "run_training_cuda() epoch=%d/%d avg_loss=%.4f time=%.2fs",
+            epoch + 1,
+            epochs,
+            avg_loss,
+            epoch_time,
+        )
         print(f"Epoch {epoch + 1}/{epochs}: avg_loss={avg_loss:.4f} time={epoch_time:.2f}s")
 
     return losses_per_epoch
@@ -707,6 +758,9 @@ def main() -> int:
         Exit code (0 for success, 1 for user error, 2 for runtime error).
     """
     try:
+        from shared.utils.logger_setup import setup_logging
+
+        setup_logging()
         parser = create_argparser()
         args = parser.parse_args()
         backend = args.backend
@@ -714,22 +768,35 @@ def main() -> int:
         # Build config
         config = build_config(args, backend)
 
-        print(f"Backend: {backend}")
-        print(f"Vocab: {config.get('vocab_size', 256)}, Context: {config.get('context_length', 128)}")
-        print(f"Embed: {config.get('embed_dim', 256)}, Layers: {config.get('n_layers', 4)}")
-        print(f"Heads: {config.get('n_heads', 8)}, Experts: {config.get('n_experts', 4)}")
-        print(f"Epochs: {config.get('epochs', 5)}, Batch: {config.get('batch_size', 64)}")
-        print(f"LR: {config.get('lr', 0.001)}, Seed: {config.get('seed', 42)}")
-        print()
+        logger.info(
+            "train() backend=%s vocab=%d context=%d embed=%d layers=%d heads=%d "
+            "experts=%d epochs=%d batch_size=%d lr=%g seed=%d",
+            backend,
+            config.get("vocab_size", 256) if isinstance(config.get("vocab_size"), int) else 256,
+            config.get("context_length", 128) if isinstance(config.get("context_length"), int) else 128,
+            config.get("embed_dim", 256) if isinstance(config.get("embed_dim"), int) else 256,
+            config.get("n_layers", 4) if isinstance(config.get("n_layers"), int) else 4,
+            config.get("n_heads", 8) if isinstance(config.get("n_heads"), int) else 8,
+            config.get("n_experts", 4) if isinstance(config.get("n_experts"), int) else 4,
+            config.get("epochs", 5) if isinstance(config.get("epochs"), int) else 5,
+            config.get("batch_size", 64) if isinstance(config.get("batch_size"), int) else 64,
+            config.get("lr", 0.001) if isinstance(config.get("lr"), float) else 0.001,
+            config.get("seed", 42) if isinstance(config.get("seed"), int) else 42,
+        )
 
         # Build model
         model, cfg = build_model(backend, config)
+        logger.info(
+            "train() model_built backend=%s", backend
+        )
         print("Model built successfully")
 
         # Get dataset
         dataset_path = config.get("dataset_path", "resource/tinystories/")
         synthetic = config.get("synthetic", False)
+        logger.info("train() loading dataset path=%s synthetic=%s", dataset_path, synthetic)
         dataset = get_dataset(dataset_path, synthetic, config.get("vocab_size", 256), config.get("context_length", 128))
+        logger.info("train() dataset_loaded samples=%d", len(dataset))
         print(f"Dataset: {len(dataset)} samples")
 
         # Initialize loss and optimizer
@@ -768,13 +835,18 @@ def main() -> int:
             else:
                 optimizer = optim.AdamW(model.parameters(), lr=config.get("lr", 0.001))
 
+        logger.info("train() optimizer_initialized backend=%s lr=%g", backend, config.get("lr", 0.001))
+
         # Run training
+        logger.info("train() starting training epochs=%d", config.get("epochs", 5))
         losses = run_training(model, optimizer, loss_fn, config, dataset, backend)
 
         # Save checkpoint
         save_dir = config.get("save_dir", "resource/models/")
+        logger.info("train() saving_checkpoint dir=%s backend=%s", save_dir, backend)
         save_checkpoint(model, config, cfg, save_dir, backend)
 
+        logger.info("train() complete final_losses=%s", [f"{v:.4f}" for v in losses])
         print()
         print("Training complete!")
         print(f"Final losses per epoch: {[f'{v:.4f}' for v in losses]}")
