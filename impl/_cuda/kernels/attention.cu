@@ -42,23 +42,21 @@ __global__ void attention_softmax_f32(
     int num_keys
 )
 {
-    int total_threads_in_grid = gridDim.x * blockDim.x;
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = total_threads_in_grid;
-
-    // Each row is one query position
-    // For each row, all threads participate to compute max, exp, sum
-
     int row = blockIdx.x;
     if (row >= total_rows) return;
 
-    // Shared memory for block-wide reduction (max and sum)
-    // We use a simple 4KB shared memory for intermediate values
+    // Shared memory layout (the launcher allocates 514 floats):
+    //   [0 .. 255]  : per-warp max partials
+    //   [256]       : block max result
+    //   [257..512]  : per-warp sum partials
+    //   [513]       : block sum result
     extern __shared__ char shared_mem[];
     float* s_max = reinterpret_cast<float*>(shared_mem);
-    float* s_sum = reinterpret_cast<float*>(shared_mem + 256 * 4);
+    float* s_block_max = reinterpret_cast<float*>(shared_mem + 256 * 4);
+    float* s_sum = reinterpret_cast<float*>(shared_mem + 257 * 4);
+    float* s_block_sum = reinterpret_cast<float*>(shared_mem + (257 + 256) * 4);
 
-    // Step 1: Each thread computes local max of its elements in this row
+    // Step 1: each thread takes the max over the elements it owns in this row.
     float local_max = -1e9f;
     for (int i = threadIdx.x; i < num_keys; i += blockDim.x) {
         float val = scores[row * num_keys + i];
@@ -67,7 +65,7 @@ __global__ void attention_softmax_f32(
         }
     }
 
-    // Step 2: Warp-level max reduction (intra-warp)
+    // Step 2: warp-level max reduction — lane 0 of each warp holds the warp max.
     float warp_max = local_max;
     for (int mask = 16; mask > 0; mask >>= 1) {
         float other = __shfl_down_sync(0xFFFFFFFF, warp_max, mask);
@@ -75,40 +73,62 @@ __global__ void attention_softmax_f32(
             warp_max = other;
         }
     }
-    // Step 3: Block-level max (inter-warp via shared memory)
+
+    // Step 3: block-level max. Every warp publishes its partial; warp 0
+    // combines them and publishes the result so ALL threads (not just warp 0)
+    // read the true row max.
+    int warp_id = threadIdx.x / 32;
+    if (threadIdx.x % 32 == 0) {
+        s_max[warp_id] = warp_max;
+    }
+    __syncthreads();
     if (threadIdx.x == 0) {
-        s_max[0] = warp_max;
+        int num_warps = (blockDim.x + 31) / 32;
+        float block_max = -1e9f;
+        for (int i = 0; i < num_warps; i++) {
+            if (s_max[i] > block_max) {
+                block_max = s_max[i];
+            }
+        }
+        s_block_max[0] = block_max;
     }
     __syncthreads();
-    float block_max = s_max[0];
-    __syncthreads();
+    float block_max_val = s_block_max[0];
 
-    // Step 4: Each thread computes exp(local_i - block_max) and sum
+    // Step 4: each thread sums exp(value - block_max) over its elements.
     float local_exp_sum = 0.0f;
-    float exp_vals[256];  // max 256 elements per row (blockDim.x)
     for (int i = threadIdx.x; i < num_keys; i += blockDim.x) {
-        float shifted = scores[row * num_keys + i] - block_max;
-        exp_vals[i] = expf(shifted);
-        local_exp_sum += exp_vals[i];
+        float shifted = scores[row * num_keys + i] - block_max_val;
+        local_exp_sum += expf(shifted);
     }
 
-    // Step 5: Warp-level sum reduction
+    // Step 5: warp-level sum reduction.
     float warp_sum = local_exp_sum;
     for (int mask = 16; mask > 0; mask >>= 1) {
         warp_sum += __shfl_down_sync(0xFFFFFFFF, warp_sum, mask);
     }
 
-    // Step 6: Block-level sum (inter-warp)
-    if (threadIdx.x == 0) {
-        s_sum[0] = warp_sum;
+    // Step 6: block-level sum — same publish pattern as the max.
+    if (threadIdx.x % 32 == 0) {
+        s_sum[warp_id] = warp_sum;
     }
     __syncthreads();
-    float block_sum = s_sum[0];
+    if (threadIdx.x == 0) {
+        int num_warps = (blockDim.x + 31) / 32;
+        float total = 0.0f;
+        for (int i = 0; i < num_warps; i++) {
+            total += s_sum[i];
+        }
+        s_block_sum[0] = total;
+    }
     __syncthreads();
+    float block_sum = s_block_sum[0];
 
-    // Step 7: Normalize each element
+    // Step 7: normalize. exp is recomputed (it is cheap) so the kernel needs
+    // no per-thread storage for the exponentials.
     for (int i = threadIdx.x; i < num_keys; i += blockDim.x) {
-        output[row * num_keys + i] = exp_vals[i] / (block_sum + 1e-9f);
+        float shifted = scores[row * num_keys + i] - block_max_val;
+        output[row * num_keys + i] = expf(shifted) / (block_sum + 1e-9f);
     }
 }
 
@@ -126,10 +146,18 @@ __global__ void attention_softmax_f64(
     int row = blockIdx.x;
     if (row >= total_rows) return;
 
+    // Shared memory layout (the launcher allocates 514 doubles):
+    //   [0 .. 255]  : per-warp max partials
+    //   [256]       : block max result
+    //   [257..512]  : per-warp sum partials
+    //   [513]       : block sum result
     extern __shared__ char shared_mem[];
     double* s_max = reinterpret_cast<double*>(shared_mem);
-    double* s_sum = reinterpret_cast<double*>(shared_mem + 256 * 8);
+    double* s_block_max = reinterpret_cast<double*>(shared_mem + 256 * 8);
+    double* s_sum = reinterpret_cast<double*>(shared_mem + 257 * 8);
+    double* s_block_sum = reinterpret_cast<double*>(shared_mem + (257 + 256) * 8);
 
+    // Step 1: each thread takes the max over the elements it owns in this row.
     double local_max = -1e18;
     for (int i = threadIdx.x; i < num_keys; i += blockDim.x) {
         double val = scores[row * num_keys + i];
@@ -138,7 +166,7 @@ __global__ void attention_softmax_f64(
         }
     }
 
-    // Warp-level max reduction
+    // Step 2: warp-level max reduction — lane 0 of each warp holds the warp max.
     double warp_max = local_max;
     for (int mask = 16; mask > 0; mask >>= 1) {
         double other = __shfl_down_sync(0xFFFFFFFF, warp_max, mask);
@@ -146,34 +174,59 @@ __global__ void attention_softmax_f64(
             warp_max = other;
         }
     }
+
+    // Step 3: block-level max — publish pattern shared with the float32 kernel.
+    int warp_id = threadIdx.x / 32;
+    if (threadIdx.x % 32 == 0) {
+        s_max[warp_id] = warp_max;
+    }
+    __syncthreads();
     if (threadIdx.x == 0) {
-        s_max[0] = warp_max;
+        int num_warps = (blockDim.x + 31) / 32;
+        double block_max = -1e18;
+        for (int i = 0; i < num_warps; i++) {
+            if (s_max[i] > block_max) {
+                block_max = s_max[i];
+            }
+        }
+        s_block_max[0] = block_max;
     }
     __syncthreads();
-    double block_max = s_max[0];
-    __syncthreads();
+    double block_max_val = s_block_max[0];
 
+    // Step 4: each thread sums exp(value - block_max) over its elements.
     double local_sum = 0.0;
-    double exp_vals[256];
     for (int i = threadIdx.x; i < num_keys; i += blockDim.x) {
-        double shifted = scores[row * num_keys + i] - block_max;
-        exp_vals[i] = exp(shifted);
-        local_sum += exp_vals[i];
+        double shifted = scores[row * num_keys + i] - block_max_val;
+        local_sum += exp(shifted);
     }
 
+    // Step 5: warp-level sum reduction.
     double warp_sum = local_sum;
     for (int mask = 16; mask > 0; mask >>= 1) {
         warp_sum += __shfl_down_sync(0xFFFFFFFF, warp_sum, mask);
     }
-    if (threadIdx.x == 0) {
-        s_sum[0] = warp_sum;
+
+    // Step 6: block-level sum — same publish pattern as the max.
+    if (threadIdx.x % 32 == 0) {
+        s_sum[warp_id] = warp_sum;
     }
     __syncthreads();
-    double block_sum = s_sum[0];
+    if (threadIdx.x == 0) {
+        int num_warps = (blockDim.x + 31) / 32;
+        double total = 0.0;
+        for (int i = 0; i < num_warps; i++) {
+            total += s_sum[i];
+        }
+        s_block_sum[0] = total;
+    }
     __syncthreads();
+    double block_sum = s_block_sum[0];
 
+    // Step 7: normalize (exp recomputed — no per-thread storage needed).
     for (int i = threadIdx.x; i < num_keys; i += blockDim.x) {
-        output[row * num_keys + i] = exp_vals[i] / (block_sum + 1e-15);
+        double shifted = scores[row * num_keys + i] - block_max_val;
+        output[row * num_keys + i] = exp(shifted) / (block_sum + 1e-15);
     }
 }
 

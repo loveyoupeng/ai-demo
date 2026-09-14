@@ -24,7 +24,8 @@
 
 __device__ float warp_reduce_sum(float val) {
     // Tree-based reduction within a warp (32 threads).
-    // After this, all threads in the warp hold the same sum.
+    // After this, lane 0 of the warp holds the full warp sum; the other
+    // lanes hold partial sums (only lane 0 is consumed below).
     #pragma unroll
     for (int stride = 16; stride >= 1; stride /= 2) {
         val += __shfl_down_sync(0xFFFFFFFF, val, stride);
@@ -33,11 +34,14 @@ __device__ float warp_reduce_sum(float val) {
 }
 
 __device__ float block_reduce_sum(float val) {
-    // Warp-level reduction (all threads in the warp get the warp sum)
+    // Warp-level reduction; lane 0 of each warp holds its warp's sum.
     float warp_sum = warp_reduce_sum(val);
 
-    // Store each warp's partial sum in shared memory (one value per warp)
-    // blockDim.x / 32 warps total
+    // Publish each warp's partial sum (one slot per warp), then have warp 0
+    // combine all partials and write the block total back to slot 0 so that
+    // EVERY thread in EVERY warp reads the full block-wide sum. Publishing
+    // only to warp 0 (via a single-warp __shfl_sync) would leave warps 1..N
+    // with a zero total whenever block size > 32.
     extern __shared__ float shared_sums[];
     int warp_id = threadIdx.x / 32;
     if (threadIdx.x % 32 == 0) {
@@ -45,17 +49,18 @@ __device__ float block_reduce_sum(float val) {
     }
     __syncthreads();
 
-    // Re-reduce: only warp 0 sums all warp partial sums
-    float total = 0.0f;
     if (warp_id == 0) {
         int num_warps = (blockDim.x + 31) / 32;
+        float total = 0.0f;
         for (int i = 0; i < num_warps; i++) {
             total += shared_sums[i];
         }
+        if (threadIdx.x == 0) {
+            shared_sums[0] = total;
+        }
     }
-    // Broadcast the total to all threads in warp 0
-    total = __shfl_sync(0xFFFFFFFF, total, 0);
-    return total;
+    __syncthreads();
+    return shared_sums[0];
 }
 
 __device__ double warp_reduce_sum_d(double val) {
@@ -67,8 +72,11 @@ __device__ double warp_reduce_sum_d(double val) {
 }
 
 __device__ double block_reduce_sum_d(double val) {
+    // Warp-level reduction; lane 0 of each warp holds its warp's sum.
     double warp_sum = warp_reduce_sum_d(val);
 
+    // Same publish pattern as the float version: every warp must be able to
+    // read the full block-wide total, not just warp 0.
     extern __shared__ double shared_sums_d[];
     int warp_id = threadIdx.x / 32;
     if (threadIdx.x % 32 == 0) {
@@ -76,15 +84,18 @@ __device__ double block_reduce_sum_d(double val) {
     }
     __syncthreads();
 
-    double total = 0.0;
     if (warp_id == 0) {
         int num_warps = (blockDim.x + 31) / 32;
+        double total = 0.0;
         for (int i = 0; i < num_warps; i++) {
             total += shared_sums_d[i];
         }
+        if (threadIdx.x == 0) {
+            shared_sums_d[0] = total;
+        }
     }
-    total = __shfl_sync(0xFFFFFFFF, total, 0);
-    return total;
+    __syncthreads();
+    return shared_sums_d[0];
 }
 
 // float32 forward kernel
@@ -103,13 +114,10 @@ __global__ void rmsnorm_forward_kernel(const float* x, const float* gamma,
     // Block-wide reduction of sum of squares
     float sum_sq = block_reduce_sum(val_sq);
 
-    // Compute RMS norm: rsqrt(sum_sq / cols + eps)
-    float inv_rms;
-    if (threadIdx.x == 0) {
-        inv_rms = rsqrtf(sum_sq / cols + eps);
-    }
-    // Broadcast to all threads
-    inv_rms = __shfl_sync(0xFFFFFFFF, inv_rms, 0);
+    // Compute RMS norm: rsqrt(sum_sq / cols + eps).
+    // Every thread holds the correct block-wide sum of squares, so each
+    // thread computes the same inverse RMS locally — no broadcast needed.
+    float inv_rms = rsqrtf(sum_sq / cols + eps);
 
     if (inv_rms == 0.0f) return;
 
@@ -135,11 +143,9 @@ __global__ void rmsnorm_forward_f64_kernel(const double* x, const double* gamma,
 
     double sum_sq = block_reduce_sum_d(val_sq);
 
-    double inv_rms;
-    if (threadIdx.x == 0) {
-        inv_rms = 1.0 / sqrt(sum_sq / cols + eps);
-    }
-    inv_rms = __shfl_sync(0xFFFFFFFF, inv_rms, 0);
+    // Every thread holds the correct block-wide sum of squares, so each
+    // thread computes the same inverse RMS locally — no broadcast needed.
+    double inv_rms = 1.0 / sqrt(sum_sq / cols + eps);
 
     if (inv_rms == 0.0) return;
 

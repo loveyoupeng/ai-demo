@@ -143,6 +143,28 @@ class TestRMSNormCUDA:
         )
 
     @pytest.mark.timeout(30)
+    def test_rmsnorm_multi_warp_float32(self):
+        """Embed dims wider than one warp (D > 32) must normalize EVERY element.
+
+        Regression: the block reduction used to publish the block total only
+        to warp 0, so elements 32..D-1 were scaled by a zero/garbage inv_rms.
+        """
+        skip_if_no_gpu()
+        import torch.nn.functional as F
+
+        from impl._cuda.layernorm import rmsnorm
+
+        for D in (64, 96, 128):
+            torch.manual_seed(42)
+            x = torch.randn(2, 4, D, dtype=torch.float32, device="cuda")
+            gamma = torch.randn(D, dtype=torch.float32, device="cuda")
+            y_cuda = rmsnorm(x, gamma)
+            y_torch = F.rms_norm(x, [D], weight=gamma, eps=1e-6)
+            torch.testing.assert_close(
+                y_cuda, y_torch, rtol=1e-4, atol=1e-4, msg=f"CUDA RMSNorm != torch RMSNorm at D={D} (multi-warp block)"
+            )
+
+    @pytest.mark.timeout(30)
     def test_rmsnorm_shapes(self):
         """RMSNorm preserves shape for 1D, 2D, 3D inputs."""
         skip_if_no_gpu()

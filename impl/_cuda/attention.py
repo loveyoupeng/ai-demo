@@ -207,8 +207,9 @@ def _launch_softmax_kernel(
     grid_size = total_rows
     block_size = 256  # standard block size for warp reduction
 
-    # Shared memory: 2 * 256 * 4 = 2KB (max float for reduction)
-    shared_mem = 2 * 256 * 4
+    # Shared memory: 514 slots (256 max partials + 1 max result + 256 sum
+    # partials + 1 sum result), sized by the score element width.
+    shared_mem = 514 * scores.element_size()
 
     # Build kernel parameters: scores_ptr, output_ptr, total_rows, num_keys
     params_list = [scores, output, ctypes.c_int(total_rows), ctypes.c_int(num_keys)]

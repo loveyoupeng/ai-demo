@@ -58,6 +58,29 @@ class TestScaledAttention:
         torch.testing.assert_close(out_cuda, out_torch, rtol=1e-4, atol=1e-4, msg="CUDA SDPA != torch SDPA (f64)")
 
     @pytest.mark.timeout(30)
+    def test_attention_long_sequence_matches_torch(self):
+        """Rows with more keys than one warp (S > 32) must softmax over ALL keys.
+
+        Regression: the softmax block reduction used to publish the row max
+        and exp-sum only from warp 0, so rows with more than 32 keys were
+        mis-normalized (only the first 32 keys contributed to max/sum).
+        """
+        skip_if_no_gpu()
+        from impl._cuda.attention import scaled_dot_product_attention
+
+        B, H, S, D = 2, 4, 64, 16
+        torch.manual_seed(42)
+        q = torch.randn(B, H, S, D, dtype=torch.float64, device="cuda")
+        k = torch.randn(B, H, S, D, dtype=torch.float64, device="cuda")
+        v = torch.randn(B, H, S, D, dtype=torch.float64, device="cuda")
+
+        out_cuda = scaled_dot_product_attention(q, k, v, is_causal=True)
+        out_torch = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+        torch.testing.assert_close(
+            out_cuda, out_torch, rtol=1e-4, atol=1e-4, msg=f"CUDA SDPA != torch SDPA at S={S} (multi-warp softmax)"
+        )
+
+    @pytest.mark.timeout(30)
     def test_attention_shapes(self):
         """SDPA handles various (B, H, S, D) shapes."""
         skip_if_no_gpu()
