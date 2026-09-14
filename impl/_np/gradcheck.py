@@ -32,9 +32,13 @@ __all__ = ["finite_difference_gradient", "check_model_gradients"]
 
 
 def _loss(model: NumPyModel, input_ids: np.ndarray, targets: np.ndarray) -> float:
-    """Scalar loss the model's backward differentiates (forward + CE)."""
+    """Scalar loss the model's backward differentiates (forward + CE).
+
+    Targets are pre-shifted next-token labels (see ``NumPyModel.backward``),
+    so the CE must use ``shift=False`` to match the analytic gradient.
+    """
     logits = model.forward(input_ids)
-    return float(CrossEntropyLoss().forward(logits, targets))
+    return float(CrossEntropyLoss(shift=False).forward(logits, targets))
 
 
 def finite_difference_gradient(

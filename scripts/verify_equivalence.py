@@ -237,7 +237,7 @@ def _train_step(
         from impl._np.optimizer import AdamW
         from impl._np.training import train_step as np_ts
 
-        ce = CrossEntropyLoss()
+        ce = CrossEntropyLoss(shift=False)  # targets are pre-shifted next-token labels
         opt = AdamW(lr=0.001)
         last = 0.0
         for _ in range(steps):

@@ -62,7 +62,7 @@ class TestFullTraining:
         batch_target = (np.roll(batch_input, 1, axis=-1) % 16).copy()
         batch_target[:, 0] = rng.integers(0, 16, (10,), dtype=np.int32)
 
-        loss_fn = CrossEntropyLoss()
+        loss_fn = CrossEntropyLoss(shift=False)
         optimizer = AdamW(lr=0.05)  # high enough for significant decrease with gradient clipping
 
         # Run 5 training steps, recording loss after each step
@@ -177,7 +177,7 @@ class TestModelSerialization:
                 seed=0,
             ),
         )
-        loss_fn = CrossEntropyLoss()
+        loss_fn = CrossEntropyLoss(shift=False)
         optimizer = AdamW(lr=0.01)
 
         # Train for 3 steps
@@ -258,7 +258,7 @@ class TestInference:
                 seed=0,
             ),
         )
-        loss_fn = CrossEntropyLoss()
+        loss_fn = CrossEntropyLoss(shift=False)
         optimizer = AdamW(lr=0.01)
 
         # Create training batch: 2 sequences of length 4
@@ -303,7 +303,7 @@ class TestInference:
                 seed=0,
             ),
         )
-        loss_fn = CrossEntropyLoss()
+        loss_fn = CrossEntropyLoss(shift=False)
         optimizer = AdamW(lr=0.01)
 
         batch_input = np.array([[0, 1, 2, 3]], dtype=np.int32)

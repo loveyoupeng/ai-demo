@@ -44,7 +44,7 @@ class TestTrainingLoop:
         from impl._np.training import train_step
 
         model = _make_tiny_model()
-        loss_fn = CrossEntropyLoss()
+        loss_fn = CrossEntropyLoss(shift=False)
         optimizer = AdamW(lr=0.01)
 
         # Create a small batch: batch_size=2, seq_len=4
@@ -77,7 +77,7 @@ class TestTrainingLoop:
         from impl._np.training import train_step
 
         model = _make_tiny_model()
-        loss_fn = CrossEntropyLoss()
+        loss_fn = CrossEntropyLoss(shift=False)
         optimizer = AdamW(lr=0.01)
 
         # Create a batch of size 2
@@ -98,7 +98,7 @@ class TestTrainingLoop:
         from impl._np.training import train_step
 
         model = _make_tiny_model()
-        loss_fn = CrossEntropyLoss()
+        loss_fn = CrossEntropyLoss(shift=False)
         optimizer = AdamW(lr=0.05)
 
         # Training batch: 2 sequences of length 4

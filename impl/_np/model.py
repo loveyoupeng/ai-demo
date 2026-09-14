@@ -289,8 +289,8 @@ class NumPyModel:
 
             logits = final_norm(stack(embed(x))) @ W_lm
 
-        1. dlogits = CrossEntropyLoss.backward(logits, targets)   (B, S, V)
-           (matches the forward's CE exactly, shift included)
+        1. dlogits = CrossEntropyLoss(shift=False).backward(logits, targets)   (B, S, V)
+           (targets are pre-shifted next-token labels; no internal shift)
         2. lm_head (linear D → V):
                dW_lm  = h^T @ dlogits          (D, V)
                dh     = dlogits @ W_lm^T       (B, S, D)
@@ -302,7 +302,7 @@ class NumPyModel:
         here is now a test-only gradient checker (``impl._np.gradcheck``).
         """
         logits, trace = self.forward_with_trace(input_ids)
-        dlogits = CrossEntropyLoss().backward(logits, targets)  # (B, S, V)
+        dlogits = CrossEntropyLoss(shift=False).backward(logits, targets)  # (B, S, V)
 
         stack_out = trace["stack_out"]  # (B, S, D)
         positions = trace["positions"]  # (S,)
@@ -347,9 +347,13 @@ class NumPyModel:
     def _compute_loss(self, logits: np.ndarray, targets: np.ndarray) -> float:
         """Cross-entropy loss between logits and target token IDs.
 
+        Targets are pre-shifted next-token labels (standard LM convention —
+        the caller aligns them), so no internal shift is applied; this must
+        match ``backward`` exactly.
+
         logits: (B, S, V)  targets: (B, S) int
         """
-        return float(CrossEntropyLoss().forward(logits, targets))
+        return float(CrossEntropyLoss(shift=False).forward(logits, targets))
 
     def train_step(self, input_ids: np.ndarray, targets: np.ndarray, optimizer) -> float:
         """One training step: loss = CE(forward(x), y); grads = backward; optimizer.step.

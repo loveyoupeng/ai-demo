@@ -712,7 +712,7 @@ def main() -> int:
             from impl._np.cross_entropy import CrossEntropyLoss
             from impl._np.optimizer import AdamW
 
-            loss_fn = CrossEntropyLoss()
+            loss_fn = CrossEntropyLoss(shift=False)  # targets are pre-shifted next-token labels
             optimizer = AdamW(lr=config.get("lr", 0.001))
         else:
             import torch

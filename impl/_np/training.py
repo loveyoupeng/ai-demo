@@ -149,7 +149,7 @@ def train_step(
     >>> model = NumPyModel(TransformerConfig(vocab_size=16, embed_dim=32, n_layers=1, n_heads=2))
     >>> x = np.random.randint(0, 16, (2, 4), dtype=np.int32)
     >>> t = np.random.randint(0, 16, (2, 4), dtype=np.int32)
-    >>> loss = train_step(model, x, t, CrossEntropyLoss(), AdamW(lr=0.01))
+    >>> loss = train_step(model, x, t, CrossEntropyLoss(shift=False), AdamW(lr=0.01))
     >>> isinstance(loss, float)
     True
 

@@ -108,7 +108,7 @@ class TestTrainStepIntegration:
         x = np.array([[0, 1, 2, 3], [1, 2, 3, 0]], dtype=np.int32)
         t = np.array([[1, 2, 3, 0], [2, 3, 0, 1]], dtype=np.int32)
         optimizer = AdamW(lr=0.01)
-        loss_fn = CrossEntropyLoss()
+        loss_fn = CrossEntropyLoss(shift=False)
 
         max_norm_value = 1.0
         with patch("impl._np.training.clip_gradients") as mock_clip:
@@ -143,7 +143,7 @@ class TestTrainStepIntegration:
         x = np.array([[0, 1, 2, 3], [1, 2, 3, 0]], dtype=np.int32)
         t = np.array([[1, 2, 3, 0], [2, 3, 0, 1]], dtype=np.int32)
         optimizer = AdamW(lr=0.01)
-        loss_fn = CrossEntropyLoss()
+        loss_fn = CrossEntropyLoss(shift=False)
 
         initial_params = {k: v.copy() for k, v in model.get_all_parameters().items()}
 
@@ -187,7 +187,7 @@ class TestNoExplosion:
         x = np.random.randint(0, 4, (2, 4), dtype=np.int32)
         t = np.random.randint(0, 4, (2, 4), dtype=np.int32)
         optimizer = AdamW(lr=0.05)
-        loss_fn = CrossEntropyLoss()
+        loss_fn = CrossEntropyLoss(shift=False)
 
         for step_idx in range(50):
             loss = train_step(model, x, t, loss_fn, optimizer, max_norm=1.0)
@@ -217,7 +217,7 @@ class TestNoExplosion:
         x = np.random.randint(0, 4, (2, 4), dtype=np.int32)
         t = np.random.randint(0, 4, (2, 4), dtype=np.int32)
         optimizer = AdamW(lr=0.01)
-        loss_fn = CrossEntropyLoss()
+        loss_fn = CrossEntropyLoss(shift=False)
 
         for step_idx in range(50):
             loss = train_step(model, x, t, loss_fn, optimizer, max_norm=0.0)

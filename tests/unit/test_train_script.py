@@ -225,7 +225,7 @@ class TestRunTraining:
                 "seed": 42,
             },
         )
-        loss_fn = CrossEntropyLoss()
+        loss_fn = CrossEntropyLoss(shift=False)
         optimizer = AdamW(lr=0.01)
 
         # Tiny dataset — short sequences of small vocab
