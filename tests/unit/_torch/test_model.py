@@ -5,6 +5,8 @@ TDD: Write test → all fail → implement → all pass → ruff + pyright → c
 
 import torch
 
+from shared.config import TransformerConfig
+
 
 class TestTorchModelForward:
     """Test the TorchModel nn.Module forward pass."""
@@ -22,14 +24,17 @@ class TestTorchModelForward:
         k = 2
 
         model = TorchModel(
-            vocab_size=vocab_size,
-            embed_dim=embed_dim,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            n_experts=n_experts,
-            ff_dim=ff_dim,
-            k=k,
-            rope_dim=0,
+            TransformerConfig(
+                vocab_size=vocab_size,
+                embed_dim=embed_dim,
+                n_layers=n_layers,
+                n_heads=n_heads,
+                n_groups=n_heads,
+                n_experts=n_experts,
+                expert_dim=ff_dim,
+                top_k=k,
+                rope_dim=0,
+            ),
         )
 
         tokens = torch.randint(0, vocab_size, (1, 8), dtype=torch.int64)
@@ -51,14 +56,17 @@ class TestTorchModelForward:
         k = 2
 
         model = TorchModel(
-            vocab_size=vocab_size,
-            embed_dim=embed_dim,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            n_experts=n_experts,
-            ff_dim=ff_dim,
-            k=k,
-            rope_dim=0,
+            TransformerConfig(
+                vocab_size=vocab_size,
+                embed_dim=embed_dim,
+                n_layers=n_layers,
+                n_heads=n_heads,
+                n_groups=n_heads,
+                n_experts=n_experts,
+                expert_dim=ff_dim,
+                top_k=k,
+                rope_dim=0,
+            ),
         )
 
         tokens = torch.full((1, 4), 0, dtype=torch.int64)
@@ -83,14 +91,17 @@ class TestTorchModelForward:
         k = 2
 
         model = TorchModel(
-            vocab_size=vocab_size,
-            embed_dim=embed_dim,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            n_experts=n_experts,
-            ff_dim=ff_dim,
-            k=k,
-            rope_dim=0,
+            TransformerConfig(
+                vocab_size=vocab_size,
+                embed_dim=embed_dim,
+                n_layers=n_layers,
+                n_heads=n_heads,
+                n_groups=n_heads,
+                n_experts=n_experts,
+                expert_dim=ff_dim,
+                top_k=k,
+                rope_dim=0,
+            ),
         )
 
         tokens = torch.randint(0, vocab_size, (1, 4), dtype=torch.int64)
@@ -111,14 +122,17 @@ class TestTorchModelForward:
         from impl._torch.layers import TorchModel
 
         model = TorchModel(
-            vocab_size=16,
-            embed_dim=32,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=32,
-            k=1,
-            rope_dim=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=32,
+                n_layers=1,
+                n_heads=2,
+                n_groups=2,
+                n_experts=2,
+                expert_dim=32,
+                top_k=1,
+                rope_dim=0,
+            ),
         )
 
         tokens = torch.randint(0, 16, (1, 2), dtype=torch.int64)
@@ -145,31 +159,37 @@ class TestTorchModelForward:
         seed = 42
 
         np_model = NumPyModel(
-            vocab_size=vocab_size,
-            embed_dim=embed_dim,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            n_experts=n_experts,
-            ff_dim=ff_dim,
-            k=k,
-            rope_dim=0,
-            seed=seed,
+            TransformerConfig(
+                vocab_size=vocab_size,
+                embed_dim=embed_dim,
+                n_layers=n_layers,
+                n_heads=n_heads,
+                n_groups=n_heads,
+                n_experts=n_experts,
+                expert_dim=ff_dim,
+                top_k=k,
+                rope_dim=0,
+                seed=seed,
+            ),
         )
 
         torch_model = TorchModel(
-            vocab_size=vocab_size,
-            embed_dim=embed_dim,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            n_experts=n_experts,
-            ff_dim=ff_dim,
-            k=k,
-            rope_dim=0,
-            seed=seed,
+            TransformerConfig(
+                vocab_size=vocab_size,
+                embed_dim=embed_dim,
+                n_layers=n_layers,
+                n_heads=n_heads,
+                n_groups=n_heads,
+                n_experts=n_experts,
+                expert_dim=ff_dim,
+                top_k=k,
+                rope_dim=0,
+                seed=seed,
+            ),
         )
 
         # Initialize PyTorch model with same weights as NumPy model
-        torch_model.load_from_numpy(np_model)
+        torch_model.load_from_numpy_dict(np_model.get_all_parameters())
 
         # Forward pass with same input — eval mode disables dropout
         tokens = torch.randint(0, vocab_size, (1, 4), dtype=torch.int64)

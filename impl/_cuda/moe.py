@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-from cuda import cuda as _cuda_lib
+from cuda.bindings import driver as _cuda_lib  # pyright: ignore[reportAttributeAccessIssue]
 
 from impl._cuda.compiler import compile_and_load, get_kernel_handle
 
@@ -116,10 +116,7 @@ def _launch_moe_score_kernel(
     block_size = min(256, total_pairs)
 
     kernel_params = (
-        tuple(
-            _ctypes.c_void_p(t.data_ptr())
-            for t in (tokens, expert_weights, scores)
-        )
+        tuple(_ctypes.c_void_p(t.data_ptr()) for t in (tokens, expert_weights, scores))
         + (
             _ctypes.c_int(total_tokens),
             _ctypes.c_int(n_experts),
@@ -195,14 +192,11 @@ def _launch_moe_weighted_sum_kernel(
 
     block_size = min(dim, 1024)
 
-    params = (
-        tuple(_ctypes.c_void_p(t.data_ptr()) for t in (expert_outputs, indices, weights, output))
-        + (
-            _ctypes.c_int(total_tokens),
-            _ctypes.c_int(dim),
-            _ctypes.c_int(n_experts),
-            _ctypes.c_int(top_k),
-        )
+    params = tuple(_ctypes.c_void_p(t.data_ptr()) for t in (expert_outputs, indices, weights, output)) + (
+        _ctypes.c_int(total_tokens),
+        _ctypes.c_int(dim),
+        _ctypes.c_int(n_experts),
+        _ctypes.c_int(top_k),
     )
     types = tuple(_ctypes.c_void_p for _ in range(4)) + tuple(_ctypes.c_int for _ in range(4))
 
@@ -274,10 +268,9 @@ def moe_forward(
 
     # Step 1: Expert outputs via PyTorch (cuBLAS)
     # expert_outputs[b, s, n, d] = tokens[b, s] @ expert_weights[n] + bias[n]
-    expert_outputs = torch.stack([
-        torch.nn.functional.linear(tokens, expert_weights[n])
-        for n in range(N)
-    ], dim=2)  # (B, S, N, D)
+    expert_outputs = torch.stack(
+        [torch.nn.functional.linear(tokens, expert_weights[n]) for n in range(N)], dim=2
+    )  # (B, S, N, D)
 
     # Step 2: Expert scoring via CUDA kernel
     # tokens_flat: (B*S, D), scores: (B*S, N)

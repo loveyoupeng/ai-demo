@@ -1,7 +1,9 @@
-"""E12: Cross-backend parity — Triton vs PyTorch vs NumPy.
+"""Cross-backend parity — Triton vs PyTorch vs NumPy.
 
-Three-way comparison: all backends produce matching results
-(within tolerance) for forward and backward passes.
+Three-way comparison: all backends produce matching results (within the
+fp32 kernel tier) for forward and backward passes. Triton and PyTorch
+share the same parameter key scheme, so weights transfer losslessly via
+``save_as_numpy`` / ``load_from_numpy_dict``.
 """
 
 from __future__ import annotations
@@ -11,10 +13,29 @@ import math
 import pytest
 import torch
 
+from shared.config import TransformerConfig
 
-def skip_if_no_gpu():
+
+def skip_if_no_gpu() -> None:
     if not torch.cuda.is_available():
         pytest.skip("No GPU available")
+
+
+def _cfg(**overrides: object) -> TransformerConfig:
+    """Small MoE config shared by the Triton/PyTorch parity tests."""
+    base: dict[str, object] = {
+        "vocab_size": 64,
+        "embed_dim": 16,
+        "n_layers": 1,
+        "n_heads": 2,
+        "n_experts": 2,
+        "expert_dim": 32,
+        "top_k": 2,
+        "rope_dim": 8,  # 8 = full head dimension (head_dim = 16 / 2)
+        "seed": 42,
+    }
+    base.update(overrides)
+    return TransformerConfig.from_dict(base)
 
 
 class TestForwardParity:
@@ -22,39 +43,19 @@ class TestForwardParity:
 
     @pytest.mark.timeout(30)
     def test_triton_torch_forward_parity(self):
-        """Triton forward matches PyTorch forward on GPU."""
+        """Triton forward matches PyTorch forward on GPU (shared weights)."""
         skip_if_no_gpu()
         from impl._torch.layers import TorchModel
         from impl._triton.model import TritonModel
 
-        B, S, V, D, L, H = 2, 8, 64, 16, 1, 2
+        B, S, V = 2, 8, 64
+        cfg = _cfg()
 
-        torch_model = TorchModel(
-            vocab_size=V,
-            embed_dim=D,
-            n_layers=L,
-            n_heads=H,
-            n_experts=2,
-            ff_dim=D * 2,
-            k=2,
-            rope_dim=D // H,
-            seed=42,
-        ).cuda()
+        torch_model = TorchModel(cfg).cuda()
+        triton_model = TritonModel(cfg).cuda()
 
-        triton_model = TritonModel(
-            vocab_size=V,
-            embed_dim=D,
-            n_layers=L,
-            n_heads=H,
-            n_experts=2,
-            ff_dim=D * 2,
-            k=2,
-        ).cuda()
-
-        # Copy params via save_as_numpy → load_from_numpy_dict
-        # (both models have compatible parameter shapes but different naming)
-        saved = torch_model.save_as_numpy()
-        triton_model.load_from_numpy_dict(saved)
+        # Shared Keys scheme → lossless dict transfer
+        triton_model.load_from_numpy_dict(torch_model.save_as_numpy())
 
         x = torch.randint(0, V, (B, S), dtype=torch.int64).cuda()
 
@@ -66,6 +67,7 @@ class TestForwardParity:
         with torch.no_grad():
             triton_logits = triton_model(x)
 
+        # Both fp32 on GPU — tight tier
         assert torch.allclose(
             triton_logits,
             torch_logits,
@@ -79,16 +81,8 @@ class TestForwardParity:
         skip_if_no_gpu()
         from impl._triton.model import TritonModel
 
-        B, S, V, D = 3, 10, 64, 16
-        model = TritonModel(
-            vocab_size=V,
-            embed_dim=D,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=D * 2,
-            k=2,
-        ).cuda()
+        B, S, V = 3, 10, 64
+        model = TritonModel(_cfg()).cuda()
         model.eval()
         x = torch.randint(0, V, (B, S), dtype=torch.int64).cuda()
 
@@ -108,21 +102,14 @@ class TestBackwardParity:
         skip_if_no_gpu()
         from impl._triton.model import TritonModel
 
-        model = TritonModel(
-            vocab_size=64,
-            embed_dim=16,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=32,
-            k=2,
-        ).cuda()
+        cfg = _cfg()
+        model = TritonModel(cfg).cuda()
 
-        x = torch.randint(0, 64, (2, 8), dtype=torch.int64).cuda()
-        y = torch.randint(0, 64, (2, 8), dtype=torch.int64).cuda()
+        x = torch.randint(0, cfg.vocab_size, (2, 8), dtype=torch.int64).cuda()
+        y = torch.randint(0, cfg.vocab_size, (2, 8), dtype=torch.int64).cuda()
 
         loss_fn = torch.nn.CrossEntropyLoss()
-        loss_fn(model(x).reshape(-1, model.vocab_size), y.reshape(-1)).backward()
+        loss_fn(model(x).reshape(-1, cfg.vocab_size), y.reshape(-1)).backward()
 
         grad_norm = 0.0
         for p in model.parameters():
@@ -133,91 +120,52 @@ class TestBackwardParity:
 
     @pytest.mark.timeout(30)
     def test_gradient_norm_torch_vs_triton(self):
-        """Triton and PyTorch produce similar gradient norms."""
+        """Triton and PyTorch produce similar gradient norms (shared weights)."""
         skip_if_no_gpu()
         from impl._torch.layers import TorchModel
         from impl._triton.model import TritonModel
 
-        torch_model = TorchModel(
-            vocab_size=64,
-            embed_dim=16,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=32,
-            k=2,
-            rope_dim=8,
-            seed=42,
-        ).cuda()
-        triton_model = TritonModel(
-            vocab_size=64,
-            embed_dim=16,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=32,
-            k=2,
-        ).cuda()
+        cfg = _cfg()
+        torch_model = TorchModel(cfg).cuda()
+        triton_model = TritonModel(cfg).cuda()
+        triton_model.load_from_numpy_dict(torch_model.save_as_numpy())
 
-        # Copy params via save/load dict
-        saved = torch_model.save_as_numpy()
-        triton_model.load_from_numpy_dict(saved)
-
-        x = torch.randint(0, 64, (2, 8), dtype=torch.int64).cuda()
-        y = torch.randint(0, 64, (2, 8), dtype=torch.int64).cuda()
+        x = torch.randint(0, cfg.vocab_size, (2, 8), dtype=torch.int64).cuda()
+        y = torch.randint(0, cfg.vocab_size, (2, 8), dtype=torch.int64).cuda()
         loss_fn = torch.nn.CrossEntropyLoss()
 
-        torch_loss = loss_fn(torch_model(x).reshape(-1, 64), y.reshape(-1))
+        torch_loss = loss_fn(torch_model(x).reshape(-1, cfg.vocab_size), y.reshape(-1))
         torch_loss.backward()
         torch_grad_norm = math.sqrt(
             sum((p.grad**2).sum().item() for p in torch_model.parameters() if p.grad is not None)
         )
 
-        triton_loss = loss_fn(triton_model(x).reshape(-1, 64), y.reshape(-1))
+        triton_loss = loss_fn(triton_model(x).reshape(-1, cfg.vocab_size), y.reshape(-1))
         triton_loss.backward()
         triton_grad_norm = math.sqrt(
             sum((p.grad**2).sum().item() for p in triton_model.parameters() if p.grad is not None)
         )
 
-        # Gradient norms should be similar (allowing for precision drift)
+        # Gradient norms should be similar (allowing for fp32 precision drift)
         assert torch_grad_norm > 0 and triton_grad_norm > 0
         ratio = max(torch_grad_norm, triton_grad_norm) / (min(torch_grad_norm, triton_grad_norm) + 1e-10)
         assert ratio < 1.1, f"Gradient norm ratio too large: torch={torch_grad_norm:.4f}, triton={triton_grad_norm:.4f}"
 
     @pytest.mark.timeout(30)
     def test_training_reduces_loss_torch_and_triton(self):
-        """Both backends reduce loss over training steps."""
+        """Both backends reduce loss over identical training steps."""
         skip_if_no_gpu()
         from impl._torch.layers import TorchModel
-        from impl._torch.training import train_step
+        from impl._torch.training import train_step as torch_train_step
         from impl._triton.model import TritonModel
+        from impl._triton.training import train_step as triton_train_step
 
-        B, S, V, D = 2, 8, 64, 16
+        B, S, V = 2, 8, 64
+        cfg = _cfg()
 
-        torch_model = TorchModel(
-            vocab_size=V,
-            embed_dim=D,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=D * 2,
-            k=2,
-            rope_dim=D // 2,
-            seed=42,
-        ).cuda()
-        triton_model = TritonModel(
-            vocab_size=V,
-            embed_dim=D,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=D * 2,
-            k=2,
-        ).cuda()
-
-        # Copy params via save/load dict
-        saved = torch_model.save_as_numpy()
-        triton_model.load_from_numpy_dict(saved)
+        torch_model = TorchModel(cfg).cuda()
+        triton_model = TritonModel(cfg).cuda()
+        triton_model.load_from_numpy_dict(torch_model.save_as_numpy())
 
         x = torch.randint(0, V, (B, S), dtype=torch.int64).cuda()
         y = torch.randint(0, V, (B, S), dtype=torch.int64).cuda()
@@ -230,51 +178,15 @@ class TestBackwardParity:
         triton_initial = get_loss(triton_model)
 
         for _ in range(10):
-            train_step(
-                torch_model,
-                x,
-                y,
-                torch.optim.Adam(torch_model.parameters(), lr=0.05),
-                loss_fn,
-                max_norm=1.0,
+            torch_train_step(
+                torch_model, x, y, torch.optim.Adam(torch_model.parameters(), lr=0.05), loss_fn, max_norm=1.0
             )
-
-        # Reset triton_model to same initial state and train identically
-        torch_model2 = TorchModel(
-            vocab_size=V,
-            embed_dim=D,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=D * 2,
-            k=2,
-            rope_dim=D // 2,
-            seed=42,
-        ).cuda()
-        triton_model2 = TritonModel(
-            vocab_size=V,
-            embed_dim=D,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=D * 2,
-            k=2,
-        ).cuda()
-        saved2 = torch_model2.save_as_numpy()
-        triton_model2.load_from_numpy_dict(saved2)
-
-        for _ in range(10):
-            train_step(
-                triton_model2,
-                x,
-                y,
-                torch.optim.Adam(triton_model2.parameters(), lr=0.05),
-                loss_fn,
-                max_norm=1.0,
+            triton_train_step(
+                triton_model, x, y, torch.optim.Adam(triton_model.parameters(), lr=0.05), loss_fn, max_norm=1.0
             )
 
         torch_final = get_loss(torch_model)
-        triton_final = get_loss(triton_model2)
+        triton_final = get_loss(triton_model)
 
         assert math.isfinite(torch_final), "Torch loss must be finite"
         assert math.isfinite(triton_final), "Triton loss must be finite"

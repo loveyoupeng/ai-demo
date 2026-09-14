@@ -48,7 +48,7 @@ def compute_gradient_norm(grads: dict[str, torch.Tensor]) -> float:
     logger.debug("compute_gradient_norm() n_params=%d", len(grads))
     total_sq_norm = 0.0
     for _i, grad in enumerate(grads.values()):
-        sq = float(torch.sum(grad ** 2))
+        sq = float(torch.sum(grad**2))
         total_sq_norm += sq
     result = float(torch.sqrt(torch.tensor(total_sq_norm, dtype=torch.float64)))
     logger.debug("compute_gradient_norm() total_sq_norm=%.6f final_norm=%.6f", total_sq_norm, result)
@@ -73,7 +73,7 @@ def _log_grad_stats(grads: dict[str, torch.Tensor]) -> None:
             layer_idx = int(parts[1])
             if layer_idx not in layer_norms:
                 layer_norms[layer_idx] = 0.0
-            layer_norms[layer_idx] += float(torch.sum(grad ** 2))
+            layer_norms[layer_idx] += float(torch.sum(grad**2))
     for layer_idx in layer_norms:
         layer_norms[layer_idx] = float(torch.sqrt(torch.tensor(layer_norms[layer_idx], dtype=torch.float64)))
     if not layer_norms:
@@ -104,7 +104,12 @@ def clip_gradients(grads: dict[str, torch.Tensor], max_norm: float) -> None:
     if global_norm <= max_norm:
         logger.debug("clip_gradients() norm %.6f <= max_norm %.4f skipping", global_norm, max_norm)
         return
-    logger.info("clip_gradients() clipping global_norm=%.6f -> max_norm=%.4f factor=%.6f", global_norm, max_norm, max_norm / global_norm)
+    logger.info(
+        "clip_gradients() clipping global_norm=%.6f -> max_norm=%.4f factor=%.6f",
+        global_norm,
+        max_norm,
+        max_norm / global_norm,
+    )
     scaling_factor = max_norm / global_norm
     for grad in grads.values():
         grad *= scaling_factor
@@ -190,15 +195,37 @@ def train_step(
     else:
         # CUDA model: iterate through stacking.blocks explicitly
         model_name = type(model).__name__
-        logger.debug("train_step() collecting_grads model_type=%s has_stacking=%s", model_name, hasattr(model, "stacking"))
+        logger.debug(
+            "train_step() collecting_grads model_type=%s has_stacking=%s", model_name, hasattr(model, "stacking")
+        )
         if hasattr(model, "stacking") and hasattr(model.stacking, "blocks"):
             for i, block in enumerate(model.stacking.blocks):
-                for attr_name in ["Wq", "Wk", "Wv", "Wo", "ln1_gamma", "ln2_gamma", "gate1", "gate2", "expert_weights", "expert_bias", "routing_weights"]:
+                for attr_name in [
+                    "Wq",
+                    "Wk",
+                    "Wv",
+                    "Wo",
+                    "ln1_gamma",
+                    "ln2_gamma",
+                    "gate1",
+                    "gate2",
+                    "expert_weights",
+                    "expert_bias",
+                    "routing_weights",
+                ]:
                     attr = getattr(block, attr_name, None)
                     if attr is not None and attr.grad is not None:
                         grads[f"blocks.{i}.{attr_name}"] = attr.grad
         # Also handle model-level parameters (embedding, output_proj, etc.)
-        for attr_name in ["embedding_weights", "final_ln_gamma", "output_proj_weights", "output_proj_bias", "output_W1", "output_W2", "output_W3"]:
+        for attr_name in [
+            "embedding_weights",
+            "final_norm_gamma",
+            "output_proj_weights",
+            "output_proj_bias",
+            "output_W1",
+            "output_W2",
+            "output_W3",
+        ]:
             attr = getattr(model, attr_name, None)
             if attr is not None and attr.grad is not None:
                 grads[attr_name] = attr.grad

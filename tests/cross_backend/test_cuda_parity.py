@@ -33,6 +33,7 @@ import torch as th
 import torch.nn as nn
 
 import impl._np.model as np_module
+from shared.config import TransformerConfig
 
 
 def _clean_cuda() -> None:
@@ -55,15 +56,19 @@ class TestCUDAForwardCorrectness:
         from impl._cuda.model import CUDAModel
 
         cd_m = CUDAModel(
-            vocab_size=16,
-            embed_dim=64,
-            n_layers=1,
-            n_heads=4,
-            n_experts=2,
-            ff_dim=128,
-            k=2,
-            rope_dim=16,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 64,
+                    "n_layers": 1,
+                    "n_heads": 4,
+                    "n_experts": 2,
+                    "expert_dim": 128,
+                    "top_k": 2,
+                    "rope_dim": 16,
+                    "seed": 42,
+                }
+            )
         )
 
         prompt = th.tensor([[0, 1, 2, 3, 4]], dtype=th.int64, device="cuda")
@@ -77,15 +82,19 @@ class TestCUDAForwardCorrectness:
         from impl._cuda.model import CUDAModel
 
         cd_m = CUDAModel(
-            vocab_size=256,
-            embed_dim=16,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=32,
-            k=1,
-            rope_dim=8,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 256,
+                    "embed_dim": 16,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 32,
+                    "top_k": 1,
+                    "rope_dim": 8,
+                    "seed": 42,
+                }
+            )
         )
 
         prompt = th.tensor([[0, 1, 2, 3, 4, 5]], dtype=th.int64, device="cuda")
@@ -99,15 +108,19 @@ class TestCUDAForwardCorrectness:
         from impl._cuda.model import CUDAModel
 
         cd_m = CUDAModel(
-            vocab_size=64,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=64,
-            k=1,
-            rope_dim=16,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 64,
+                    "embed_dim": 32,
+                    "n_layers": 2,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 64,
+                    "top_k": 1,
+                    "rope_dim": 16,
+                    "seed": 42,
+                }
+            )
         )
 
         prompt = th.randint(0, 64, (2, 8), dtype=th.int64, device="cuda")
@@ -120,15 +133,19 @@ class TestCUDAForwardCorrectness:
         from impl._cuda.model import CUDAModel
 
         cd_m = CUDAModel(
-            vocab_size=32,
-            embed_dim=16,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=32,
-            k=1,
-            rope_dim=8,
-            seed=17,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 32,
+                    "embed_dim": 16,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 32,
+                    "top_k": 1,
+                    "rope_dim": 8,
+                    "seed": 17,
+                }
+            )
         )
 
         prompt = th.randint(0, 32, (3, 16), dtype=th.int64, device="cuda")
@@ -142,15 +159,19 @@ class TestCUDAForwardCorrectness:
 
         # Small model
         cd_m = CUDAModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=16,
-            k=1,
-            rope_dim=4,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 8,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 16,
+                    "top_k": 1,
+                    "rope_dim": 4,
+                    "seed": 42,
+                }
+            )
         )
         prompt = th.tensor([[0, 1, 2, 3, 4]], dtype=th.int64, device="cuda")
         output = cd_m.forward(prompt)
@@ -158,15 +179,19 @@ class TestCUDAForwardCorrectness:
 
         # Larger model
         cd_m2 = CUDAModel(
-            vocab_size=256,
-            embed_dim=64,
-            n_layers=2,
-            n_heads=4,
-            n_experts=2,
-            ff_dim=128,
-            k=2,
-            rope_dim=16,
-            seed=99,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 256,
+                    "embed_dim": 64,
+                    "n_layers": 2,
+                    "n_heads": 4,
+                    "n_experts": 2,
+                    "expert_dim": 128,
+                    "top_k": 2,
+                    "rope_dim": 16,
+                    "seed": 99,
+                }
+            )
         )
         prompt2 = th.randint(0, 256, (4, 16), dtype=th.int64, device="cuda")
         output2 = cd_m2.forward(prompt2)
@@ -177,15 +202,19 @@ class TestCUDAForwardCorrectness:
         from impl._cuda.model import CUDAModel
 
         cd_m = CUDAModel(
-            vocab_size=256,
-            embed_dim=64,
-            n_layers=2,
-            n_heads=4,
-            n_experts=2,
-            ff_dim=128,
-            k=2,
-            rope_dim=16,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 256,
+                    "embed_dim": 64,
+                    "n_layers": 2,
+                    "n_heads": 4,
+                    "n_experts": 2,
+                    "expert_dim": 128,
+                    "top_k": 2,
+                    "rope_dim": 16,
+                    "seed": 42,
+                }
+            )
         )
 
         prompt = th.randint(0, 256, (4, 16), dtype=th.int64, device="cuda")
@@ -200,15 +229,19 @@ class TestCUDAForwardCorrectness:
         from impl._cuda.model import CUDAModel
 
         cd_m = CUDAModel(
-            vocab_size=64,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=64,
-            k=1,
-            rope_dim=16,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 64,
+                    "embed_dim": 32,
+                    "n_layers": 2,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 64,
+                    "top_k": 1,
+                    "rope_dim": 16,
+                    "seed": 42,
+                }
+            )
         )
 
         prompt = th.randint(0, 64, (1, 8), dtype=th.int64, device="cuda")
@@ -228,15 +261,19 @@ class TestCUDAForwardCorrectness:
         from impl._cuda.model import CUDAModel
 
         cd_m = CUDAModel(
-            vocab_size=16,
-            embed_dim=16,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=32,
-            k=1,
-            rope_dim=8,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 16,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 32,
+                    "top_k": 1,
+                    "rope_dim": 8,
+                    "seed": 42,
+                }
+            )
         )
 
         prompt1 = th.tensor([[0, 1, 2, 3, 4]], dtype=th.int64, device="cuda")
@@ -266,26 +303,34 @@ class TestCUDAForwardCrossEnd:
         S = 8
 
         np_m = np_module.NumPyModel(
-            vocab_size=vocab,
-            embed_dim=D,
-            n_layers=2,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=64,
-            k=1,
-            rope_dim=16,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": vocab,
+                    "embed_dim": D,
+                    "n_layers": 2,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 64,
+                    "top_k": 1,
+                    "rope_dim": 16,
+                    "seed": 42,
+                }
+            )
         )
         cd_m = CUDAModel(
-            vocab_size=vocab,
-            embed_dim=D,
-            n_layers=2,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=64,
-            k=1,
-            rope_dim=16,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": vocab,
+                    "embed_dim": D,
+                    "n_layers": 2,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 64,
+                    "top_k": 1,
+                    "rope_dim": 16,
+                    "seed": 42,
+                }
+            )
         )
 
         prompt_np_arr = np.array([[0, 1, 2, 3, 4, 5, 6, 7], [0, 1, 2, 3, 4, 5, 6, 7]], dtype=np.int64)[:, :S]
@@ -304,26 +349,34 @@ class TestCUDAForwardCrossEnd:
         D = 32
 
         np_m = np_module.NumPyModel(
-            vocab_size=vocab,
-            embed_dim=D,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=64,
-            k=1,
-            rope_dim=16,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": vocab,
+                    "embed_dim": D,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 64,
+                    "top_k": 1,
+                    "rope_dim": 16,
+                    "seed": 42,
+                }
+            )
         )
         cd_m = CUDAModel(
-            vocab_size=vocab,
-            embed_dim=D,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=64,
-            k=1,
-            rope_dim=16,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": vocab,
+                    "embed_dim": D,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 64,
+                    "top_k": 1,
+                    "rope_dim": 16,
+                    "seed": 42,
+                }
+            )
         )
 
         prompt_np_arr = np.array([[0, 1, 2, 3, 4]], dtype=np.int64)
@@ -347,15 +400,19 @@ class TestCUDAForwardCrossEnd:
         from impl._cuda.model import CUDAModel
 
         cd_m = CUDAModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=16,
-            k=1,
-            rope_dim=4,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 8,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 16,
+                    "top_k": 1,
+                    "rope_dim": 4,
+                    "seed": 42,
+                }
+            )
         )
 
         batch_input = th.randint(0, 16, (4, 4), dtype=th.int64, device="cuda")
@@ -371,11 +428,11 @@ class TestCUDAForwardCrossEnd:
         grad_accumulated = False
         grad_finite = True
         for block in cd_m.stacking.blocks:
-            if hasattr(block, "Wq") and block.Wq.grad is not None:
+            if hasattr(block, "q_proj") and block.q_proj.grad is not None:
                 grad_accumulated = True
-                if not th.isfinite(block.Wq.grad).all():
+                if not th.isfinite(block.q_proj.grad).all():
                     grad_finite = False
-                if th.all(block.Wq.grad == 0):
+                if th.all(block.q_proj.grad == 0):
                     grad_accumulated = False
 
         assert grad_accumulated, "At least one block should have gradients"
@@ -396,15 +453,19 @@ class TestCUDABackwardParity:
         from impl._cuda.model import CUDAModel
 
         cd_m = CUDAModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=16,
-            k=1,
-            rope_dim=4,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 8,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 16,
+                    "top_k": 1,
+                    "rope_dim": 4,
+                    "seed": 42,
+                }
+            )
         )
 
         batch_input = th.randint(0, 16, (4, 4), dtype=th.int64, device="cuda")
@@ -419,27 +480,31 @@ class TestCUDABackwardParity:
         # After backward, blocks should have .grad attributes
         grad_found = False
         for block in cd_m.stacking.blocks:
-            if hasattr(block, "Wq") and block.Wq.grad is not None:
+            if hasattr(block, "q_proj") and block.q_proj.grad is not None:
                 grad_found = True
-                assert not th.all(block.Wq.grad == 0), "Wq.grad should be non-zero"
+                assert not th.all(block.q_proj.grad == 0), "q_proj.grad should be non-zero"
                 break
 
-        assert grad_found, "At least one block should have Wq.grad"
+        assert grad_found, "At least one block should have q_proj.grad"
 
     def test_gradient_no_nan(self) -> None:
         """Gradients through CUDA model should be finite."""
         from impl._cuda.model import CUDAModel
 
         cd_m = CUDAModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=16,
-            k=1,
-            rope_dim=4,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 8,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 16,
+                    "top_k": 1,
+                    "rope_dim": 4,
+                    "seed": 42,
+                }
+            )
         )
 
         batch_input = th.randint(0, 16, (4, 4), dtype=th.int64, device="cuda")
@@ -452,8 +517,8 @@ class TestCUDABackwardParity:
         loss.backward()
 
         for block in cd_m.stacking.blocks:
-            if hasattr(block, "Wq") and block.Wq.grad is not None:
-                assert th.isfinite(block.Wq.grad).all(), "Wq.grad should be finite"
+            if hasattr(block, "q_proj") and block.q_proj.grad is not None:
+                assert th.isfinite(block.q_proj.grad).all(), "q_proj.grad should be finite"
 
     def test_gradient_values_match(self) -> None:
         """Gradients on same-input with same-model produce same gradients."""
@@ -461,26 +526,34 @@ class TestCUDABackwardParity:
 
         seed = 42
         cd1 = CUDAModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=16,
-            k=1,
-            rope_dim=4,
-            seed=seed,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 8,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 16,
+                    "top_k": 1,
+                    "rope_dim": 4,
+                    "seed": seed,
+                }
+            )
         )
         cd2 = CUDAModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=16,
-            k=1,
-            rope_dim=4,
-            seed=seed,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 8,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 16,
+                    "top_k": 1,
+                    "rope_dim": 4,
+                    "seed": seed,
+                }
+            )
         )
 
         batch_input = th.tensor([[0, 1, 2, 3, 4, 5, 6, 7]], dtype=th.int64, device="cuda")
@@ -498,10 +571,10 @@ class TestCUDABackwardParity:
         loss2 = cross_entropy(logits2.reshape(-1, logits2.shape[-1]), batch_target.reshape(-1))
         loss2.backward()
 
-        g1 = cd1.stacking.blocks[0].Wq.grad
-        g2 = cd2.stacking.blocks[0].Wq.grad
-        assert g1 is not None, "Wq.grad should exist after backward"
-        assert g2 is not None, "Wq.grad should exist after backward"
+        g1 = cd1.stacking.blocks[0].q_proj.grad
+        g2 = cd2.stacking.blocks[0].q_proj.grad
+        assert g1 is not None, "q_proj.grad should exist after backward"
+        assert g2 is not None, "q_proj.grad should exist after backward"
 
         np.testing.assert_allclose(
             g1.cpu(),

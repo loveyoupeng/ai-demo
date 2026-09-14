@@ -3,6 +3,8 @@
 import pytest
 import torch
 
+from shared.config import TransformerConfig
+
 
 def skip_if_no_gpu():
     if not torch.cuda.is_available():
@@ -21,12 +23,15 @@ class TestDecoderStackWiring:
         B, S, D, n_layers = 2, 4, 16, 3
 
         stack = TritonDecoderStack(
-            n_layers=n_layers,
-            embed_dim=D,
-            n_heads=4,
-            n_experts=4,
-            ff_dim=32,
-            k=2,
+            TransformerConfig(
+                n_layers=n_layers,
+                embed_dim=D,
+                n_heads=4,
+                n_groups=4,
+                n_experts=4,
+                expert_dim=32,
+                top_k=2,
+            ),
         )
 
         x = torch.randn(B, S, D, dtype=torch.float32, device="cuda")
@@ -45,12 +50,15 @@ class TestDecoderStackWiring:
         n_layers = 3
 
         stack = TritonDecoderStack(
-            n_layers=n_layers,
-            embed_dim=D,
-            n_heads=4,
-            n_experts=4,
-            ff_dim=32,
-            k=2,
+            TransformerConfig(
+                n_layers=n_layers,
+                embed_dim=D,
+                n_heads=4,
+                n_groups=4,
+                n_experts=4,
+                expert_dim=32,
+                top_k=2,
+            ),
         )
 
         x = torch.randn(B, S, D, dtype=torch.float32, device="cuda", requires_grad=True)
@@ -75,52 +83,57 @@ class TestDecoderStackWiring:
 
         # Create PyTorch stack
         torch_stack = torch_layers.DecoderStack(
-            n_layers=n_layers,
-            embed_dim=D,
-            n_heads=n_heads,
-            n_experts=n_experts,
-            ff_dim=ff_dim,
-            k=k,
-            rope_dim=0,
+            TransformerConfig(
+                n_layers=n_layers,
+                embed_dim=D,
+                n_heads=n_heads,
+                n_groups=n_heads,
+                n_experts=n_experts,
+                expert_dim=ff_dim,
+                top_k=k,
+                rope_dim=0,
+            ),
         ).cuda()
 
         # Create Triton stack
         triton_stack = TritonDecoderStack(
-            n_layers=n_layers,
-            embed_dim=D,
-            n_heads=n_heads,
-            n_experts=n_experts,
-            ff_dim=ff_dim,
-            k=k,
+            TransformerConfig(
+                n_layers=n_layers,
+                embed_dim=D,
+                n_heads=n_heads,
+                n_groups=n_heads,
+                n_experts=n_experts,
+                expert_dim=ff_dim,
+                top_k=k,
+            ),
         )
 
-        # Copy weights: MHA projections and biases (match nn.Linear convention)
+        # Copy weights attribute by attribute (FFN is raw (in,out) in triton).
+        from impl._torch.layers import MixtureOfExperts as TorchMoE
+        from impl._triton.transformer import TritonMixtureOfExperts
+
         for i in range(n_layers):
-            tb = triton_stack.layers[i]
+            tb = triton_stack.blocks[i]
             tblock = torch_stack.layers[i]
 
-            tb.mha.Wq.weight.data.copy_(tblock.mha.Wq.weight.data)
-            tb.mha.Wq.bias.data.copy_(tblock.mha.Wq.bias.data)
-            tb.mha.Wk.weight.data.copy_(tblock.mha.Wk.weight.data)
-            tb.mha.Wk.bias.data.copy_(tblock.mha.Wk.bias.data)
-            tb.mha.Wv.weight.data.copy_(tblock.mha.Wv.weight.data)
-            tb.mha.Wv.bias.data.copy_(tblock.mha.Wv.bias.data)
-            tb.mha.Wo.weight.data.copy_(tblock.mha.Wo.weight.data)
-            tb.mha.Wo.bias.data.copy_(tblock.mha.Wo.bias.data)
+            tmlp = tblock.mlp
+            rmlp = tb.mlp
+            assert isinstance(tmlp, TorchMoE)
+            assert isinstance(rmlp, TritonMixtureOfExperts)
+
+            for name in ["q_proj", "k_proj", "v_proj", "o_proj"]:
+                getattr(tb.self_attn, name).weight.data.copy_(getattr(tblock.self_attn, name).weight.data)
 
             # MoE router and expert weights
-            tb.moe.W_router.data.copy_(tblock.moe.router.weight.data.t())
-            tb.moe.b_router.data.copy_(tblock.moe.router.bias.data)
+            rmlp.gate.weight.data.copy_(tmlp.gate.weight.data)
             for j in range(n_experts):
-                tb.moe.experts[j].W1.data.copy_(tblock.moe.experts[j].W1.data)
-                tb.moe.experts[j].W2.data.copy_(tblock.moe.experts[j].W2.data)
-                tb.moe.experts[j].W3.data.copy_(tblock.moe.experts[j].W3.data)
+                rmlp.expert_list[j].gate_proj.data.copy_(tmlp.expert_list[j].gate_proj.data)
+                rmlp.expert_list[j].up_proj.data.copy_(tmlp.expert_list[j].up_proj.data)
+                rmlp.expert_list[j].down_proj.data.copy_(tmlp.expert_list[j].down_proj.data)
 
-            # Normalization and gate weights
-            tb.ln1.weight.data.copy_(tblock.ln1.gamma.data)
-            tb.ln2.weight.data.copy_(tblock.ln2.gamma.data)
-            tb.gate1.data.copy_(tblock.gate1.data)
-            tb.gate2.data.copy_(tblock.gate2.data)
+            # Normalization weights
+            tb.input_layernorm.weight.data.copy_(tblock.input_layernorm.weight.data)  # pyright: ignore[reportAttributeAccessIssue, reportArgumentType]
+            tb.post_attention_layernorm.weight.data.copy_(tblock.post_attention_layernorm.weight.data)  # pyright: ignore[reportAttributeAccessIssue, reportArgumentType]
 
         def sync_to_cuda(block):
             for p in block.parameters():

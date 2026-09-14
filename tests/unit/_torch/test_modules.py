@@ -14,12 +14,13 @@ class TestPackageImport:
         assert "_torch" in _torch.__file__
 
     def test_import_torch_model_and_config(self) -> None:
-        """TorchModel and ModelConfig must be importable from impl._torch.
+        """TorchModel and TransformerConfig must be importable.
 
-        These are the main public API entries — models are built with
-        ModelConfig and instantiated as TorchModel. See C7 for full impl.
+        Models are built from the shared TransformerConfig and instantiated
+        as TorchModel.
         """
-        from impl._torch import ModelConfig, TorchModel
+        from impl._torch import TorchModel
+        from shared.config import TransformerConfig
 
         assert TorchModel is not None
-        assert ModelConfig is not None
+        assert TransformerConfig is not None

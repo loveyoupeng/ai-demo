@@ -5,22 +5,21 @@ description = "Decoder-only transformer learning project in 4 backends"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
-    "torch>=2.0",
+    "torch==2.13.0",
     "datasets>=2.14",
     "tokenizers>=0.15",
     "tqdm>=4.65",
     "transformers>=4.40",
     "triton>=3.6.0",
 ]
-optional-dependencies = {triton = ["triton>=2.2"], cuda = ["cuda-python>=12.0"]}
+optional-dependencies = {triton = ["triton>=3.6.0"], cuda = ["cuda-python>=13.0"]}
 dev = ["pyright>=1.1", "pytest>=7.0", "pytest-timeout>=2.0", "ruff>=0.4"]
-
 [[tool.uv.index]]
-name = "pytorch-jetson"
-url = "https://pypi.jetson-ai-lab.io/jp6/cu126"
-
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
 [tool.uv.sources]
-torch = { index = "pytorch-jetson" }
+torch = { index = "pytorch-cu132" }
 
 [project.scripts]
 train = "impl._np.cli:main"
@@ -37,7 +36,6 @@ ignore = ["E501"]  # let formatter handle line lengths
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
-"scripts/auto_test_equivalence.py" = ["C901"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

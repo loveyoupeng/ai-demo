@@ -29,6 +29,7 @@ import pytest
 import torch
 
 import impl._np.model as np_model
+from shared.config import TransformerConfig
 
 # Skip all tests if GPU is unavailable
 gpu_available = pytest.mark.skipif(
@@ -69,32 +70,40 @@ class TestGPUForwardParity:
     def test_forward_parity_1layer(self):
         """Single-layer model forward pass on GPU matches NumPy."""
         np_model_ = np_model.NumPyModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 8,
+                    "n_layers": 1,
+                    "n_heads": 1,
+                    "n_experts": 2,
+                    "expert_dim": 8,
+                    "top_k": 1,
+                    "rope_dim": 0,
+                    "seed": 42,
+                }
+            )
         )
 
         from impl._torch.layers import TorchModel
 
         torch_model = TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 8,
+                    "n_layers": 1,
+                    "n_heads": 1,
+                    "n_experts": 2,
+                    "expert_dim": 8,
+                    "top_k": 1,
+                    "rope_dim": 0,
+                    "seed": 42,
+                }
+            )
         )
         torch_model.to("cuda").float()  # Move to GPU, float32
-        torch_model.load_from_numpy(np_model_)
+        torch_model.load_from_numpy_dict(np_model_.get_all_parameters())
         torch_model.eval()
 
         # Run on GPU
@@ -123,32 +132,40 @@ class TestGPUForwardParity:
     def test_forward_parity_multi_batch(self):
         """Batched forward pass on GPU matches NumPy."""
         np_model_ = np_model.NumPyModel(
-            vocab_size=16,
-            embed_dim=16,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=16,
-            k=1,
-            rope_dim=0,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 16,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 16,
+                    "top_k": 1,
+                    "rope_dim": 0,
+                    "seed": 42,
+                }
+            )
         )
 
         from impl._torch.layers import TorchModel
 
         torch_model = TorchModel(
-            vocab_size=16,
-            embed_dim=16,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=16,
-            k=1,
-            rope_dim=0,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 16,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 16,
+                    "top_k": 1,
+                    "rope_dim": 0,
+                    "seed": 42,
+                }
+            )
         )
         torch_model.to("cuda").float()
-        torch_model.load_from_numpy(np_model_)
+        torch_model.load_from_numpy_dict(np_model_.get_all_parameters())
         torch_model.eval()
 
         input_ids = torch.tensor(
@@ -176,32 +193,40 @@ class TestGPUForwardParity:
     def test_forward_parity_2layer(self):
         """Two-layer model forward pass on GPU matches NumPy."""
         np_model_ = np_model.NumPyModel(
-            vocab_size=64,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=64,
-            k=1,
-            rope_dim=0,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 64,
+                    "embed_dim": 32,
+                    "n_layers": 2,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 64,
+                    "top_k": 1,
+                    "rope_dim": 0,
+                    "seed": 42,
+                }
+            )
         )
 
         from impl._torch.layers import TorchModel
 
         torch_model = TorchModel(
-            vocab_size=64,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=64,
-            k=1,
-            rope_dim=0,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 64,
+                    "embed_dim": 32,
+                    "n_layers": 2,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 64,
+                    "top_k": 1,
+                    "rope_dim": 0,
+                    "seed": 42,
+                }
+            )
         )
         torch_model.to("cuda").float()
-        torch_model.load_from_numpy(np_model_)
+        torch_model.load_from_numpy_dict(np_model_.get_all_parameters())
         torch_model.eval()
 
         input_ids = torch.randint(0, 64, (2, 8), dtype=torch.int64, device="cuda")
@@ -228,15 +253,19 @@ class TestGPUForwardParity:
         from impl._torch.layers import TorchModel
 
         torch_model = TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 8,
+                    "n_layers": 1,
+                    "n_heads": 1,
+                    "n_experts": 2,
+                    "expert_dim": 8,
+                    "top_k": 1,
+                    "rope_dim": 0,
+                    "seed": 42,
+                }
+            )
         )
         torch_model.to("cuda").float()
         torch_model.eval()
@@ -259,15 +288,19 @@ class TestGPUBackwardParity:
         from impl._torch.layers import TorchModel
 
         torch_model = TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 8,
+                    "n_layers": 1,
+                    "n_heads": 1,
+                    "n_experts": 2,
+                    "expert_dim": 8,
+                    "top_k": 1,
+                    "rope_dim": 0,
+                    "seed": 42,
+                }
+            )
         )
         torch_model.to("cuda").float()
 
@@ -299,15 +332,19 @@ class TestGPUBackwardParity:
         from impl._torch.layers import TorchModel
 
         torch_model = TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 8,
+                    "n_layers": 1,
+                    "n_heads": 1,
+                    "n_experts": 2,
+                    "expert_dim": 8,
+                    "top_k": 1,
+                    "rope_dim": 0,
+                    "seed": 42,
+                }
+            )
         )
         torch_model.to("cuda").float()
 
@@ -343,15 +380,19 @@ class TestGPUBackwardParity:
         from impl._torch.layers import TorchModel
 
         torch_model = TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=2,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 8,
+                    "n_layers": 2,
+                    "n_heads": 2,
+                    "n_experts": 2,
+                    "expert_dim": 8,
+                    "top_k": 1,
+                    "rope_dim": 0,
+                    "seed": 42,
+                }
+            )
         )
         torch_model.to("cuda").float()
 
@@ -399,15 +440,19 @@ class TestGPUTrainingEquivalence:
 
         # CPU model — float32, CPU
         cpu_model = TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=42,
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 8,
+                    "n_layers": 1,
+                    "n_heads": 1,
+                    "n_experts": 2,
+                    "expert_dim": 8,
+                    "top_k": 1,
+                    "rope_dim": 0,
+                    "seed": 42,
+                }
+            )
         )
         # Clone CPU model weights to create identical GPU model
         cpu_model.eval()
@@ -417,15 +462,19 @@ class TestGPUTrainingEquivalence:
 
         # GPU model — copy CPU weights, float32, CUDA
         gpu_model = TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=42,  # same seed as CPU model
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 16,
+                    "embed_dim": 8,
+                    "n_layers": 1,
+                    "n_heads": 1,
+                    "n_experts": 2,
+                    "expert_dim": 8,
+                    "top_k": 1,
+                    "rope_dim": 0,
+                    "seed": 42,
+                }
+            )  # same seed as CPU model
         )
         # Copy weights from CPU to GPU so they start identically
         cpu_state = {k: v.clone().cpu() for k, v in cpu_model.state_dict().items()}

@@ -24,7 +24,7 @@ __global__ void rope_fwd_f32(
     const float* sin_table,      // (max_pos, D/2)
     float* x_out,                // (B*S*H, D)
     int total_tokens,            // B * S * H — total number of tokens
-    int S,                       // sequence length (used for position computation)
+    const int* positions,        // per-token position indices (total_tokens)
     int D,                       // head dimension
     int rope_dim                 // number of dims to rotate (must be even)
 )
@@ -36,7 +36,7 @@ __global__ void rope_fwd_f32(
 
     // Base index into x (row-major token storage)
     // Token layout: (batch, seq, head) → flat index = (batch * S + seq) * H + head
-    int s_idx = token % S;   // sequence index: position-dependent
+    int s_idx = positions[token];  // position lookup (works for any H)
     int base_idx = token * D;
 
     // Process dimension pairs
@@ -70,16 +70,16 @@ __global__ void rope_fwd_f64(
     const double* sin_table,
     double* x_out,
     int total_tokens,
-    int S,
-    int D,
-    int rope_dim
+    const int* positions,
+    int D,                       // head dimension
+    int rope_dim                 // number of dims to rotate (must be even)
 )
 {
     int token = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (token >= total_tokens) return;
 
-    int s_idx = token % S;
+    int s_idx = positions[token];
     int base_idx = token * D;
 
     for (int m = 0; m < rope_dim; m += 2) {
@@ -108,7 +108,7 @@ __global__ void rope_bwd_f32(
     const float* sin_table,
     float* dx_out,
     int total_tokens,
-    int S,
+    const int* positions,
     int D,
     int rope_dim
 )
@@ -117,7 +117,7 @@ __global__ void rope_bwd_f32(
 
     if (token >= total_tokens) return;
 
-    int s_idx = token % S;
+    int s_idx = positions[token];
 
     for (int m = 0; m < rope_dim; m += 2) {
         float c = cos_table[s_idx * (rope_dim / 2) + (m / 2)];
@@ -147,7 +147,7 @@ __global__ void rope_bwd_f64(
     const double* sin_table,
     double* dx_out,
     int total_tokens,
-    int S,
+    const int* positions,
     int D,
     int rope_dim
 )
@@ -156,17 +156,16 @@ __global__ void rope_bwd_f64(
 
     if (token >= total_tokens) return;
 
-    int s_idx = token % S;
+    int s_idx = positions[token];
 
     for (int m = 0; m < rope_dim; m += 2) {
+        double x0 = dx[token * D + m];
+        double x1 = dx[token * D + m + 1];
         double c = cos_table[s_idx * (rope_dim / 2) + (m / 2)];
         double s = sin_table[s_idx * (rope_dim / 2) + (m / 2)];
 
-        double dx0 = dx[token * D + m];
-        double dx1 = dx[token * D + m + 1];
-
-        dx_out[token * D + m]     = c * dx0 + s * dx1;
-        dx_out[token * D + m + 1] = -s * dx0 + c * dx1;
+        dx_out[token * D + m]     = c * x0 + s * x1;
+        dx_out[token * D + m + 1] = -s * x0 + c * x1;
     }
 
     for (int d = rope_dim; d < D; d++) {

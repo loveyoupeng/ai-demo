@@ -193,17 +193,20 @@ class TestGenerateSingle:
         """NumPy greedy generation should return tokens without error."""
         from impl._np.model import NumPyModel
         from scripts.infer import generate_single
+        from shared.config import TransformerConfig
 
         model = NumPyModel(
-            vocab_size=256,
-            embed_dim=32,
-            n_layers=1,
-            n_heads=4,
-            n_experts=2,
-            ff_dim=128,
-            k=1,
-            rope_dim=0,
-            seed=42,
+            TransformerConfig(
+                vocab_size=256,
+                embed_dim=32,
+                n_layers=1,
+                n_heads=4,
+                n_experts=2,
+                expert_dim=128,
+                top_k=1,
+                rope_dim=0,
+                seed=42,
+            )
         )
         config = {
             "vocab_size": 256,
@@ -235,17 +238,20 @@ class TestGenerateSingle:
         """Torch greedy generation should return tokens without error."""
         from impl._torch.layers import TorchModel
         from scripts.infer import generate_single
+        from shared.config import TransformerConfig
 
         model = TorchModel(
-            vocab_size=256,
-            embed_dim=32,
-            n_layers=1,
-            n_heads=4,
-            n_experts=2,
-            ff_dim=128,
-            k=1,
-            rope_dim=0,
-            seed=42,
+            TransformerConfig(
+                vocab_size=256,
+                embed_dim=32,
+                n_layers=1,
+                n_heads=4,
+                n_experts=2,
+                expert_dim=128,
+                top_k=1,
+                rope_dim=0,
+                seed=42,
+            )
         )
         config = {
             "vocab_size": 256,
@@ -277,9 +283,20 @@ class TestGenerateSingle:
         """Greedy decoding should be deterministic — same output every run."""
         from impl._np.model import NumPyModel
         from scripts.infer import generate_single
+        from shared.config import TransformerConfig
 
         model = NumPyModel(
-            vocab_size=256, embed_dim=32, n_layers=1, n_heads=4, n_experts=2, ff_dim=128, k=1, rope_dim=0, seed=42
+            TransformerConfig(
+                vocab_size=256,
+                embed_dim=32,
+                n_layers=1,
+                n_heads=4,
+                n_experts=2,
+                expert_dim=128,
+                top_k=1,
+                rope_dim=0,
+                seed=42,
+            )
         )
         config = {
             "vocab_size": 256,
@@ -309,9 +326,20 @@ class TestGenerateSingle:
         """Generated output should not exceed max_new_tokens."""
         from impl._np.model import NumPyModel
         from scripts.infer import generate_single
+        from shared.config import TransformerConfig
 
         model = NumPyModel(
-            vocab_size=256, embed_dim=32, n_layers=1, n_heads=4, n_experts=2, ff_dim=128, k=1, rope_dim=0, seed=42
+            TransformerConfig(
+                vocab_size=256,
+                embed_dim=32,
+                n_layers=1,
+                n_heads=4,
+                n_experts=2,
+                expert_dim=128,
+                top_k=1,
+                rope_dim=0,
+                seed=42,
+            )
         )
         config = {
             "vocab_size": 256,

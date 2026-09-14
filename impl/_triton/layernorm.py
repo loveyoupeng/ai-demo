@@ -361,9 +361,9 @@ class _RmsNormTriton(torch.autograd.Function):
 
         # Launch: 1D grid with n_rows blocks, one per row/sequence position
         _rmsnorm_kernel[(n_rows,)](  # pyright: ignore[reportCallIssue]
-            x_flat,
-            gamma,
-            out_flat,
+            x_flat,  # pyright: ignore[reportArgumentType]
+            gamma,  # pyright: ignore[reportArgumentType]
+            out_flat,  # pyright: ignore[reportArgumentType]
             D,
             n_rows,
             eps,
@@ -380,7 +380,7 @@ class _RmsNormTriton(torch.autograd.Function):
         return result
 
     @staticmethod
-    def backward(ctx: Any, grad_output: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    def backward(ctx: Any, grad_output: torch.Tensor) -> tuple[torch.Tensor | None, ...]:  # pyright: ignore[reportIncompatibleMethodOverride]
         """Backward pass: compute dL/dx and dL/dgamma.
 
         RMSNorm backward derivation:

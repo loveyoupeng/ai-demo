@@ -1,79 +1,59 @@
 """B1.2: RMSNorm — Root Mean Square Layer Normalization.
 
-All tests fail initially. Implement after verifying failure.
+out = x / sqrt(mean(x^2) + eps) * gamma; gamma (D,) is a module attribute.
 """
 
 import numpy as np
 
-from impl._np.modules import RMSNorm
+from impl._np.layernorm import RMSNorm
 
 
 class TestRMSNormForward:
     """Test the RMSNorm forward pass."""
 
     def test_output_shape(self):
-        """Output shape matches input: (batch, seq_len, embed_dim).
-
-        Input: x of shape [2, 4, 8], gamma of shape [8]
-        Expected output: shape [2, 4, 8]
-        """
+        """Output shape matches input: (batch, seq_len, embed_dim)."""
         x = np.random.default_rng(42).random((2, 4, 8)).astype(np.float32)
-        gamma = np.ones(8, dtype=np.float32)
 
-        norm = RMSNorm()
-        out = norm.forward(x, gamma)
+        norm = RMSNorm(8)
+        out = norm.forward(x)
 
         assert out.shape == (2, 4, 8), f"Expected (2, 4, 8), got {out.shape}"
 
     def test_unit_variance(self):
-        """After normalization, mean(output^2) per sample ≈ 1 for each (batch, seq).
-
-        RMSNorm ensures that each sample's feature vector has unit mean-squared
-        magnitude before the gamma scaling.
-        """
+        """After normalization, mean(output^2) per sample ≈ 1 for each (batch, seq)."""
         rng = np.random.default_rng(123)
         x = rng.random((4, 8, 16)).astype(np.float32)
-        gamma = np.ones(16, dtype=np.float32)
 
-        norm = RMSNorm()
-        out = norm.forward(x, gamma)
+        norm = RMSNorm(16)
+        out = norm.forward(x)
 
         # For each (batch, seq), mean of output^2 across features ≈ 1
         mean_sq = np.mean(out**2, axis=-1)  # shape (batch, seq)
         np.testing.assert_allclose(mean_sq, 1.0, atol=0.01, err_msg="mean(output^2) per sample should be ~1")
 
     def test_identity_without_gamma(self):
-        """With gamma = 1, output equals normalized input (no extra scaling).
+        """With gamma = 1, output equals normalized input (no extra scaling)."""
+        x = np.random.default_rng(42).random((2, 3, 6)).astype(np.float32)
 
-        RMSNorm(x, 1) = x / rms(x) where rms = sqrt(mean(x^2) + eps).
-        """
-        x = np.array([[[1.0, 2.0, 3.0]]], dtype=np.float32)  # (1, 1, 3)
-        gamma = np.ones(3, dtype=np.float32)
+        norm = RMSNorm(6)
+        out = norm.forward(x)
 
-        norm = RMSNorm()
-        out = norm.forward(x, gamma)
-
-        # Expected: x / sqrt(mean(x^2) + eps)
-        eps = 1e-6
-        expected = x / np.sqrt(np.mean(x**2) + eps)
+        eps = norm.eps
+        expected = x / np.sqrt(np.mean(x**2, axis=-1, keepdims=True) + eps)
         np.testing.assert_allclose(out, expected, rtol=1e-5, err_msg="gamma=1 should give pure normalization")
 
     def test_learned_scale(self):
-        """Gamma controls the output magnitude: output = normalized_input * gamma.
+        """Gamma controls the output magnitude: output = normalized_input * gamma."""
+        x = np.random.default_rng(99).random((2, 3, 5)).astype(np.float32)
+        gamma = np.array([1.0, 2.0, 3.0, 0.5, 4.0], dtype=np.float32)
 
-        If gamma = 2.0, output should be 2x the normalized input.
-        """
-        rng = np.random.default_rng(99)
-        x = rng.random((2, 3, 6)).astype(np.float32)
-        gamma = np.ones(6, dtype=np.float32) * 2.0
+        norm = RMSNorm(5)
+        norm.gamma = gamma
+        out = norm.forward(x)
 
-        norm = RMSNorm()
-        out = norm.forward(x, gamma)
-
-        # With all-gamma-2, output should be 2x the normalized input
-        # (since RMSNorm normalizes to unit variance first, then scales)
-        normalized = x / (np.sqrt(np.mean(x**2, axis=-1, keepdims=True)) + 1e-6)
-        expected = normalized * 2.0
+        eps = norm.eps
+        expected = (x / np.sqrt(np.mean(x**2, axis=-1, keepdims=True) + eps)) * gamma
         np.testing.assert_allclose(out, expected, rtol=1e-5)
 
 
@@ -87,13 +67,12 @@ class TestRMSNormBackward:
         d_out / d_gamma should be (embed_dim,).
         """
         x = np.random.default_rng(7).random((2, 4, 8)).astype(np.float32)
-        gamma = np.ones(8, dtype=np.float32) * 2.0
 
-        norm = RMSNorm()
-        out = norm.forward(x, gamma)
+        norm = RMSNorm(8)
+        norm.gamma = np.ones(8, dtype=np.float32) * 2.0
 
         # Use a simple upstream gradient of ones
-        upstream = np.ones_like(out)
+        upstream = np.ones_like(x)
 
         # Numerical gradient check for input shape
         eps = 1e-5
@@ -105,8 +84,8 @@ class TestRMSNormBackward:
                     x_plus[b, s, i] += eps
                     x_minus[b, s, i] -= eps
 
-            out_plus = norm.forward(x_plus, gamma)
-            out_minus = norm.forward(x_minus, gamma)
+            out_plus = norm.forward(x_plus)
+            out_minus = norm.forward(x_minus)
 
             numeric_grad = np.sum((out_plus - out_minus) * upstream) / (2 * eps)
 
@@ -123,13 +102,13 @@ class TestRMSNormBackward:
         x = rng.random((2, 3, 4)).astype(np.float32)
 
         # Case 1: uniform gamma
-        gamma1 = np.ones(4, dtype=np.float32)
-        # Case 2: varying gamma
-        gamma2 = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        norm1 = RMSNorm(4)
+        out1 = norm1.forward(x)
 
-        norm = RMSNorm()
-        out1 = norm.forward(x, gamma1)
-        out2 = norm.forward(x, gamma2)
+        # Case 2: varying gamma
+        norm2 = RMSNorm(4)
+        norm2.gamma = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        out2 = norm2.forward(x)
 
         # Outputs should differ when gamma differs (for non-zero input)
         assert not np.allclose(out1, out2, rtol=1e-3), (

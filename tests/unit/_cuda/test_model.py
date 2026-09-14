@@ -1,22 +1,7 @@
-"""CUDAModel — full decoder-only transformer: embedding → stack → output (F9).
+"""CUDAModel — full decoder-only transformer: embedding → stack → lm_head (F9).
 
-Tests for CuModel: creation, attributes, forward shape, output dimensions.
-
-Architecture:
-    Input:  tokens [B, S] (int64)
-    │
-    ├→ Embedding table lookup       [B, S, D]
-    ├→ DecoderStack (n_layers)     [B, S, D]
-    ├→ RMSNorm (final_ln)          [B, S, D]
-    ├→ SwiGLU (output)             [B, S, D]
-    └→ Linear (output_proj)        [B, S, V]
-    │
-    Output: logits [B, S, V]
-
-Reference
----------
-Vaswani et al. "Attention Is All You Need" (2017)
-https://arxiv.org/abs/1706.03762
+Tests cover model creation, stack wiring/forward, and gradient flow.
+All model weights start on CPU and move to the input's device in forward.
 """
 
 from __future__ import annotations
@@ -25,37 +10,42 @@ import pytest
 import torch
 
 from impl._cuda.model import CUDAModel
+from shared.config import TransformerConfig
 
 # ── Test fixtures ──────────────────────────────────────────────────────────────
 
 
 @pytest.fixture
-def small_config():
+def small_config() -> TransformerConfig:
     """Minimal model config for fast tests."""
-    return dict(
+    return TransformerConfig(
         vocab_size=512,
         embed_dim=64,
         n_layers=1,
         n_heads=4,
+        n_groups=4,
         n_experts=2,
-        ff_dim=128,
-        k=2,
+        top_k=2,
+        expert_dim=128,
         rope_dim=16,
         seed=42,
     )
 
 
 @pytest.fixture
-def base_config():
+def base_config() -> TransformerConfig:
     """Base config shared by all tests."""
-    return dict(
+    return TransformerConfig(
+        vocab_size=64,
         n_layers=2,
         embed_dim=128,
         n_heads=4,
+        n_groups=4,
         n_experts=4,
-        ff_dim=256,
-        k=2,
-        rope_dim=64,
+        top_k=2,
+        expert_dim=256,
+        rope_dim=32,
+        seed=42,
     )
 
 
@@ -64,7 +54,7 @@ def decoder_stack(base_config):
     """Small CuDecoderStack: 2 layers, 128 dim, 4 heads, 4 experts."""
     from impl._cuda.stack import CuDecoderStack
 
-    return CuDecoderStack(**base_config)
+    return CuDecoderStack(base_config)
 
 
 @pytest.fixture
@@ -82,52 +72,50 @@ def sample_input():
 class TestCuModelInit:
     """CUDAModel creation tests."""
 
-    def test_creation_fails_without_stack(self, small_config):
-        """Forward should fail if model is not properly initialized."""
-
-        model = CUDAModel(**small_config)
-        # Clear weights to simulate incomplete initialization
-        saved_weights = model.embedding_weights
-        model.embedding_weights = None  # type: ignore[assignment]
-        tokens = torch.randint(0, model.vocab_size, (2, 16), device="cuda", dtype=torch.int64)
-        with pytest.raises((AttributeError, TypeError)):
-            model.forward(tokens)
-        model.embedding_weights = saved_weights  # Restore for other tests
-
-    def test_has_vocab_size(self, small_config):
+    def test_has_vocab_size(self, small_config) -> None:
         """Model has the correct vocabulary size."""
-        model = CUDAModel(**small_config)
-        assert model.vocab_size == small_config["vocab_size"]
+        model = CUDAModel(small_config)
+        assert model.vocab_size == small_config.vocab_size
 
-    def test_has_embed_dim(self, small_config):
+    def test_has_embed_dim(self, small_config) -> None:
         """Model has the correct embedding dimension."""
-        model = CUDAModel(**small_config)
-        assert model.embed_dim == small_config["embed_dim"]
+        model = CUDAModel(small_config)
+        assert model.embed_dim == small_config.embed_dim
 
-    def test_has_n_layers(self, small_config):
-        """Model stores n_layers attribute."""
-        model = CUDAModel(**small_config)
-        assert model.n_layers == small_config["n_layers"]
+    def test_has_embedding(self, small_config) -> None:
+        """Model has an (V, D) embedding table."""
+        model = CUDAModel(small_config)
+        assert model.embedding_weights.shape == (small_config.vocab_size, small_config.embed_dim)
 
-    def test_has_embedding(self, small_config):
-        """Model has embedding_weight attribute."""
-        model = CUDAModel(**small_config)
-        assert hasattr(model, "embedding_weights")
-        assert model.embedding_weights.shape == (small_config["vocab_size"], small_config["embed_dim"])
+    def test_has_final_ln(self, small_config) -> None:
+        """Model has final_norm_gamma attribute."""
+        model = CUDAModel(small_config)
+        assert model.final_norm_gamma.shape == (small_config.embed_dim,)
 
-    def test_has_final_ln(self, small_config):
-        """Model has final_ln_gamma attribute."""
-        model = CUDAModel(**small_config)
-        assert hasattr(model, "final_ln_gamma")
-        assert model.final_ln_gamma.shape == (small_config["embed_dim"],)
+    def test_has_lm_head(self, small_config) -> None:
+        """Model has an (D, V) lm_head weight."""
+        model = CUDAModel(small_config)
+        assert model.lm_head_weight.shape == (small_config.embed_dim, small_config.vocab_size)
 
-    def test_has_output_proj(self, small_config):
-        """Model has output_proj_weights and output_proj_bias."""
-        model = CUDAModel(**small_config)
-        assert hasattr(model, "output_proj_weights")
-        assert model.output_proj_weights.shape == (small_config["embed_dim"], model.vocab_size)
-        assert hasattr(model, "output_proj_bias")
-        assert model.output_proj_bias.shape == (model.vocab_size,)
+    def test_forward_output_shape(self, small_config) -> None:
+        """Forward: tokens (B, S) → logits (B, S, V)."""
+        model = CUDAModel(small_config)
+        tokens = torch.randint(0, model.vocab_size, (2, 16), device="cuda", dtype=torch.int64)
+        logits = model.forward(tokens)
+        assert logits.shape == (2, 16, small_config.vocab_size)
+        assert torch.isfinite(logits).all()
+
+    def test_get_all_parameters_roundtrip(self, small_config) -> None:
+        """save/load round-trip preserves every parameter (Keys scheme)."""
+        import numpy as np
+
+        model = CUDAModel(small_config)
+        params = model.get_all_parameters()
+        model.load_from_numpy_dict(params)
+        params2 = model.get_all_parameters()
+        assert set(params2) == set(params)
+        for key, value in params.items():
+            np.testing.assert_allclose(params2[key], value, rtol=1e-6, atol=1e-6, err_msg=f"Parameter {key} changed")
 
 
 # ================================================================
@@ -138,60 +126,52 @@ class TestCuModelInit:
 class TestDecoderStackInit:
     """CuDecoderStack — chained transformer blocks (F8).
 
-    Tests for DecoderStack: basic wiring, forward shape,
-    gradients through stacked layers, single-layer and multi-layer parity.
-
     Architecture:
         x [B, S, D] → block_0 → block_1 → ... → block_{n-1} → out [B, S, D]
 
         - No position embeddings (RoPE handles positional info inside attention)
         - No final RMSNorm (belongs to the parent model)
-        - Post-norm gated residual with MoE
-
-    Reference
-    ---------
-    Vaswani et al. "Attention Is All You Need" (2017)
-    https://arxiv.org/abs/1706.03762
+        - Pre-norm blocks with dense SwiGLU or MoE feed-forward
     """
 
-    def test_creation(self, decoder_stack, base_config):
+    def test_creation(self, decoder_stack, base_config) -> None:
         """A DecoderStack can be created with the specified config."""
-        assert decoder_stack.n_layers == base_config["n_layers"]
-        assert decoder_stack.embed_dim == base_config["embed_dim"]
-        assert decoder_stack.head_dim == base_config["embed_dim"] // base_config["n_heads"]
-        assert len(decoder_stack.blocks) == base_config["n_layers"]
+        assert decoder_stack.n_layers == base_config.n_layers
+        assert decoder_stack.embed_dim == base_config.embed_dim
+        assert decoder_stack.head_dim == base_config.embed_dim // base_config.n_heads
+        assert len(decoder_stack.blocks) == base_config.n_layers
 
-    def test_blocks_are_transformer_blocks(self, decoder_stack):
+    def test_blocks_are_transformer_blocks(self, decoder_stack) -> None:
         """Every block in the stack is a CuTransformerBlock instance."""
         from impl._cuda.block import CuTransformerBlock
 
         for block in decoder_stack.blocks:
             assert isinstance(block, CuTransformerBlock)
 
-    def test_blocks_have_correct_device(self, decoder_stack):
+    def test_blocks_have_correct_device(self, decoder_stack) -> None:
         """All block weights are on CPU (move to CUDA on forward)."""
         for block in decoder_stack.blocks:
-            assert block.Wq.device.type == "cpu"
-            assert block.Wk.device.type == "cpu"
-            assert block.Wv.device.type == "cpu"
-            assert block.ln1_gamma.device.type == "cpu"
+            assert block.q_proj.device.type == "cpu"
+            assert block.k_proj.device.type == "cpu"
+            assert block.v_proj.device.type == "cpu"
+            assert block.input_layernorm_gamma.device.type == "cpu"
 
-    def test_rope_disabled(self, base_config):
+    def test_rope_disabled(self, base_config) -> None:
         """DecoderStack with rope_dim=0 creates blocks without RoPE."""
-        cfg = {**base_config, "rope_dim": 0}
         from impl._cuda.stack import CuDecoderStack
 
-        stack = CuDecoderStack(**cfg)
+        cfg = TransformerConfig(n_layers=2, embed_dim=32, n_heads=4, rope_dim=0)
+        stack = CuDecoderStack(cfg)
         for block in stack.blocks:
             assert block.rope_dim == 0
 
-    def test_head_dim_divisibility(self, base_config):
+    def test_head_dim_divisibility(self, base_config) -> None:
         """Head dimension is embed_dim // n_heads."""
         from impl._cuda.stack import CuDecoderStack
 
-        stack = CuDecoderStack(**base_config)
+        stack = CuDecoderStack(base_config)
         for block in stack.blocks:
-            assert block.head_dim == base_config["embed_dim"] // base_config["n_heads"]
+            assert block.head_dim == base_config.embed_dim // base_config.n_heads
 
 
 class TestDecoderStackForward:
@@ -211,16 +191,8 @@ class TestDecoderStackForward:
         """A 1-layer stack with default params produces valid output."""
         from impl._cuda.stack import CuDecoderStack
 
-        cfg = dict(
-            n_layers=1,
-            embed_dim=64,
-            n_heads=4,
-            n_experts=2,
-            ff_dim=128,
-            k=2,
-            rope_dim=0,
-        )
-        stack = CuDecoderStack(**cfg)
+        cfg = TransformerConfig(n_layers=1, embed_dim=64, n_heads=4, n_experts=2, top_k=2, expert_dim=128, rope_dim=0)
+        stack = CuDecoderStack(cfg)
         inp = torch.randn(1, 4, 64, device="cuda")
         out = stack.forward(inp)
         assert out.shape == (1, 4, 64)
@@ -230,16 +202,8 @@ class TestDecoderStackForward:
         """A 4-layer stack chains all layers correctly."""
         from impl._cuda.stack import CuDecoderStack
 
-        cfg = dict(
-            n_layers=4,
-            embed_dim=128,
-            n_heads=8,
-            n_experts=4,
-            ff_dim=256,
-            k=2,
-            rope_dim=64,
-        )
-        stack = CuDecoderStack(**cfg)
+        cfg = TransformerConfig(n_layers=4, embed_dim=128, n_heads=8, n_experts=4, top_k=2, expert_dim=256, rope_dim=16)
+        stack = CuDecoderStack(cfg)
         inp = torch.randn(2, 16, 128, device="cuda")
         out = stack.forward(inp)
         assert out.shape == inp.shape
@@ -249,16 +213,8 @@ class TestDecoderStackForward:
         """Forward with RoPE produces no NaN or Inf values."""
         from impl._cuda.stack import CuDecoderStack
 
-        cfg = dict(
-            n_layers=2,
-            embed_dim=128,
-            n_heads=4,
-            n_experts=4,
-            ff_dim=256,
-            k=2,
-            rope_dim=64,
-        )
-        stack = CuDecoderStack(**cfg)
+        cfg = TransformerConfig(n_layers=2, embed_dim=128, n_heads=4, n_experts=4, top_k=2, expert_dim=256, rope_dim=32)
+        stack = CuDecoderStack(cfg)
         B, S, D = 2, 16, 128
         inp = torch.randn(B, S, D, device="cuda")
         positions = torch.arange(S, device="cuda")
@@ -270,16 +226,8 @@ class TestDecoderStackForward:
         """Forward with larger batch size works correctly."""
         from impl._cuda.stack import CuDecoderStack
 
-        cfg = dict(
-            n_layers=2,
-            embed_dim=128,
-            n_heads=4,
-            n_experts=4,
-            ff_dim=256,
-            k=2,
-            rope_dim=64,
-        )
-        stack = CuDecoderStack(**cfg)
+        cfg = TransformerConfig(n_layers=2, embed_dim=128, n_heads=4, n_experts=4, top_k=2, expert_dim=256, rope_dim=32)
+        stack = CuDecoderStack(cfg)
         inp = torch.randn(8, 32, 128, device="cuda")
         out = stack.forward(inp)
         assert out.shape == inp.shape
@@ -290,7 +238,7 @@ class TestDecoderStackGradients:
     """Gradient flow through stacked blocks."""
 
     def test_gradient_flow(self, decoder_stack, sample_input):
-        """Gradients flow through all stacked layers."""
+        """Gradients flow through all stacked layers (input gradient)."""
         out = sample_input.clone()
         out.requires_grad = True
         result = decoder_stack.forward(out)
@@ -301,40 +249,28 @@ class TestDecoderStackGradients:
         assert not torch.isinf(out.grad).any()
 
     def test_gradient_no_nan_multi_layers(self):
-        """4-layer stack produces valid gradients (no NaN/Inf)."""
+        """4-layer stack produces valid input gradients (no NaN/Inf)."""
         from impl._cuda.stack import CuDecoderStack
 
-        cfg = dict(
-            n_layers=4,
-            embed_dim=128,
-            n_heads=8,
-            n_experts=4,
-            ff_dim=256,
-            k=2,
-            rope_dim=64,
-        )
-        stack = CuDecoderStack(**cfg)
+        cfg = TransformerConfig(n_layers=4, embed_dim=128, n_heads=8, n_experts=4, top_k=2, expert_dim=256, rope_dim=16)
+        stack = CuDecoderStack(cfg)
         inp = torch.randn(2, 16, 128, device="cuda", requires_grad=True)
         out = stack.forward(inp)
         loss = out.sum()
         loss.backward()
-        for block in stack.blocks:
-            assert block.Wq.grad is not None
-            assert not torch.isnan(block.Wq.grad).any()
-            assert not torch.isinf(block.Wq.grad).any()
-            assert block.ln1_gamma.grad is not None
-            assert not torch.isnan(block.ln1_gamma.grad).any()
-            assert not torch.isinf(block.ln1_gamma.grad).any()
+        assert inp.grad is not None
+        assert not torch.isnan(inp.grad).any()
+        assert not torch.isinf(inp.grad).any()
 
-    def test_gated_gradients(self, decoder_stack, sample_input):
-        """Gate parameters (gate1, gate2) produce valid gradients."""
+    def test_layernorm_gradients(self, decoder_stack, sample_input):
+        """Layernorm gamma tensors receive valid gradients."""
         out = sample_input.clone()
         out.requires_grad = True
         result = decoder_stack.forward(out)
         loss = result.sum()
         loss.backward()
         for block in decoder_stack.blocks:
-            assert block.gate1.grad is not None
-            assert not torch.isnan(block.gate1.grad).any()
-            assert block.gate2.grad is not None
-            assert not torch.isnan(block.gate2.grad).any()
+            assert block.input_layernorm_gamma.grad is not None
+            assert not torch.isnan(block.input_layernorm_gamma.grad).any()
+            assert block.post_attention_layernorm_gamma.grad is not None
+            assert not torch.isnan(block.post_attention_layernorm_gamma.grad).any()

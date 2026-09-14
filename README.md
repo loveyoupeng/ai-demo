@@ -1,20 +1,43 @@
-# AI Transformer Demo (NumPy + PyTorch Dual-Backend)
+# AI Transformer Demo (Four-Backend)
 
-This repository is a pedagogical implementation of a decoder-only Transformer model with dual backends: NumPy (pure manual math) and PyTorch (explicit autograd). It is designed to demonstrate the internal mechanics of Large Language Models (LLMs),
-including Multi-Head Attention, Mixture of Experts (MoE), and manual backward passes for training.
+A pedagogical implementation of a decoder-only transformer with **four
+equivalent backends**: NumPy (pure manual math, the teaching reference),
+PyTorch (the production idiom), Triton (GPU kernels over a PyTorch model),
+and CUDA (bare-metal NVRTC kernels). All four tracks share the same
+architecture, the same key scheme, and the same config — a model trained on
+one track loads and runs on any other.
+
+See [CONTEXT.md](CONTEXT.md) for the domain glossary,
+[docs/specs/architecture-fixes.md](docs/specs/architecture-fixes.md) for the
+architecture spec and progress, and
+[docs/seam_triton_to_torch.md](docs/seam_triton_to_torch.md) for the
+documented Triton→PyTorch shared seam.
 
 ## Features
 
-- **Dual Backends**: Pure NumPy and PyTorch implementations with cross-backend parity testing (verified to < 1e-6 float64).
-- **Mixture of Experts (MoE)**: Implements a routing mechanism to use a subset of experts per token.
-- **Manual Backward Passes**: Gradients are computed explicitly in both backends for educational clarity.
-- **Autoregressive Generation**: Supports text generation with temperature sampling and KV caching.
-- **Model Checkpointing**: Easily save and load trained models and tokenizers.
-- **Cross-Backend Validation**: E2E tests verify that both backends produce identical forward and backward results.
+- **Four backends, one model**: NumPy (analytic backward, the math
+  reference), PyTorch (autograd + `F.scaled_dot_product_attention` +
+  `torch.optim`), Triton (FlashAttention-style online-softmax kernel), CUDA
+  (NVRTC kernels for RMSNorm, RoPE, attention, FFN).
+- **Standard architecture**: pre-norm LLaMA block
+  (`h = x + attn(ln1(x)); out = h + mlp(ln2(h))`), RMSNorm, GQA, RoPE,
+  SwiGLU (dense by default; MoE is opt-in), causal mask, no weight tying, no
+  biases.
+- **KV cache**: the per-token step path is exact (`forward_prefill` +
+  `forward_step` == full re-forward). The generators step one token per
+  iteration (O(1) per step). TurboQuant (1-bit quantized cache) is wired as
+  an alternative with a parity-budget test.
+- **Analytic backward** (NumPy): every operator has a closed-form
+  `backward(dout, x) -> (dinput, dparams)`; `check_model_gradients` verifies
+  it against finite differences (float64, ~1e-10).
+- **Cross-backend parity**: three-tier tolerance policy (see AGENTS.md rule
+  2); 42 cross-backend tests cover dense/GQA/MoE parity, GPU parity, and a
+  3-way equivalence demo.
+- **Checkpoint interchange**: one flat-dict key scheme
+  (`shared.constants.Keys`) + a parameter registry
+  (`shared/registry.py`) that validates shape and key-set on load.
 
 ## Installation
-
-Ensure you have `uv` installed.
 
 ```bash
 uv sync
@@ -22,121 +45,91 @@ uv sync
 
 ## Usage
 
-### Running Inference
-
-Generate text from a small model:
+### Inference
 
 ```bash
-# NumPy model inference
-uv run python -m impl._np.cli --prompt "hello" --max_new_tokens 10
+# NumPy
+uv run python -m impl._np.cli --prompt "the" --max_new_tokens 10
 
-# PyTorch model inference
-uv run python -m impl._torch.cli --prompt "hello" --max_new_tokens 10
+# PyTorch
+uv run python -m impl._torch.cli --prompt "the" --max_new_tokens 10
+
+# Triton (GPU)
+uv run python -m impl._triton.cli --prompt "the" --max_new_tokens 10
+
+# CUDA (GPU)
+uv run python -m impl._cuda.cli --prompt "the" --max_new_tokens 10
 
 # With custom parameters
 uv run python -m impl._torch.cli \
-    --prompt "hello" \
-    --max_new_tokens 20 \
-    --temperature 0.8 \
-    --embed_dim 32 \
-    --n_layers 2
+    --prompt "Once upon a" --max_new_tokens 50 \
+    --temperature 0.9 --top_k 20 \
+    --embed_dim 64 --n_layers 4 --n_heads 8
+```
+
+### Training
+
+```bash
+uv run python -m scripts.train --backend numpy|torch|triton|cuda
+```
+
+### Equivalence verification
+
+```bash
+uv run python -m scripts.verify_equivalence
 ```
 
 ### Testing
 
-Run the test suite:
-
 ```bash
-# Run all tests
-uv run pytest tests/ -v
+# All CPU unit tests (NumPy + PyTorch)
+uv run pytest tests/unit/ -q --timeout=120 \
+    --ignore=tests/unit/_cuda --ignore=tests/unit/_triton
 
-# Run NumPy backend tests
-uv run pytest tests/unit/_np/ -v
+# Triton unit tests (GPU)
+uv run pytest tests/unit/_triton/ -q --timeout=120
 
-# Run PyTorch backend tests
-uv run pytest tests/unit/_torch/ -v
+# CUDA unit tests (GPU; one file per invocation for NVRTC context isolation)
+for f in tests/unit/_cuda/test_*.py; do
+    uv run pytest "$f" -q --timeout=120
+done
 
-# Run cross-backend parity tests
-uv run pytest tests/cross_backend/ -v
+# Cross-backend parity tests (GPU)
+uv run pytest tests/cross_backend/ -q --timeout=120
 ```
 
-### Project Structure
+### Project structure
 
 ```
 impl/
-├── _np/                    # NumPy implementation
-│   ├── __init__.py
-│   ├── cli.py              # CLI entry point (training, inference)
-│   ├── inference.py        # Autoregressive generation logic
-│   ├── layers.py           # TokenEmbedding, LayerNorm, FeedForward, etc.
-│   ├── model.py            # NumPyModel: full transformer
-│   ├── training.py         # Training loop
-│   └── cross_entropy.py    # Cross-entropy loss
-│
-├── _torch/                 # PyTorch implementation
-│   ├── __init__.py
-│   ├── cli.py              # CLI entry point (inference)
-│   ├── cross_entropy.py    # Cross-entropy loss (F.cross_entropy)
-│   ├── inference.py        # Autoregressive generation with greedy/sampled/top-k
-│   ├── kv_cache.py         # Naive KV cache
-│   ├── layers.py           # Embedding, RMSNorm, SwiGLU, RoPE, MHA, MoE, AdamW
-│   ├── model_config.py     # ModelConfig dataclass + TorchModel stub
-│   ├── training.py         # Training loop (autograd)
-│   └── turboquant_kv_cache.py  # 1-bit compressed KV cache
-│
-shared/                     # Shared utilities (config, constants)
-tests/
-├── cross_backend/          # Cross-backend parity tests
-├── unit/
-│   ├── _np/               # NumPy backend tests (~75 tests)
-│   └── _torch/            # PyTorch backend tests (~70+ tests)
+├── _np/         # NumPy track (math reference; analytic backward)
+├── _torch/      # PyTorch track (production idiom; autograd + SDPA)
+├── _triton/     # Triton track (kernels over a PyTorch model)
+├── _cuda/       # CUDA track (NVRTC kernels)
+shared/
+├── config.py    # TransformerConfig (single source of truth)
+├── constants.py # Keys scheme + Attn/LayerNorm/Mlp constants
+├── registry.py  # ParameterRegistry (checkpoint format owner)
+docs/
+├── specs/architecture-fixes.md   # Spec + progress
+├── seam_triton_to_torch.md       # Documented shared seam
+└── docstring_style.md            # numpydoc + shape convention
 scripts/
-└── download_tinystories.py # Dataset download utility
+├── train.py             # Training loop (all backends)
+├── infer.py             # Inference (all backends)
+├── verify_equivalence.py # 6-scenario parity check
+tests/
+├── unit/           # Per-track unit tests
+└── cross_backend/  # Parity tests (dense/GQA/MoE, GPU, 3-way)
 ```
-
-## CLI Commands
-
-All commands run via `uv run python -m`:
-
-```bash
-# NumPy inference
-uv run python -m impl._np.cli --prompt "the" --max_new_tokens 10 --temperature 0.0
-
-# PyTorch inference
-uv run python -m impl._torch.cli --prompt "the" --max_new_tokens 10 --temperature 0.0
-
-# With all options
-uv run python -m impl._torch.cli \
-    --prompt "Once upon a" \
-    --max_new_tokens 50 \
-    --temperature 0.9 \
-    --top_k 20 \
-    --embed_dim 64 \
-    --n_layers 4 \
-    --n_heads 8
-```
-
-## Tests
-
-- **NumPy backend**: 70+ tests covering all layers, transformer, training loop, CLI.
-- **PyTorch backend**: 65+ tests mirroring NumPy tests. Tests include layers, training loop, KV cache (naive + TurboQuant), inference engine, CLI.
-- **Cross-backend**: Parity tests at three tiers per AGENTS.md:
-  - **Standalone layers** (isolated): rtol=1e-4, atol=1e-4
-  - **Single chain** (one layer chain): rtol=1e-3, atol=1e-3
-  - **Multi-layer chains**: rtol=1e-2, atol=1e-2
 
 ## Development
 
-Use `uv` for dependency management and running scripts:
-
 ```bash
-# Run tests
-uv run pytest tests/ -v
-
-# Lint and format
-uv run ruff check .
-uv run ruff format .
-
-# Type checking
+uv run ruff format . && uv run ruff check .
 uv run pyright .
+uv run pytest tests/ -v
 ```
+
+All code must be free of `ruff` and `pyright` issues; all unit tests must
+carry a `pytest-timeout` timeout (see AGENTS.md).

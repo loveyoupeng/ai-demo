@@ -110,7 +110,7 @@ import ctypes
 from typing import Any
 
 import torch
-from cuda import cuda as _cuda_lib
+from cuda.bindings import driver as _cuda_lib  # pyright: ignore[reportAttributeAccessIssue]
 
 from impl._cuda.compiler import compile_and_load, get_kernel_handle
 

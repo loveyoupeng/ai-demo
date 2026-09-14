@@ -6,6 +6,7 @@ Tests verify output shapes, gradient existence, and gradient shapes.
 import numpy as np
 
 from impl._np.model import NumPyModel
+from shared.config import TransformerConfig
 
 
 class TestNumPyModelForward:
@@ -16,15 +17,18 @@ class TestNumPyModelForward:
         input_ids = np.random.default_rng(0).integers(0, 16, (2, 4), dtype=np.int32)
 
         model = NumPyModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=16,
-            k=1,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=8,
+                n_layers=1,
+                n_heads=2,
+                n_groups=2,
+                n_experts=2,
+                top_k=1,
+                expert_dim=16,
+                rope_dim=0,
+                seed=0,
+            )
         )
         logits = model.forward(input_ids)
 
@@ -36,15 +40,18 @@ class TestNumPyModelForward:
         alt_ids = np.array([[10, 11, 12, 13]], dtype=np.int32)
 
         model = NumPyModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=16,
-            k=1,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=8,
+                n_layers=1,
+                n_heads=2,
+                n_groups=2,
+                n_experts=2,
+                top_k=1,
+                expert_dim=16,
+                rope_dim=0,
+                seed=0,
+            )
         )
 
         logits = model.forward(input_ids)
@@ -58,19 +65,22 @@ class TestNumPyModelForward:
         targets = np.random.default_rng(6).integers(0, 16, (1, 2), dtype=np.int32)
 
         model = NumPyModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=16,
-            k=1,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=8,
+                n_layers=1,
+                n_heads=2,
+                n_groups=2,
+                n_experts=2,
+                top_k=1,
+                expert_dim=16,
+                rope_dim=0,
+                seed=0,
+            )
         )
 
-        logits = model.forward(input_ids)
-        grads = model.backward(logits, targets, input_ids)
+        model.forward(input_ids)  # prime the forward pass before backward
+        grads = model.backward(input_ids, targets)
 
         params = model.get_all_parameters()
         for name, param in params.items():
@@ -87,15 +97,18 @@ class TestNumPyModelForward:
         input_ids = np.random.default_rng(10).integers(0, 16, (1, 3), dtype=np.int32)
 
         model = NumPyModel(
-            vocab_size=16,
-            embed_dim=32,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=16,
-            k=1,
-            rope_dim=0,
-            seed=42,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=32,
+                n_layers=1,
+                n_heads=2,
+                n_groups=2,
+                n_experts=2,
+                top_k=1,
+                expert_dim=16,
+                rope_dim=0,
+                seed=42,
+            )
         )
 
         logits = model.forward(input_ids)
@@ -112,19 +125,22 @@ class TestNumPyModelBackward:
         targets = np.random.default_rng(21).integers(0, 16, (1, 2), dtype=np.int32)
 
         model = NumPyModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=16,
-            k=1,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=8,
+                n_layers=1,
+                n_heads=2,
+                n_groups=2,
+                n_experts=2,
+                top_k=1,
+                expert_dim=16,
+                rope_dim=0,
+                seed=0,
+            )
         )
 
-        logits = model.forward(input_ids)
-        grads = model.backward(logits, targets, input_ids)
+        model.forward(input_ids)  # prime the forward pass before backward
+        grads = model.backward(input_ids, targets)
 
         params = model.get_all_parameters()
         for name, param in params.items():

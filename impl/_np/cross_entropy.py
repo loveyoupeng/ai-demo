@@ -93,7 +93,10 @@ class CrossEntropyLoss:
         # log_softmax(logits)[target] for each (batch, position)
         # Gather shift_logits[target] where shift_logits = logits - max  (numerically stable)
         # loss = logsumexp(shift) - shift_logits[target]  equals  logsumexp(logits) - logits[target]
-        target_index = targets[..., np.newaxis]  # (B, S, 1)
+        # Guard the gather: ignored targets may hold out-of-range sentinel
+        # values (e.g. -100); those positions are zeroed in step 3 anyway.
+        in_range = (targets >= 0) & (targets < logits.shape[-1])
+        target_index = np.where(in_range[..., np.newaxis], targets[..., np.newaxis], 0)  # (B, S, 1)
         target_logit = np.take_along_axis(shift_logits, target_index, axis=-1)  # (B, S, 1)
 
         # Per-position loss: logsumexp - logit[target]  >= 0
@@ -122,5 +125,56 @@ class CrossEntropyLoss:
             total_loss = float(np.sum(loss))  # (B, S, 1) -> scalar
 
         mean_loss = total_loss / valid_count  # float64 scalar
-
         return mean_loss
+
+    def backward(self, logits: np.ndarray, targets: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
+        """Gradient of the loss w.r.t. the logits (mirrors ``forward`` exactly).
+
+        Per-position derivation: loss_t = logsumexp(L_t) − L_t[T_t], and
+
+            d loss_t / d L_t = softmax(L_t) − onehot(T_t)
+
+        (the logsumexp term cancels: d logsumexp/dL_t = softmax). The mean
+        over valid positions divides every position by ``valid_count``;
+        ignored (``target == ignore_index``) and masked-out positions get
+        exactly zero gradient, matching the zeroed losses in ``forward``.
+
+        With ``shift=True`` the forward used ``logits[:, :-1]`` vs
+        ``targets[:, 1:]``; the returned gradient is un-shifted back to the
+        original (B, S, V) layout, with the last position at zero.
+
+        Returns: dlogits, same shape and (float) dtype as ``logits``.
+        """
+        if self.shift:
+            shifted_mask = mask[:, 1:] if mask is not None else None
+            d_shifted = self._backward_unshifted(logits[:, :-1], targets[:, 1:], shifted_mask)
+            full = np.zeros_like(logits, dtype=d_shifted.dtype)
+            full[:, :-1] = d_shifted
+            return full
+        return self._backward_unshifted(logits, targets, mask)
+
+    def _backward_unshifted(self, logits: np.ndarray, targets: np.ndarray, mask: np.ndarray | None) -> np.ndarray:
+        """Backward for already-aligned logits/targets (no shift)."""
+        # d logsumexp / d logits = softmax — reuse the stable form of forward.
+        max_logit = np.max(logits, axis=-1, keepdims=True)
+        exp_logits = np.exp(logits - max_logit)
+        softmax = exp_logits / np.sum(exp_logits, axis=-1, keepdims=True)  # (B, S, V)
+
+        # one-hot of the target per position.
+        onehot = np.zeros_like(softmax)
+        # Guard: ignored positions may carry out-of-range indices (e.g. -100);
+        # their gradient is zeroed below anyway, so place them at index 0.
+        in_range = (targets >= 0) & (targets < logits.shape[-1])
+        np.put_along_axis(onehot, np.where(in_range[..., np.newaxis], targets[..., np.newaxis], 0), 1.0, axis=-1)
+
+        dlogits = softmax - onehot  # (B, S, V)
+
+        # Zero the positions that forward excluded from the mean.
+        ignore = targets == self.ignore_index
+        valid = (~ignore) & (np.ones_like(ignore, dtype=bool) if mask is None else (mask == 1.0))
+        dlogits = np.where(valid[..., np.newaxis], dlogits, 0.0)
+
+        valid_count = float(np.sum(valid))
+        if valid_count == 0:
+            return np.zeros_like(logits, dtype=dlogits.dtype)
+        return dlogits / valid_count

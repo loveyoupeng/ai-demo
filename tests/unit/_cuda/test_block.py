@@ -2,10 +2,9 @@
 
 Tests cover:
   - Shape correctness (all tensors maintain proper dimensions)
-  - Weight initialization (gates zero, norms ones)
+  - Weight initialization (norms ones, projections bounded)
   - Attention computation (CUDA SDPA integration)
-  - Gated residual behavior (sigmoid gates control signal flow)
-  - MoE integration (CUDA MoE kernel)
+  - MoE integration (torch routing + per-expert CUDA SwiGLU)
   - Parameter availability for cross-backend parity
 """
 
@@ -19,6 +18,17 @@ from impl._cuda.block import (
     _init_weight,
     _init_zeros,
 )
+from shared.config import TransformerConfig
+
+
+def _block_cfg(**overrides) -> TransformerConfig:
+    defaults: dict[str, object] = dict(
+        vocab_size=64, embed_dim=32, n_layers=1, n_heads=4, n_experts=2, top_k=2, expert_dim=64, rope_dim=0, seed=42
+    )
+    defaults.update(overrides)
+    if "n_groups" not in overrides and "n_heads" in overrides:
+        defaults["n_groups"] = defaults["n_heads"]
+    return TransformerConfig.from_dict(defaults)
 
 
 class TestBlockInit:
@@ -26,30 +36,23 @@ class TestBlockInit:
 
     def test_block_creates_without_error(self) -> None:
         """Block instantiation must not raise."""
-        cfg = dict(
-            embed_dim=32, n_heads=4, n_experts=2, ff_dim=64, k=2, rope_dim=0, seed=42,
-        )
-        block = CuTransformerBlock(**cfg)
+        block = CuTransformerBlock(_block_cfg(), seed=42)
         assert block is not None
 
     def test_block_attributes_present(self) -> None:
         """All expected attributes must be present."""
-        cfg = dict(
-            embed_dim=32, n_heads=4, n_experts=2, ff_dim=64, k=2, rope_dim=0, seed=42,
-        )
-        block = CuTransformerBlock(**cfg)
+        block = CuTransformerBlock(_block_cfg(), seed=42)
         required = [
-            "ln1_gamma",
-            "ln2_gamma",
-            "gate1",
-            "gate2",
-            "Wq",
-            "Wk",
-            "Wv",
-            "Wo",
-            "expert_weights",
-            "expert_bias",
-            "routing_weights",
+            "input_layernorm_gamma",
+            "post_attention_layernorm_gamma",
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "router",
+            "expert_gate_proj",
+            "expert_up_proj",
+            "expert_down_proj",
         ]
         for attr in required:
             assert hasattr(block, attr), f"Missing attribute: {attr}"
@@ -57,60 +60,42 @@ class TestBlockInit:
 
     def test_ln_gamma_shape(self) -> None:
         """RMSNorm gamma: (D,)."""
-        cfg = dict(
-            embed_dim=64, n_heads=4, n_experts=2, ff_dim=128, k=2, rope_dim=0, seed=42,
-        )
-        D = cfg["embed_dim"]
-        block = CuTransformerBlock(**cfg)
-        assert block.ln1_gamma.shape == (D,)
-        assert block.ln2_gamma.shape == (D,)
-        assert torch.allclose(block.ln1_gamma, torch.ones(D))
-        assert torch.allclose(block.ln2_gamma, torch.ones(D))
-
-    def test_gate_initialization(self) -> None:
-        """Gates: initialized to zeros with shape (1,)."""
-        cfg = dict(
-            embed_dim=64, n_heads=4, n_experts=2, ff_dim=128, k=2, rope_dim=0, seed=42,
-        )
-        block = CuTransformerBlock(**cfg)
-        assert block.gate1.shape == (1,)
-        assert block.gate2.shape == (1,)
-        assert torch.allclose(block.gate1, torch.zeros(1))
-        assert torch.allclose(block.gate2, torch.zeros(1))
+        D = 32
+        block = CuTransformerBlock(_block_cfg(embed_dim=D), seed=42)
+        assert block.input_layernorm_gamma.shape == (D,)
+        assert block.post_attention_layernorm_gamma.shape == (D,)
+        assert torch.allclose(block.input_layernorm_gamma, torch.ones(D))
+        assert torch.allclose(block.post_attention_layernorm_gamma, torch.ones(D))
 
     def test_mha_weight_shapes(self) -> None:
-        """Q/K/V/O projections: (D, D)."""
-        cfg = dict(
-            embed_dim=64, n_heads=4, n_experts=2, ff_dim=128, k=2, rope_dim=0, seed=42,
-        )
-        D = cfg["embed_dim"]
-        block = CuTransformerBlock(**cfg)
-        assert block.Wq.shape == (D, D)
-        assert block.Wk.shape == (D, D)
-        assert block.Wv.shape == (D, D)
-        assert block.Wo.shape == (D, D)
+        """Q/K/V/O projections: (D, H*hd) / (D, G*hd) / (H*hd, D)."""
+        D, H, G, hd = 32, 4, 4, 8
+        block = CuTransformerBlock(_block_cfg(embed_dim=D, n_heads=H, n_groups=G), seed=42)
+        assert block.q_proj.shape == (D, H * hd)
+        assert block.k_proj.shape == (D, G * hd)
+        assert block.v_proj.shape == (D, G * hd)
+        assert block.o_proj.shape == (H * hd, D)
+
+    def test_gqa_k_v_shapes(self) -> None:
+        """GQA: k/v have n_groups heads, q has n_heads heads."""
+        D, H, G = 32, 6, 3
+        block = CuTransformerBlock(_block_cfg(embed_dim=D, n_heads=H, n_groups=G), seed=42)
+        assert block.q_proj.shape == (D, 6 * (D // 6))
+        assert block.k_proj.shape == (D, 3 * (D // 6))
+        assert block.v_proj.shape == (D, 3 * (D // 6))
 
     def test_moe_weight_shapes(self) -> None:
-        """Expert weights: (N, D, D), bias: (N, D), routing: (N, D)."""
-        cfg = dict(
-            embed_dim=32, n_heads=4, n_experts=3, ff_dim=64, k=2, rope_dim=0, seed=42,
-        )
-        D = cfg["embed_dim"]
-        N = cfg["n_experts"]
-        block = CuTransformerBlock(**cfg)
-        assert block.expert_weights.shape == (N, D, D)
-        assert block.expert_bias.shape == (N, D)
-        assert block.routing_weights.shape == (N, D)
-        assert torch.allclose(block.expert_weights, torch.zeros(N, D, D))
-        assert torch.allclose(block.expert_bias, torch.zeros(N, D))
-        assert torch.allclose(block.routing_weights, torch.zeros(N, D))
+        """MoE: router (D, E); expert gate/up (E, D, FF); expert down (E, FF, D)."""
+        E, D, FF = 2, 32, 64
+        block = CuTransformerBlock(_block_cfg(embed_dim=D, n_experts=E, expert_dim=FF), seed=42)
+        assert block.router.shape == (D, E)
+        assert block.expert_gate_proj.shape == (E, D, FF)
+        assert block.expert_up_proj.shape == (E, D, FF)
+        assert block.expert_down_proj.shape == (E, FF, D)
 
     def test_head_dim_divisibility(self) -> None:
         """head_dim = embed_dim // n_heads."""
-        cfg = dict(
-            embed_dim=64, n_heads=8, n_experts=2, ff_dim=128, k=2, rope_dim=0, seed=0,
-        )
-        block = CuTransformerBlock(**cfg)
+        block = CuTransformerBlock(_block_cfg(embed_dim=64, n_heads=8), seed=42)
         assert block.head_dim == 8
 
 
@@ -148,7 +133,9 @@ class TestInitHelpers:
         w1 = _init_weight(64, 64, seed=99)
         w2 = _init_weight(64, 64, seed=99)
         assert torch.equal(w1, w2), "Same seed must produce identical weights"
-        assert not torch.equal(_init_weight(64, 64, seed=99), _init_weight(64, 64, seed=100)), "Different seeds must differ"
+        assert not torch.equal(_init_weight(64, 64, seed=99), _init_weight(64, 64, seed=100)), (
+            "Different seeds must differ"
+        )
 
     def test_init_weight_forward_no_nan(self) -> None:
         """Block with _init_weight weights produces valid forward output (no NaN)."""
@@ -164,22 +151,10 @@ class TestBlockForward:
 
     @pytest.fixture()
     def block_on_cuda(self) -> CuTransformerBlock:
-        """Create block and move ALL weights to CUDA."""
-        cfg = dict(embed_dim=64, n_heads=4, n_experts=4, ff_dim=128, k=2, rope_dim=16, seed=42)
-        block = CuTransformerBlock(**cfg)
-        # Use .to() on the whole block to ensure all attributes move to CUDA
-        block.ln1_gamma = block.ln1_gamma.cuda()
-        block.ln2_gamma = block.ln2_gamma.cuda()
-        block.gate1 = block.gate1.cuda()
-        block.gate2 = block.gate2.cuda()
-        block.Wq = block.Wq.cuda()
-        block.Wk = block.Wk.cuda()
-        block.Wv = block.Wv.cuda()
-        block.Wo = block.Wo.cuda()
-        block.expert_weights = block.expert_weights.cuda()
-        block.expert_bias = block.expert_bias.cuda()
-        block.routing_weights = block.routing_weights.cuda()
-        return block
+        """Create block with MoE (forward moves weights to the input device)."""
+        return CuTransformerBlock(
+            _block_cfg(embed_dim=64, n_heads=4, n_experts=4, expert_dim=128, top_k=2, rope_dim=16, seed=42), seed=42
+        )
 
     @pytest.fixture()
     def positions(self) -> torch.Tensor:
@@ -189,25 +164,25 @@ class TestBlockForward:
         """Forward must preserve (B, S, D) shape."""
         B, S, D = 2, 8, 64
         x = torch.randn(B, S, D, device="cuda")
-        block_on_cuda.rope_dim = 0  # disable rope for this test
-        out = block_on_cuda.forward(x, positions, training=False)
+        out = block_on_cuda.forward(x, positions)
         assert out.shape == (B, S, D), f"Expected ({B}, {S}, {D}), got {out.shape}"
 
     def test_forward_fp32(self, block_on_cuda: CuTransformerBlock, positions: torch.Tensor) -> None:
         """Forward must work with fp32 input."""
         B, S, D = 1, 4, 64
         x = torch.randn(B, S, D, device="cuda", dtype=torch.float32)
-        block_on_cuda.rope_dim = 0
-        out = block_on_cuda.forward(x, positions, training=False)
+        out = block_on_cuda.forward(x, torch.arange(S, device="cuda"))
         assert out.dtype == torch.float32
         assert out.shape == (B, S, D)
 
-    def test_forward_no_rope(self, block_on_cuda: CuTransformerBlock, positions: torch.Tensor) -> None:
+    def test_forward_no_rope(self) -> None:
         """Forward with rope_dim=0 must work."""
+        block = CuTransformerBlock(
+            _block_cfg(embed_dim=64, n_heads=4, n_experts=1, top_k=1, expert_dim=128, rope_dim=0, seed=42), seed=42
+        )
         B, S, D = 2, 4, 64
         x = torch.randn(B, S, D, device="cuda")
-        block_on_cuda.rope_dim = 0
-        out = block_on_cuda.forward(x, positions, training=False)
+        out = block.forward(x, torch.arange(S, device="cuda"))
         assert out.shape == (B, S, D)
         assert torch.isfinite(out).all()
 
@@ -215,91 +190,65 @@ class TestBlockForward:
         """Forward with explicit positions must work."""
         B, S, D = 1, 8, 64
         x = torch.randn(B, S, D, device="cuda")
-        out = block_on_cuda.forward(x, positions, training=False)
+        out = block_on_cuda.forward(x, positions)
         assert out.shape == (B, S, D)
         assert torch.isfinite(out).all()
 
     def test_forward_with_rope(self, block_on_cuda: CuTransformerBlock, positions: torch.Tensor) -> None:
-        """Forward with rope_dim > 0 must produce correct output."""
+        """Forward with rope_dim > 0 must produce finite output."""
         B, S, D = 1, 8, 64
         x = torch.randn(B, S, D, device="cuda")
-        block_on_cuda.rope_dim = 16
-        out = block_on_cuda.forward(x, positions, training=False)
+        out = block_on_cuda.forward(x, positions)
         assert out.shape == (B, S, D)
         assert torch.isfinite(out).all()
 
-    def test_gate_effect(self, block_on_cuda: CuTransformerBlock, positions: torch.Tensor) -> None:
-        """Zero gates → block output ≈ x (identity at init)."""
-        B, S, D = 1, 4, 64
-        x = torch.randn(B, S, D, device="cuda")
-        block_on_cuda.rope_dim = 0
-        # Gates are zero → sigmoid(0) = 0.5, not exactly identity
-        # But the output should still be bounded (no explode / NaN)
-        out = block_on_cuda.forward(x, positions, training=False)
-        assert torch.isfinite(out).all()
-        # With zero gates and all-zero expert weights, MoE outputs zero
-        # With sigmoid(0)=0.5, gated residual adds 50% of previous value
-        # Output should be finite
-        assert out.numel() > 0
-
     def test_forward_all_zero_block(self) -> None:
-        """Block with all-zero weights and zero gates → output = residual (x only)."""
-        cfg = dict(embed_dim=16, n_heads=2, n_experts=2, ff_dim=32, k=1, rope_dim=0, seed=0)
-        block = CuTransformerBlock(**cfg)
-        # All weights already zero (Wq=init, but expert_weights=bias=routing all zero)
-        # Set attention weights to zero too
+        """Block with all-zero weights → attention/FFN contribute nothing (residual only)."""
+        block = CuTransformerBlock(
+            _block_cfg(embed_dim=16, n_heads=2, n_experts=1, top_k=1, expert_dim=32, rope_dim=0, seed=0), seed=0
+        )
         with torch.no_grad():
-            block.Wq.zero_()
-            block.Wk.zero_()
-            block.Wv.zero_()
-            block.Wo.zero_()
-        d = cfg["embed_dim"]  # 16
-        s = 2  # seq len
-        # Create proper (B, S, D) shape input
+            block.q_proj.zero_()
+            block.k_proj.zero_()
+            block.v_proj.zero_()
+            block.o_proj.zero_()
+            block.gate_proj.zero_()
+            block.up_proj.zero_()
+            block.down_proj.zero_()
+        d = 16
+        s = 2
         x = torch.zeros(1, s, d, device="cuda")
         x[0, 0, :8] = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0], device="cuda")
         x[0, 1, 8:] = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0], device="cuda")
-        out = block.forward(x, torch.zeros(2, device="cuda"), training=False)
+        out = block.forward(x, torch.zeros(2, device="cuda"))
         assert out.shape == (1, s, d)
+        # Zero weights: out = x + 0 + 0 = x
+        assert torch.allclose(out, x, atol=1e-4)
 
     def test_forward_large_batch(self, block_on_cuda: CuTransformerBlock, positions: torch.Tensor) -> None:
         """Forward must handle larger batch sizes."""
         B, S, D = 4, 16, 64
         x = torch.randn(B, S, D, device="cuda")
-        block_on_cuda.rope_dim = 0
         pos = torch.arange(S, device="cuda")
-        out = block_on_cuda.forward(x, pos, training=False)
+        out = block_on_cuda.forward(x, pos)
         assert out.shape == (B, S, D)
         assert torch.isfinite(out).all()
 
 
 class TestBlockMoEIntegration:
-    """Test MoE kernel integration within the block."""
+    """Test MoE integration within the block."""
 
     @pytest.fixture()
     def block_on_cuda(self) -> CuTransformerBlock:
-        """Create block and move ALL weights to CUDA."""
-        cfg = dict(embed_dim=32, n_heads=2, n_experts=3, ff_dim=64, k=2, rope_dim=0, seed=7)
-        block = CuTransformerBlock(**cfg)
-        block.ln1_gamma = block.ln1_gamma.cuda()
-        block.ln2_gamma = block.ln2_gamma.cuda()
-        block.gate1 = block.gate1.cuda()
-        block.gate2 = block.gate2.cuda()
-        block.Wq = block.Wq.cuda()
-        block.Wk = block.Wk.cuda()
-        block.Wv = block.Wv.cuda()
-        block.Wo = block.Wo.cuda()
-        block.expert_weights = block.expert_weights.cuda()
-        block.expert_bias = block.expert_bias.cuda()
-        block.routing_weights = block.routing_weights.cuda()
-        return block
+        return CuTransformerBlock(
+            _block_cfg(embed_dim=32, n_heads=2, n_experts=3, expert_dim=64, top_k=2, rope_dim=0, seed=7), seed=7
+        )
 
     def test_moe_output_via_block(self, block_on_cuda: CuTransformerBlock) -> None:
         """MoE output must be (B, S, D)."""
         B, S, D = 1, 4, 32
         x = torch.randn(B, S, D, device="cuda")
-        block_on_cuda.rope_dim = 0
-        out = block_on_cuda.forward(x, torch.zeros(S, device="cuda"), training=False)
+        out = block_on_cuda.forward(x, torch.zeros(S, device="cuda"))
         assert out.shape == (B, S, D)
         assert torch.isfinite(out).all()
 
@@ -307,20 +256,15 @@ class TestBlockMoEIntegration:
         """Different expert weights must produce different outputs."""
         B, S, D = 1, 2, 32
         x = torch.randn(B, S, D, device="cuda")
-        block_on_cuda.rope_dim = 0
 
-        # Forward pass 1 (random weights)
-        out1 = block_on_cuda.forward(x, torch.zeros(S, device="cuda"), training=False)
+        out1 = block_on_cuda.forward(x, torch.zeros(S, device="cuda"))
 
-        # Forward pass 2 (with different expert weights)
-        block_on_cuda.expert_weights.data = torch.randn(
-            block_on_cuda.n_experts, D, D, device="cuda"
-        ) * 0.1
-        block_on_cuda.expert_bias.data = torch.randn(
-            block_on_cuda.n_experts, D, device="cuda"
-        ) * 0.1
-        out2 = block_on_cuda.forward(x, torch.zeros(S, device="cuda"), training=False)
+        # Perturb the expert weights
+        with torch.no_grad():
+            block_on_cuda.expert_gate_proj.add_(torch.randn_like(block_on_cuda.expert_gate_proj) * 0.1)
+            block_on_cuda.expert_up_proj.add_(torch.randn_like(block_on_cuda.expert_up_proj) * 0.1)
+            block_on_cuda.expert_down_proj.add_(torch.randn_like(block_on_cuda.expert_down_proj) * 0.1)
+        out2 = block_on_cuda.forward(x, torch.zeros(S, device="cuda"))
 
-        # Outputs should differ (different expert computations)
         assert not torch.allclose(out1, out2, atol=1e-4)
         assert torch.isfinite(out2).all()

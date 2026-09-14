@@ -30,7 +30,7 @@ class TestRMSNormForward:
         layer = RMSNorm(embed_dim)
 
         with torch.no_grad():
-            layer.gamma.fill_(1.0)
+            layer.weight.fill_(1.0)
 
         x = torch.randn(batch, seq_len, embed_dim, dtype=torch.float64)
         output = layer(x)
@@ -52,7 +52,7 @@ class TestRMSNormForward:
 
         # Set gamma to 2
         with torch.no_grad():
-            layer.gamma.fill_(2.0)
+            layer.weight.fill_(2.0)
 
         x = torch.randn(batch, seq_len, embed_dim, dtype=torch.float64)
         output = layer(x)
@@ -72,7 +72,7 @@ class TestRMSNormForward:
         layer = RMSNorm(embed_dim)
 
         with torch.no_grad():
-            layer.gamma.fill_(1.0)
+            layer.weight.fill_(1.0)
 
         batch_x = torch.randn(3, 6, embed_dim, dtype=torch.float64)
         output = layer(batch_x)
@@ -112,6 +112,6 @@ class TestRMSNormBackward:
         loss = output.sum()
         loss.backward()
 
-        assert layer.gamma.grad is not None
-        assert layer.gamma.grad.shape == layer.gamma.shape
-        assert torch.all(torch.isfinite(layer.gamma.grad))
+        assert layer.weight.grad is not None
+        assert layer.weight.grad.shape == layer.weight.shape
+        assert torch.all(torch.isfinite(layer.weight.grad))

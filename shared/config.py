@@ -28,18 +28,22 @@ class TransformerConfig:
     # Architecture
     vocab_size: int = 4096  # Token vocabulary size
     context_length: int = 256  # Max sequence length for training
-    embed_dim: int = 512  # Hidden dimension
+    embed_dim: int = 512  # Hidden dimension (model width D)
     n_layers: int = 8  # Number of transformer blocks
     n_heads: int = 8  # Number of query heads
-    n_groups: int = 8  # K/V heads (1=GQA, n_heads=self-attn)
+    n_groups: int | None = None  # None → n_heads (standard MHA); else K/V heads (must divide n_heads)
 
-    # Positional Encoding
-    rope_dim: int = 0  # 0=full, >0=partial
+    # Positional encoding
+    # 0 → rotate all head dimensions (standard RoPE).
+    # 0 < rope_dim < head_dim → rotate the first rope_dim dimensions only.
+    rope_dim: int = 0
 
-    # Mixture of Experts
-    n_experts: int = 4  # Number of MoE experts
-    top_k: int = 2  # Top-k experts per token
-    expert_dim: int = 0  # 0 = 4x embed_dim (auto)
+    # Mixture of Experts (opt-in)
+    # n_experts == 1 → standard dense SwiGLU feed-forward (no MoE).
+    # n_experts > 1 → MoE: router + top-k over SwiGLU experts.
+    n_experts: int = 1
+    top_k: int = 1  # Top-k experts per token (1 <= top_k <= n_experts)
+    expert_dim: int = 0  # FFN hidden dimension; 0 = 4 * embed_dim (standard)
 
     # Inference
     max_length: int = 2048  # Max generation length
@@ -51,6 +55,7 @@ class TransformerConfig:
 
     # Training
     seed: int = 42
+    norm_eps: float = 1e-6  # Epsilon for RMSNorm (one value for all tracks)
 
     # Derived (computed)
     head_dim: int = field(init=False, default=0)  # = embed_dim // n_heads
@@ -64,7 +69,11 @@ class TransformerConfig:
         assert self.embed_dim > 0, "embed_dim must be positive"
         assert self.n_layers > 0, "n_layers must be positive"
         assert self.n_heads > 0, "n_heads must be positive"
-        assert 1 <= self.n_groups <= self.n_heads, f"n_groups must be in [1, n_heads], got {self.n_groups}"
+        # Resolve n_groups (None → n_heads) once; all derived math uses the int.
+        n_groups = self.n_heads if self.n_groups is None else self.n_groups
+        assert 1 <= n_groups <= self.n_heads, f"n_groups must be in [1, n_heads], got {n_groups}"
+        object.__setattr__(self, "n_groups", n_groups)
+        assert self.n_heads % n_groups == 0, f"n_heads must be divisible by n_groups ({self.n_heads} % {n_groups})"
         assert self.n_experts > 0, "n_experts must be positive"
         assert 1 <= self.top_k <= self.n_experts, f"top_k must be in [1, n_experts], got {self.top_k}"
         assert self.quant_type in ("none", "1-bit", "2-bit", "4-bit"), (
@@ -75,18 +84,24 @@ class TransformerConfig:
         )
 
         head_dim = self.embed_dim // self.n_heads
-        assert self.rope_dim == 0 or self.rope_dim <= head_dim, (
-            f"rope_dim must be 0 or <= head_dim ({head_dim}), got {self.rope_dim}"
+        assert self.rope_dim == 0 or (self.rope_dim <= head_dim and self.rope_dim % 2 == 0), (
+            f"rope_dim must be 0 or an even number <= head_dim ({head_dim}), got {self.rope_dim}"
         )
         object.__setattr__(self, "head_dim", head_dim)
-        object.__setattr__(self, "k_dim", self.n_groups * head_dim)
-        object.__setattr__(self, "v_dim", self.n_groups * head_dim)
+        object.__setattr__(self, "k_dim", n_groups * head_dim)
+        object.__setattr__(self, "v_dim", n_groups * head_dim)
         if self.expert_dim == 0:
             object.__setattr__(self, "expert_dim", self.embed_dim * 4)
 
     def is_gqa(self) -> bool:
         """GQA active when n_groups < n_heads (multiple query heads share one K/V head)."""
-        return self.n_groups < self.n_heads
+        return self.kv_heads < self.n_heads
+
+    @property
+    def kv_heads(self) -> int:
+        """Resolved K/V head count (``n_groups``; ``None`` already resolved to ``n_heads``)."""
+        assert self.n_groups is not None
+        return self.n_groups
 
     def has_moe(self) -> bool:
         """MoE active when n_experts > 1."""

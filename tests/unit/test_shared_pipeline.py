@@ -51,7 +51,7 @@ class TestCheckpointSaveLoadParams:
 
         cfg = TransformerConfig()
         with tempfile.TemporaryDirectory() as tmp:
-            save_checkpoint(tmp, cfg, embed=np.zeros((10, 5)))
+            save_checkpoint(tmp, cfg, params={"model.embed_tokens": np.zeros((cfg.vocab_size, cfg.embed_dim))})
             assert (Path(tmp) / "model.npz").exists()
 
 
@@ -103,33 +103,35 @@ class TestFullPipeline:
         from shared.config import TransformerConfig
 
         cfg = TransformerConfig(vocab_size=64, embed_dim=16, n_layers=2)
+        from shared.registry import ParameterRegistry
+
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)
 
-            embed = np.random.randn(64, 16)
-            lm_head_w = np.random.randn(64, 16)
-            lm_head_b = np.random.randn(1, 64)
+            # A complete checkpoint: every registry key with its expected shape.
+            reg = ParameterRegistry(cfg)
+            params_in = {k: np.random.randn(*s) for k, s in reg.expected_shapes().items()}
+            save_checkpoint(path, cfg, params=params_in)
 
-            save_checkpoint(
-                path,
-                cfg,
-                embed=embed,
-                lm_head__weight=lm_head_w,
-                lm_head__bias=lm_head_b,
-            )
+            # Stale (pre-migration) keys must be rejected by the registry.
+            on_disk = dict(np.load(path / "model.npz"))
+            stale = dict(on_disk)
+            stale["blocks.0.attn.q.weight"] = np.zeros(1)
+            try:
+                reg.validate(stale)
+                raise AssertionError("stale checkpoint should have been rejected")
+            except ValueError:
+                pass
 
             params, loaded_cfg = load_checkpoint(path)
 
             assert loaded_cfg is not None
             assert loaded_cfg.vocab_size == 64
             assert loaded_cfg.embed_dim == 16
-            assert len(params) == 3
-            assert "embed" in params
-            assert "lm_head__weight" in params
-            assert "lm_head__bias" in params
-            assert np.allclose(params["embed"], embed)
-            assert np.allclose(params["lm_head__weight"], lm_head_w)
-            assert np.allclose(params["lm_head__bias"], lm_head_b)
+            assert len(params) == len(reg.keys())
+            for k, v in params_in.items():
+                assert k in params
+                assert np.allclose(params[k], v), f"roundtrip mismatch for {k}"
 
 
 class TestMinimalConfig:
@@ -148,27 +150,29 @@ class TestMinimalConfig:
             n_experts=1,
             top_k=1,
         )
+        from shared.registry import ParameterRegistry
+
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)
-            save_checkpoint(path, cfg, weight=np.ones((8, 8)))
+            reg = ParameterRegistry(cfg)
+            params_in = {k: np.ones(s) for k, s in reg.expected_shapes().items()}
+            save_checkpoint(path, cfg, params=params_in)
             params, loaded_cfg = load_checkpoint(path)
 
             assert loaded_cfg is not None
             assert loaded_cfg.vocab_size == 32
             assert loaded_cfg.embed_dim == 8
             assert loaded_cfg.n_layers == 1
-            assert "weight" in params
-
-
-class TestCheckpointWithoutConfig:
-    """Test checkpoint save/load when config is not provided."""
+            assert set(params) == set(reg.keys())
 
     def test_save_checkpoint_without_config(self):
+        """Without config.json the load skips registry validation (no config to derive keys from)."""
         from shared.checkpoint import load_checkpoint, save_checkpoint
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)
-            save_checkpoint(path, weight=np.zeros((10, 5)))
+            params = {"model.embed_tokens": np.zeros((10, 5))}
+            save_checkpoint(path, params=params)
             params, loaded_cfg = load_checkpoint(path)
             assert params is not None
             assert loaded_cfg is None
@@ -184,7 +188,7 @@ class TestCheckpointDirectoryCreation:
         cfg = TransformerConfig()
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "a" / "b" / "c"
-            save_checkpoint(path, cfg, weight=np.zeros((5, 5)))
+            save_checkpoint(path, cfg, params={"model.embed_tokens": np.zeros((5, 5))})
             assert path.exists()
 
 

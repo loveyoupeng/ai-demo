@@ -36,7 +36,7 @@ class TestClipGradients:
         grads = {"w": torch.tensor([3.0, 4.0]), "b": torch.tensor([1.0, 1.0])}
         # norm = sqrt(9+16+1+1) = 5.0, max_norm = 2.0
         clip_gradients(grads, max_norm=2.0)
-        global_norm = torch.sqrt(sum((g**2).sum() for g in grads.values())).item()
+        global_norm = torch.sqrt(sum([(g**2).sum() for g in grads.values()], torch.tensor(0.0))).item()
         assert abs(global_norm - 2.0) < 1e-4
 
     @pytest.mark.timeout(10)

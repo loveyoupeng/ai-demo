@@ -50,35 +50,38 @@ class TestScaledAttentionKernel:
         assert torch.isfinite(out).all(), "Output contains NaN or Inf"
 
     @pytest.mark.timeout(30)
-    def test_zero_qk_scores(self):
-        """Large negative QK scores → near-zero attention output (all mass on one key)."""
+    def test_causal_uniform_attention(self):
+        """All-equal K/V → each query averages over its causal keys (j <= i)."""
         skip_if_no_gpu()
         from impl._triton.attn import scaled_dot_product_attention
 
         B, H, S, d = 1, 1, 3, 8
         q = torch.ones(B, H, S, d, dtype=torch.float64, device="cuda")
         k = -100.0 * torch.ones(B, H, S, d, dtype=torch.float64, device="cuda")
-        v = torch.zeros(B, H, S, d, dtype=torch.float64, device="cuda")
+        v = torch.arange(S, dtype=torch.float64, device="cuda").repeat_interleave(d).view(1, 1, S, d)
 
-        out = scaled_dot_product_attention(q, k, v)
-        # All attention mass on first key (which has value 0)
-        expected = v[:, :, 0:1, :].expand(B, H, S, d)
+        out = scaled_dot_product_attention(q, k, v, is_causal=True)
+        # Row i spreads equal weight over keys 0..i: mean of 0..i.
+        expected = (
+            torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64, device="cuda").repeat_interleave(d).view(1, 1, S, d)
+        )
         torch.testing.assert_close(out, expected, rtol=1e-2, atol=1e-2)
 
     @pytest.mark.timeout(30)
-    def test_identity_kv(self):
-        """K=V=I → output ≈ q (max attention mass on diagonal)."""
+    def test_causal_prefix_invariance(self):
+        """Causality: extending a sequence leaves every prefix output unchanged."""
         skip_if_no_gpu()
         from impl._triton.attn import scaled_dot_product_attention
 
-        B, H, S, d = 1, 1, 5, 8
-        q = torch.randn(B, H, S, d, dtype=torch.float64, device="cuda")
-        k = torch.eye(d, dtype=torch.float64, device="cuda").unsqueeze(0).unsqueeze(0)[:, :, :S, :]
-        v = torch.eye(d, dtype=torch.float64, device="cuda").unsqueeze(0).unsqueeze(0)[:, :, :S, :]
+        B, H, d = 1, 1, 8
+        S1, S2 = 6, 10
+        q2 = torch.randn(B, H, S2, d, dtype=torch.float64, device="cuda")
+        k2 = torch.randn(B, H, S2, d, dtype=torch.float64, device="cuda")
+        v2 = torch.randn(B, H, S2, d, dtype=torch.float64, device="cuda")
 
-        out = scaled_dot_product_attention(q, k, v)
-        # With large QK, q's similarity with k determines mask
-        assert torch.isfinite(out).all()
+        out_long = scaled_dot_product_attention(q2, k2, v2, is_causal=True)
+        out_short = scaled_dot_product_attention(q2[:, :, :S1], k2[:, :, :S1], v2[:, :, :S1], is_causal=True)
+        torch.testing.assert_close(out_long[:, :, :S1], out_short, rtol=5e-3, atol=1.5e-3)
 
     @pytest.mark.timeout(30)
     def test_parity_with_torch_sdpa(self):

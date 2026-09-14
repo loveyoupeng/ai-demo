@@ -5,7 +5,7 @@ All tests fail initially. Implement after verifying failure.
 
 import numpy as np
 
-from impl._np.modules import SwiGLUFFN
+from impl._np.ffn import SwiGLUFFN
 
 
 class TestSwiGLUFFNForward:
@@ -54,9 +54,8 @@ class TestSwiGLUFFNForward:
         layer = SwiGLUFFN(4, 8, seed=0)
         out_base = layer.forward(x.copy())
 
-        # Perturb the first weight matrix slightly
-        w1_orig = layer.W1.copy()
-        layer.W1 = w1_orig + 0.1
+        w1_orig = layer.gate_proj.copy()
+        layer.gate_proj = w1_orig + 0.1
 
         out_perturbed = layer.forward(x.copy())
 
@@ -69,8 +68,8 @@ class TestSwiGLUFFNForward:
         layer = SwiGLUFFN(4, 8, seed=0)
         out_base = layer.forward(x.copy())
 
-        w3_orig = layer.W3.copy()
-        layer.W3 = w3_orig + 0.1
+        w3_orig = layer.up_proj.copy()
+        layer.up_proj = w3_orig + 0.1
 
         out_perturbed = layer.forward(x.copy())
 

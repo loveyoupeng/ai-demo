@@ -1,377 +1,365 @@
-"""B6.2: Full NumPyModel — decoder-only transformer with embedding + SwiGLU output.
+"""The NumPy reference model: decoder-only transformer.
 
-Forward: tokens → embedding → stack → layernorm → SwiGLU(output_proj) → logits [B, S, V]
+Forward pass (the standard LLaMA-style layout):
+
+    input_ids (B, S)
+    → embed_tokens                          (B, S, D)
+    → DecoderStack (n_layers blocks)        (B, S, D)
+    → final RMSNorm                         (B, S, D)
+    → lm_head (linear D → V)                (B, S, V)  = logits
+
+Parameter keys follow the flat-dict scheme in ``shared.constants``
+(HuggingFace Llama naming), which is the cross-backend checkpoint contract.
 """
 
 import logging
 
 import numpy as np
 
-from impl._np.modules import DecoderStack, Embedding, RMSNorm, SwiGLUFFN
-from shared.constants import Block, Transformer
+from impl._np.cross_entropy import CrossEntropyLoss
+from impl._np.embedding import Embedding
+from impl._np.ffn import SwiGLUFFN
+from impl._np.layernorm import RMSNorm
+from impl._np.moe import MixtureOfExperts
+from impl._np.rope import RoPE
+from impl._np.stack import DecoderStack
+from shared.config import TransformerConfig
+from shared.constants import ATTN_PROJS, FFN_PROJS, Attn, Keys, LayerNorm, Mlp
+from shared.registry import ParameterRegistry
 
 logger = logging.getLogger(__name__)
 
 
 class NumPyModel:
-    """Complete decoder-only transformer model in NumPy.
+    """Complete decoder-only transformer in NumPy.
 
-    Parameters
-    ----------
-    vocab_size : int
-        Vocabulary size (embedding table dimension).
-    embed_dim : int
-        Hidden embedding dimension.
-    n_layers : int
-        Number of TransformerBlocks.
-    n_heads : int
-        Number of attention heads per block.
-    n_experts : int
-        Number of MoE experts per block.
-    ff_dim : int
-        Hidden dimension for MoE experts.
-    k : int
-        Number of top experts to activate (0 = no MoE, uses gated FFN instead).
-    rope_dim : int
-        Number of head dimensions for RoPE (0 = no RoPE).
-    seed : int
-        Random seed for weight initialization.
+    This class is the *reference implementation*: it owns all parameter
+    arrays and the forward/backward/optimization loop, and it is the track
+    that the PyTorch/Triton/CUDA tracks are verified against by the
+    cross-backend parity tests.
 
-    Forward
-    -------
-    input_ids : np.ndarray, shape (batch_size, seq_len), dtype int32
-        Token IDs for each position.
-
-    Returns
-    -------
-    logits : np.ndarray, shape (batch_size, seq_len, vocab_size)
-        Predicted logits for each vocabulary token.
-
-    Architecture
-    ------------
-    Input tokens [B,S] → embedding [B,S,D] → stack [B,S,D] → final_RMSNorm [B,S,D]
-    → SwiGLU output_proj [B,S,V] → logits
-
-    Parameters
-    ----------
-    - embedding.weights: [vocab, D]
-    - stack.blocks[i].mha.Wq: [D, n_heads*head_dim]
-    - stack.blocks[i].mha.Wk: [D, n_groups*head_dim]
-    - stack.blocks[i].mha.Wv: [D, n_groups*head_dim]
-    - stack.blocks[i].mha.Wo: [n_heads*head_dim, D]
-    - stack.blocks[i].mha.bq/bk/bv/bo: bias vectors
-    - stack.blocks[i].moe.router: [D, n_experts]
-    - stack.blocks[i].moe.bias: [n_experts]
-    - stack.blocks[i].moe.experts[j].W1/W2/W3: SwiGLU weights
-    - stack.blocks[i].ln1_gamma/ln2_gamma: layer norm gamma
-    - final_gamma: [D] — final LayerNorm gamma
-    - output.W1: [D, ff_dim], output.W2: [ff_dim, D], output.W3: [D, ff_dim]
-    - output.b1/b3: SwiGLU bias
-
+    All parameters are stored as NumPy float32 arrays and addressed by the
+    flat keys defined in ``shared.constants.Keys`` (see that module for the
+    full key → shape table).
     """
 
-    NP_EMBEDDING: str = "model.embedding"
-    NP_STACK_PREFIX: str = "model.blocks"
-    NP_FINAL: str = "model.final_ln"
-    NP_OUTPUT: str = "model.output"
+    def __init__(self, config: TransformerConfig) -> None:
+        """Build the model from a :class:`TransformerConfig`.
 
-    def __init__(
-        self,
-        vocab_size: int,
-        embed_dim: int,
-        n_layers: int,
-        n_heads: int,
-        n_experts: int,
-        ff_dim: int,
-        k: int = 2,
-        rope_dim: int = 0,
-        seed: int = 0,
-    ) -> None:
-        self.seed = seed
-        self.vocab_size = vocab_size
-        self.embed_dim = embed_dim
-        self.n_layers = n_layers
-        self.n_heads = n_heads
-        self.n_experts = n_experts
-        self.k = k
-        self.rope_dim = rope_dim
-
-        # Embedding layer
-        self.embedding = Embedding()
-        self.embedding_weights = np.random.default_rng(seed).random((vocab_size, embed_dim), dtype=np.float32)
-
-        # Decoder stack
-        self.stack = DecoderStack(
-            n_layers=n_layers,
-            embed_dim=embed_dim,
-            n_heads=n_heads,
-            n_experts=n_experts,
-            ff_dim=ff_dim,
-            k=k,
-            rope_dim=rope_dim,
-            seed=seed + 100,
-        )
-
-        # Final layer normalization
-        self.final_ln_gamma = np.ones(embed_dim, dtype=np.float32)
-
-        # Output projection — SwiGLU
-        # Maps [D] → [D] (same embed_dim, to project to vocab size)
-        # The output_proj is a separate SwiGLU that maps hidden to vocab
-        # W1: [D, ff_dim_out], W3: [D, ff_dim_out], W2: [ff_dim_out, D]
-        ff_dim_out = embed_dim * 2  # output projection hidden dim
-        self.output = SwiGLUFFN(embed_dim, ff_dim_out, seed=seed + 200)
-
-        # Output projection weights — maps SwiGLU output [D] → vocab [V]
-        # These are separate from the SwiGLU output module and store
-        # the actual linear projection from hidden dim to vocab size.
-        rng = np.random.default_rng(seed + 300)
-        self.output_proj_w: np.ndarray = rng.random((embed_dim, vocab_size), dtype=np.float32)
-        self.output_proj_b: np.ndarray = np.zeros(vocab_size, dtype=np.float32)
-
-    def forward(
-        self,
-        input_ids: np.ndarray,
-        embedding_weights: np.ndarray | None = None,
-    ) -> np.ndarray:
-        """Forward pass through the complete model.
-
-        Parameters
-        ----------
-        input_ids : np.ndarray, shape (batch_size, seq_len), dtype int32
-            Token IDs.
-        embedding_weights : np.ndarray, shape (vocab_size, embed_dim) — if None, use self.weights
-            Optional custom embedding weights matrix.
-
-        Returns
-        -------
-        logits : np.ndarray, shape (batch_size, seq_len, vocab_size)
-
+        The config is the single source of truth for every dimension; the
+        model derives head_dim, K/V group width, and FFN/MoE width from it.
         """
-        w = embedding_weights or self.embedding_weights
+        self.config = config
+        self.vocab_size = config.vocab_size
+        self.embed_dim = config.embed_dim
+        seed = config.seed
 
-        batch_size, seq_len = input_ids.shape
+        # Embedding table: (V, D)
+        self.embedding = Embedding(vocab_size=config.vocab_size, embed_dim=config.embed_dim, seed=seed)
 
-        # Embedding: [B,S] → [B,S,D]
-        x = self.embedding.forward(input_ids, w)  # (B, S, D)
+        # Decoder stack (n_layers TransformerBlocks)
+        self.stack = DecoderStack(config)
 
-        # Decoder stack: [B,S,D] → [B,S,D]
-        x = self.stack.forward(x)  # (B, S, D)
+        # Final RMSNorm gamma: (D,)
+        self.final_norm = RMSNorm(config.embed_dim, eps=config.norm_eps)
 
-        # Final layer normalization: [B,S,D] → [B,S,D]
-        x = RMSNorm().forward(x, self.final_ln_gamma)  # (B, S, D)
+        # Language-model head: linear D → V (no bias, Llama convention)
+        rng = np.random.default_rng(seed + 300)
+        self.lm_head_weight: np.ndarray = rng.normal(
+            0.0, 1.0 / np.sqrt(config.embed_dim), (config.embed_dim, config.vocab_size)
+        ).astype(np.float32)
 
-        # SwiGLU output projection: [B,S,D] → [B,S,V]
-        # SwiGLU expects (..., D_in) → (..., D_out)
-        # Here: D_in = embed_dim, D_out = embed_dim
-        # Then linear projection to vocab
-        # Actually, SwiGLUFFN maps D_in → D_out (via hidden layer)
-        # We need the final projection to be D → vocab_size
+    def forward(self, input_ids: np.ndarray) -> np.ndarray:
+        """Full forward pass.
 
-        # Reshape for SwiGLU: (B*S, D)
-        flat_x = x.reshape(-1, self.embed_dim)  # (B*S, D)
+        input_ids : (B, S) int token IDs.
+        Returns: logits (B, S, V).
 
-        # SwiGLU: (B*S, D) → (B*S, D) via hidden ff_dim
-        swi_out = self.output.forward(flat_x)  # (B*S, D)
-
-        # Linear projection to vocab: (B*S, D) @ (D, V) + (V,) → (B*S, V)
-        # This is the actual output projection — using a simple linear layer
-        # Uses self.output_proj_w and self.output_proj_b (instance attributes)
-        # instead of regenerating on every call to ensure deterministic forward pass
-        logits_flat = swi_out @ self.output_proj_w + self.output_proj_b  # (B*S, V)
-
-        # Reshape back: (B*S, V) → (B, S, V)
-        logits = logits_flat.reshape(batch_size, seq_len, self.vocab_size)  # (B, S, V)
-
-        logger.debug(
-            "NumPyModel.forward() input_ids=%s → embedding=%s → stack=%s → final_rmsnorm=%s → SwiGLU=%s → logits=%s",
-            [batch_size, seq_len],
-            [batch_size, seq_len, self.embed_dim],
-            [batch_size, seq_len, self.embed_dim],
-            [batch_size, seq_len, self.embed_dim],
-            [batch_size, seq_len, self.embed_dim],
-            [batch_size, seq_len, self.vocab_size],
-        )
-
+        Step shapes:
+            embed        (B, S) → (B, S, D)
+            stack        (B, S, D) → (B, S, D)
+            final norm   (B, S, D) → (B, S, D)
+            lm_head      (B, S, D) @ (D, V) → (B, S, V)
+        """
+        logits, _trace = self.forward_with_trace(input_ids)
         return logits
 
+    def _param_arrays(self) -> dict[str, np.ndarray]:
+        """Storage binding: registry key → owning array (the track's only traversal)."""
+        p: dict[str, np.ndarray] = {
+            Keys.embed(): self.embedding.weight,
+            Keys.final_norm(): self.final_norm.gamma,
+            Keys.lm_head(): self.lm_head_weight,
+        }
+        for i, block in enumerate(self.stack.layers):
+            p[Keys.ln(i, LayerNorm.INPUT)] = block.input_layernorm.gamma
+            p[Keys.ln(i, LayerNorm.POST_ATTENTION)] = block.post_attention_layernorm.gamma
+            attn = block.self_attn
+            p[Keys.attn(i, Attn.Q_PROJ)] = attn.q_proj
+            p[Keys.attn(i, Attn.K_PROJ)] = attn.k_proj
+            p[Keys.attn(i, Attn.V_PROJ)] = attn.v_proj
+            p[Keys.attn(i, Attn.O_PROJ)] = attn.o_proj
+            mlp = block.mlp
+            if isinstance(mlp, MixtureOfExperts):
+                p[Keys.moe_gate(i)] = mlp.gate
+                for j, expert in enumerate(mlp.experts):
+                    p[Keys.moe_expert(i, j, Mlp.GATE_PROJ)] = expert.gate_proj
+                    p[Keys.moe_expert(i, j, Mlp.UP_PROJ)] = expert.up_proj
+                    p[Keys.moe_expert(i, j, Mlp.DOWN_PROJ)] = expert.down_proj
+            else:
+                p[Keys.ffn(i, Mlp.GATE_PROJ)] = mlp.gate_proj
+                p[Keys.ffn(i, Mlp.UP_PROJ)] = mlp.up_proj
+                p[Keys.ffn(i, Mlp.DOWN_PROJ)] = mlp.down_proj
+        return p
+
     def get_all_parameters(self) -> dict[str, np.ndarray]:
-        """Return all learnable parameters as a single dictionary.
+        """Flat dict of all parameters, keyed by ``shared.constants.Keys``.
 
-        Returns
-        -------
-        params : dict[str, np.ndarray]
-            Dictionary mapping parameter names to numpy arrays.
-
+        This is the checkpoint contract: the same dict is what
+        ``load_from_numpy_dict`` and the cross-track save/load paths use.
+        The key set and shapes are owned by ``ParameterRegistry``.
         """
-        params: dict[str, np.ndarray] = {}
+        arrays = self._param_arrays()
+        return {e.key: arrays[e.key] for e in ParameterRegistry(self.config).entries}
 
-        # Embedding
-        params[Transformer.EMBEDDING_WEIGHTS] = self.embedding_weights
+    def load_from_numpy_dict(self, params: dict[str, np.ndarray]) -> None:
+        """Load parameters from a flat dict (inverse of ``get_all_parameters``).
 
-        # Stack — TransformerBlocks
-        for layer_idx, block in enumerate(self.stack.blocks):
-            # Layer norm gamma
-            params[Block.ln1_gamma(layer_idx)] = block.ln1_gamma
-            params[Block.ln2_gamma(layer_idx)] = block.ln2_gamma
-
-            # Gate parameters
-            params[Block.gate1(layer_idx)] = block.gate1
-            params[Block.gate2(layer_idx)] = block.gate2
-
-            # MHA
-            for param_name in ("Wq", "bq", "Wk", "bk", "Wv", "bv", "Wo", "bo"):
-                params[Block.mha(layer_idx, param_name)] = getattr(block.mha, param_name)
-
-            # MoE
-            params[Block.moe_router(layer_idx)] = block.moe.router
-            params[Block.moe_bias(layer_idx)] = block.moe.bias
-            for expert_idx, expert in enumerate(block.moe.experts):
-                for param_key in ("W1", "W2", "W3"):
-                    params[Block.moe_expert(layer_idx, expert_idx, param_key)] = getattr(expert, param_key)
-
-        # Final LN
-        params[Transformer.FINAL_GAMMA] = self.final_ln_gamma
-
-        # Output SwiGLU
-        params[Transformer.OUTPUT_W1] = self.output.W1
-        params[Transformer.OUTPUT_W2] = self.output.W2
-        params[Transformer.OUTPUT_W3] = self.output.W3
-
-        # Output projection weights
-        params[Transformer.OUTPUT_PROJ_W] = self.output_proj_w
-        params[Transformer.OUTPUT_PROJ_B] = self.output_proj_b
-
-        return params
-
-    def load_from_numpy_dict(
-        self,
-        params_dict: dict[str, np.ndarray],
-    ) -> None:
-        """Load parameters from a NumPy-style dictionary.
-
-        Keys are expected to match the format produced by
-        :meth:`get_all_parameters`.
-
-        Parameters
-        ----------
-        params_dict : dict[str, np.ndarray]
-            Dictionary mapping parameter names to NumPy arrays.
-
+        Validates against the registry first, so stale or mismatched
+        checkpoints fail fast instead of half-loading.
         """
-        # Embedding
-        self.embedding_weights = np.copy(
-            params_dict[Transformer.EMBEDDING_WEIGHTS],
-        )
+        registry = ParameterRegistry(self.config)
+        registry.validate(params)
+        # Copy each array: the caller keeps ownership of ``params`` (e.g. a
+        # shared checkpoint dict) — aliasing would let in-place training
+        # mutate it.
+        self.embedding.weight = params[Keys.embed()].copy()
+        self.final_norm.gamma = params[Keys.final_norm()].copy()
+        self.lm_head_weight = params[Keys.lm_head()].copy()
+        for i, block in enumerate(self.stack.layers):
+            block.input_layernorm.gamma = params[Keys.ln(i, LayerNorm.INPUT)].copy()
+            block.post_attention_layernorm.gamma = params[Keys.ln(i, LayerNorm.POST_ATTENTION)].copy()
+            attn = block.self_attn
+            attn.q_proj = params[Keys.attn(i, Attn.Q_PROJ)].copy()
+            attn.k_proj = params[Keys.attn(i, Attn.K_PROJ)].copy()
+            attn.v_proj = params[Keys.attn(i, Attn.V_PROJ)].copy()
+            attn.o_proj = params[Keys.attn(i, Attn.O_PROJ)].copy()
+            mlp = block.mlp
+            if isinstance(mlp, MixtureOfExperts):
+                mlp.gate = params[Keys.moe_gate(i)].copy()
+                for j, expert in enumerate(mlp.experts):
+                    expert.gate_proj = params[Keys.moe_expert(i, j, Mlp.GATE_PROJ)].copy()
+                    expert.up_proj = params[Keys.moe_expert(i, j, Mlp.UP_PROJ)].copy()
+                    expert.down_proj = params[Keys.moe_expert(i, j, Mlp.DOWN_PROJ)].copy()
+            elif isinstance(mlp, SwiGLUFFN):
+                mlp.gate_proj = params[Keys.ffn(i, Mlp.GATE_PROJ)].copy()
+                mlp.up_proj = params[Keys.ffn(i, Mlp.UP_PROJ)].copy()
+                mlp.down_proj = params[Keys.ffn(i, Mlp.DOWN_PROJ)].copy()
 
-        # Stack layers
-        for layer_idx, block in enumerate(self.stack.blocks):
-            ln1_key = Block.ln1_gamma(layer_idx)
-            ln2_key = Block.ln2_gamma(layer_idx)
-            block.ln1_gamma = np.copy(params_dict[ln1_key])  # type: ignore[reportAttributeAccessIssue]
-            block.ln2_gamma = np.copy(params_dict[ln2_key])  # type: ignore[reportAttributeAccessIssue]
+    def forward_with_trace(self, input_ids: np.ndarray, positions: np.ndarray | None = None) -> tuple[np.ndarray, dict]:
+        """Forward pass plus the intermediates the analytic backward needs.
 
-            # Gate parameters
-            block.gate1 = np.copy(params_dict[Block.gate1(layer_idx)])  # type: ignore[reportAttributeAccessIssue]
-            block.gate2 = np.copy(params_dict[Block.gate2(layer_idx)])  # type: ignore[reportAttributeAccessIssue]
+        Returns (logits, trace) where trace holds:
+            x_in0    (B, S, D) embedding output (the stack input)
+            stack_out (B, S, D) pre-final-norm activations
+            positions (S,) the RoPE positions used
 
-            # MHA weights
-            for param_name in ("Wq", "bq", "Wk", "bk", "Wv", "bv", "Wo", "bo"):
-                key = Block.mha(layer_idx, param_name)
-                setattr(block.mha, param_name, np.copy(params_dict[key]))  # type: ignore[reportAttributeAccessIssue]
-
-            # MoE
-            block.moe.router = np.copy(params_dict[Block.moe_router(layer_idx)])  # type: ignore[reportAttributeAccessIssue]
-            block.moe.bias = np.copy(params_dict[Block.moe_bias(layer_idx)])  # type: ignore[reportAttributeAccessIssue]
-            for expert_idx, expert in enumerate(block.moe.experts):
-                for pw in ("W1", "W2", "W3"):
-                    key = Block.moe_expert(layer_idx, expert_idx, pw)
-                    setattr(expert, pw, np.copy(params_dict[key]))
-
-        # Final LN
-        self.final_ln_gamma = np.copy(
-            params_dict[Transformer.FINAL_GAMMA],
-        )
-
-        # Output SwiGLU
-        self.output.W1 = np.copy(params_dict[Transformer.OUTPUT_W1])
-        self.output.W2 = np.copy(params_dict[Transformer.OUTPUT_W2])
-        self.output.W3 = np.copy(params_dict[Transformer.OUTPUT_W3])
-
-        # Output projection
-        self.output_proj_w = np.copy(
-            params_dict[Transformer.OUTPUT_PROJ_W],
-        )
-        self.output_proj_b = np.copy(
-            params_dict[Transformer.OUTPUT_PROJ_B],
-        )
-
-    def backward(self, _logits: np.ndarray, targets: np.ndarray, input_ids: np.ndarray) -> dict[str, np.ndarray]:
-        """Compute gradients for all parameters using numerical differentiation.
-
-        Since NumPy doesn't have autograd, we use finite-difference to compute
-        gradients. The _logits parameter is kept for API compatibility but gradients
-        are computed by re-running the forward pass.
-
-        Parameters
-        ----------
-        logits : np.ndarray, shape (batch_size, seq_len, vocab_size)
-            Model output logits (kept for API compatibility).
-        targets : np.ndarray, shape (batch_size, seq_len), dtype int32
-            Ground truth token IDs.
-        input_ids : np.ndarray, shape (batch_size, seq_len), dtype int32
-            Token inputs — used to recompute forward pass for gradient computation.
-
-        Returns
-        -------
-        grads : dict[str, np.ndarray]
-            Dictionary of gradients keyed by parameter name.
-
+        ``forward`` is a thin wrapper over this (it drops the trace).
         """
-        logger.debug(
-            "NumPyModel.backward() input_shape=%s param_count=%d",
-            list(input_ids.shape),
-            sum(p.size for p in self.get_all_parameters().values()),
-        )
+        if positions is None:
+            positions = np.arange(input_ids.shape[1], dtype=np.int32)
+        x_in0 = self.embedding.forward(input_ids)  # (B, S, D)
+        stack_out = self.stack.forward(x_in0, positions)  # (B, S, D)
+        x_final = self.final_norm.forward(stack_out)  # (B, S, D)
+        logits = x_final @ self.lm_head_weight  # (B, S, V)
+        return logits, {"x_in0": x_in0, "stack_out": stack_out, "positions": positions}
 
-        grads: dict[str, np.ndarray] = {}
+    def make_cache(self, batch_size: int, quantize: bool = False) -> list[dict]:
+        """Create an empty per-layer KV cache for the per-token step path.
 
-        # For testing purposes, we need all parameters to have gradients
-        # We'll compute numerical gradients for all parameters (expensive but correct)
-        epsilon = 1e-5
-        params = self.get_all_parameters()
+        Naive cache (quantize=False): each layer gets
+            {"k": (B, G, 0, hd), "v": (B, G, 0, hd)}
+        TurboQuant cache (quantize=True): each layer gets
+            {"bits_k": (B, H, 0, hd) int8, "scales_k": (B, H, 0, hd) float,
+             "bits_v": (B, H, 0, hd) int8, "scales_v": (B, H, 0, hd) float}
 
-        grads = {}
+        G = the K/V head count (config.kv_heads) and hd = the head dim — the
+        naive cache stores K/V *per group*, so GQA caches are H // G times
+        smaller. The TurboQuant cache stores K/V *per head* (H heads) because
+        it quantizes the full (B, H, t, hd) tensor after GQA repeat; a
+        per-group variant is a straightforward extension.
+        """
+        B = batch_size
+        D = self.embed_dim
+        H = self.config.n_heads
+        G = self.config.kv_heads
+        hd = D // H
+        dtype = self.embedding.weight.dtype
+        if not quantize:
+            empty_k = np.zeros((B, G, 0, hd), dtype=dtype)
+            empty_v = np.zeros((B, G, 0, hd), dtype=dtype)
+            return [{"k": empty_k.copy(), "v": empty_v.copy()} for _ in range(self.config.n_layers)]
+        empty_bits = np.zeros((B, H, 0, hd), dtype=np.int8)
+        # Scales are stored per (B, H) — a single scalar per head, broadcast
+        # over the sequence and head-dim axes at dequantize time.
+        empty_scales = np.zeros((B, H, 0, 1), dtype=dtype)
+        return [
+            {
+                "bits_k": empty_bits.copy(),
+                "scales_k": empty_scales.copy(),
+                "bits_v": empty_bits.copy(),
+                "scales_v": empty_scales.copy(),
+            }
+            for _ in range(self.config.n_layers)
+        ]
 
-        for name, param in params.items():
-            # Compute central difference — perturb ONE element at a time
-            original = param.copy()
-            result_grads = np.zeros_like(param)
+    def forward_prefill(self, input_ids: np.ndarray, cache: list[dict] | None = None) -> tuple[np.ndarray, list[dict]]:
+        """Run a full-sequence forward and fill the per-layer KV cache.
 
-            for idx in np.ndindex(param.shape):
-                param[idx] = original[idx] + epsilon
-                loss_plus = self._compute_loss_from_input_ids(input_ids, targets)
+        input_ids: (B, S) int token IDs.
+        Returns (logits (B, S, V), cache) where the cache holds the K/V of
+        every position, ready for per-token steps.
+        """
+        B, S = input_ids.shape
+        if cache is None:
+            cache = self.make_cache(B)
+        positions = np.arange(S, dtype=np.int32)
+        x = self.embedding.forward(input_ids)  # (B, S, D)
+        # Prefill: run the full stack, then backfill each layer's cache by
+        # re-deriving the per-group K/V at every position (same math the
+        # attention forward computed, without the GQA repeat).
+        stack_out = self.stack.forward(x, positions)  # (B, S, D)
+        x_final = self.final_norm.forward(stack_out)  # (B, S, D)
+        logits = x_final @ self.lm_head_weight  # (B, S, V)
+        x_in = x
+        for i, block in enumerate(self.stack.layers):
+            attn = block.self_attn
+            ln1_out = block.input_layernorm.forward(x_in)  # (B, S, D)
+            k_pre = ln1_out @ attn.k_proj  # (B, S, G*hd)
+            v_pre = ln1_out @ attn.v_proj  # (B, S, G*hd)
+            G, hd = attn.n_groups, attn.head_dim
+            k_heads = k_pre.reshape(B, S, G, hd).transpose(0, 2, 1, 3)  # (B, G, S, hd)
+            v = v_pre.reshape(B, S, G, hd).transpose(0, 2, 1, 3)  # (B, G, S, hd)
+            k = RoPE().forward(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=attn.rope_dim).transpose(0, 2, 1, 3)
+            cache[i]["k"] = k
+            cache[i]["v"] = v
+            # Thread the block input for the next layer.
+            attn_out = attn.forward(ln1_out, positions)
+            h = x_in + attn_out
+            x_in = h + block.mlp.forward(block.post_attention_layernorm.forward(h))
+        return logits, cache
 
-                param[idx] = original[idx] - epsilon
-                loss_minus = self._compute_loss_from_input_ids(input_ids, targets)
+    def forward_step(
+        self, input_ids: np.ndarray, position: int, cache: list[dict], quantize: bool = False
+    ) -> np.ndarray:
+        """Process ONE token per batch row against the cached K/V.
 
-                result_grads[idx] = (loss_plus - loss_minus) / (2 * epsilon)
-                param[idx] = original[idx]
+        input_ids: (B, 1) int token IDs.
+        position: the absolute token index of the token (0-based).
+        cache: the per-layer cache; the token's K/V are *appended* to each
+            layer's cache before attention runs.
+        quantize: if True, append the new K/V to the cache in 1-bit
+            TurboQuant form (bits + per-channel scale) and dequantize the
+            full cached tensor before attention, so the step attends against
+            the (lossy) quantized cache. If False, append the full-precision
+            K/V (the default naive path).
 
-            grads[name] = result_grads
+        Returns: logits (B, 1, V).
 
+        Usage:
+          - **Prefill:** call with the *last* token of the sequence after
+            ``forward_prefill`` (or after threading all but the last token),
+            to recompute the last position's logits against the full cache.
+          - **Generate:** call with each *new* token (position = current
+            sequence length), to extend the sequence by one.
+
+        This is the O(1)-per-token inference path: only the new token's K/V
+        are computed; attention runs against the cached (B, G, t, hd) K/V
+        (naive) or the dequantized (B, H, t, hd) K/V (TurboQuant).
+        """
+        x = self.embedding.forward(input_ids)  # (B, 1, D)
+        stack_out = self.stack.forward_step(x, position, cache, quantize=quantize)  # (B, 1, D)
+        x_final = self.final_norm.forward(stack_out)  # (B, 1, D)
+        return x_final @ self.lm_head_weight  # (B, 1, V)
+
+    def backward(self, input_ids: np.ndarray, targets: np.ndarray) -> dict[str, np.ndarray]:
+        """Analytic gradients of the loss w.r.t. every parameter.
+
+        The chain rule runs in reverse of the forward:
+
+            logits = final_norm(stack(embed(x))) @ W_lm
+
+        1. dlogits = CrossEntropyLoss.backward(logits, targets)   (B, S, V)
+           (matches the forward's CE exactly, shift included)
+        2. lm_head (linear D → V):
+               dW_lm  = h^T @ dlogits          (D, V)
+               dh     = dlogits @ W_lm^T       (B, S, D)
+        3. final RMSNorm: (dh, d_gamma) = final_norm.backward(dh, stack_out)
+        4. stack: per-layer backwards in reverse order (see DecoderStack.backward)
+        5. embedding: dW_emb[t] = sum of dh rows where input_ids == t
+
+        This is O(forward) — the finite-difference loop that used to live
+        here is now a test-only gradient checker (``impl._np.gradcheck``).
+        """
+        logits, trace = self.forward_with_trace(input_ids)
+        dlogits = CrossEntropyLoss().backward(logits, targets)  # (B, S, V)
+
+        stack_out = trace["stack_out"]  # (B, S, D)
+        positions = trace["positions"]  # (S,)
+        D, V = self.embed_dim, self.vocab_size
+
+        # lm_head: logits = h @ W_lm where h = final_norm(stack_out)
+        h_final = self.final_norm.forward(stack_out)  # (B, S, D)
+        dW_lm = h_final.reshape(-1, D).T @ dlogits.reshape(-1, V)  # (D, V)
+        dh = dlogits @ self.lm_head_weight.T  # (B, S, D)
+
+        # final RMSNorm
+        dh, d_gamma_final = self.final_norm.backward(dh, stack_out)  # (B, S, D), (D,)
+
+        # decoder stack (reverse order internally)
+        d_stack_in, per_layer_grads = self.stack.backward(dh, trace["x_in0"], positions)
+
+        # embedding
+        dW_emb = self.embedding.backward(d_stack_in, input_ids)  # (V, D)
+
+        # Assemble the flat Keys dict.
+        grads: dict[str, np.ndarray] = {
+            Keys.embed(): dW_emb,
+            Keys.final_norm(): d_gamma_final,
+            Keys.lm_head(): dW_lm,
+        }
+        for i, block_grads in enumerate(per_layer_grads):
+            grads[Keys.ln(i, LayerNorm.INPUT)] = block_grads["input_layernorm.gamma"]
+            grads[Keys.ln(i, LayerNorm.POST_ATTENTION)] = block_grads["post_attention_layernorm.gamma"]
+            for proj in ATTN_PROJS:
+                grads[Keys.attn(i, proj)] = block_grads[f"self_attn.{proj}"]
+            block = self.stack.layers[i]
+            if isinstance(block.mlp, MixtureOfExperts):
+                grads[Keys.moe_gate(i)] = block_grads["mlp.gate"]
+                for j, expert_grads in enumerate(block_grads["mlp.experts"]):
+                    for proj in FFN_PROJS:
+                        grads[Keys.moe_expert(i, j, proj)] = expert_grads[proj]
+            else:
+                for proj in FFN_PROJS:
+                    grads[Keys.ffn(i, proj)] = block_grads[f"mlp.{proj}"]
         return grads
 
-    def _compute_loss_from_input_ids(self, input_ids: np.ndarray, targets: np.ndarray) -> float:
-        """Compute loss from input tokens by running forward pass."""
-        logits = self.forward(input_ids)
-        return self._compute_loss(logits, targets)
-
     def _compute_loss(self, logits: np.ndarray, targets: np.ndarray) -> float:
-        """Compute cross-entropy loss for the given logits and targets."""
-        logits = logits.reshape(-1, self.vocab_size)
-        targets_flat = targets.reshape(-1)
-        # log_softmax
-        log_softmax = logits - np.log(np.sum(np.exp(logits), axis=-1, keepdims=True))
-        loss = -np.mean(log_softmax[np.arange(len(targets_flat)), targets_flat])
-        return float(loss)
+        """Cross-entropy loss between logits and target token IDs.
+
+        logits: (B, S, V)  targets: (B, S) int
+        """
+        return float(CrossEntropyLoss().forward(logits, targets))
+
+    def train_step(self, input_ids: np.ndarray, targets: np.ndarray, optimizer) -> float:
+        """One training step: loss = CE(forward(x), y); grads = backward; optimizer.step.
+
+        The optimizer updates the parameter arrays in place (AdamW mutates
+        each array's values), so the model state changes in place as well.
+        Returns the step's loss.
+        """
+        logits = self.forward(input_ids)
+        loss = self._compute_loss(logits, targets)
+        grads = self.backward(input_ids, targets)
+        optimizer.step(self.get_all_parameters(), grads)
+        return loss

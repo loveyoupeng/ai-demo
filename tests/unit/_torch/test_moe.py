@@ -18,7 +18,7 @@ class TestMoEForward:
         ff_dim = 32
         k = 2
 
-        moe = MixtureOfExperts(embed_dim, n_experts, ff_dim, k)
+        moe = MixtureOfExperts(embed_dim, n_experts, ff_dim, k).double()
         x = torch.randn(batch, seq_len, embed_dim, dtype=torch.float64)
         output = moe(x)
 
@@ -39,7 +39,7 @@ class TestMoEForward:
         ff_dim = 16
         k = 2
 
-        moe = MixtureOfExperts(embed_dim, n_experts, ff_dim, k)
+        moe = MixtureOfExperts(embed_dim, n_experts, ff_dim, k).double()
 
         x = torch.ones(1, 1, embed_dim, dtype=torch.float64)
         output = moe(x)
@@ -62,7 +62,7 @@ class TestMoEForward:
         ff_dim = 16
         k = 2
 
-        moe = MixtureOfExperts(embed_dim, n_experts, ff_dim, k)
+        moe = MixtureOfExperts(embed_dim, n_experts, ff_dim, k).double()
 
         x = torch.randn(1, 2, embed_dim, dtype=torch.float64)
 
@@ -75,7 +75,7 @@ class TestMoEForward:
             assert p.grad is not None, f"Gradient is None for {name}"
 
         # The router always processes all tokens → non-trivial gradient
-        grad = moe.router.weight.grad
+        grad = moe.gate.weight.grad
         assert grad is not None, "Router gradient should not be None"
         router_grad = float(grad.norm().item())
         assert router_grad > 1e-6, "Router gradient should be non-trivial"
@@ -89,7 +89,7 @@ class TestMoEForward:
         ff_dim = 16
         k = 2
 
-        moe = MixtureOfExperts(embed_dim, n_experts, ff_dim, k)
+        moe = MixtureOfExperts(embed_dim, n_experts, ff_dim, k).double()
 
         x = torch.randn(1, 4, embed_dim, dtype=torch.float64)
 

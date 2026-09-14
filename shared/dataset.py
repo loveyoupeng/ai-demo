@@ -19,8 +19,7 @@ from typing import Protocol
 class TokenizerLike(Protocol):
     """Tokenizer protocol for TextDataset."""
 
-    def encode(self, text: str, add_special_tokens: bool = ...) -> list[int]:
-        ...
+    def encode(self, text: str, add_special_tokens: bool = ...) -> list[int]: ...
 
 
 _RESOURCES_DIR = Path(__file__).resolve().parent.parent / "resource"
@@ -146,10 +145,7 @@ class TextDataset:
             256
         """
         if not self.token_ids:
-            raise ValueError(
-                "No token data available. "
-                "Check that text_data is non-empty and the tokenizer works."
-            )
+            raise ValueError("No token data available. Check that text_data is non-empty and the tokenizer works.")
 
         max_start = max(1, len(self.token_ids) - self.context_length - 1)
         batches: list[tuple[list[list[int]], list[list[int]]]] = []

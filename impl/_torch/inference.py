@@ -250,9 +250,7 @@ class TorchTextGenerator:
             )
 
             # Sample from categorical distribution for each sequence
-            next_token = torch.stack(
-                [torch.multinomial(probs[b].float(), num_samples=1) for b in range(batch_size)]
-            )
+            next_token = torch.stack([torch.multinomial(probs[b].float(), num_samples=1) for b in range(batch_size)])
 
             # Log sampled token on first/last step
             if step == 0 or step == self.max_new_tokens - 1 or self.max_new_tokens <= 5:

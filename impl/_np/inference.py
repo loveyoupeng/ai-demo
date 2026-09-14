@@ -50,11 +50,13 @@ class TextGenerator:
         max_new_tokens: int = 50,
         temperature: float = 1.0,
         top_k: int = 0,
+        quantize: bool = False,
     ) -> None:
         self.model = model
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.top_k = top_k
+        self.quantize = quantize
 
     def generate(self, prompt: np.ndarray) -> np.ndarray:
         """Generate tokens autoregressively.
@@ -109,13 +111,23 @@ class TextGenerator:
         """
         prompt = self._validate_prompt(prompt)
         batch_size, seq_len = prompt.shape
-        logger.info("TextGenerator.generate_greedy() batch_size=%d prompt_len=%d", batch_size, seq_len)
-
         sequence = prompt.copy()
 
+        # Build the KV cache by threading the prompt (all but the last token)
+        # one token at a time, then step the last token to get the first
+        # generated logits. Each subsequent step appends one new token.
+        # quantize=True uses the 1-bit TurboQuant cache (lossy, ~32x smaller);
+        # quantize=False uses the full-precision naive cache (exact).
+        cache = self.model.make_cache(batch_size, quantize=self.quantize)
+
+        for i in range(seq_len - 1):
+            self.model.forward_step(sequence[:, [i]], i, cache, quantize=self.quantize)
+
         for step in range(self.max_new_tokens):
-            logits = self.model.forward(sequence)  # (B, S, V)
-            step_logits = logits[:, -1, :]  # (B, V)
+            step_logits = self.model.forward_step(
+                sequence[:, [-1]], sequence.shape[1] - 1, cache, quantize=self.quantize
+            )  # (B, 1, V)
+            step_logits = step_logits[:, 0, :]  # (B, V)
 
             next_token = np.argmax(step_logits, axis=-1)  # (B,)
 
@@ -184,14 +196,30 @@ class TextGenerator:
         logger.debug("generate_sampled() effective_temperature=%.6f", effective_temperature)
 
         sequence = prompt.copy()
-        rng = np.random.default_rng(self.model.seed)
+        rng = np.random.default_rng(self.model.config.seed)
+
+        # Build the KV cache by threading the prompt (all but the last token)
+        # one token at a time, then step the last token to get the first
+        # generated logits. Each subsequent step appends one new token.
+        # quantize=True uses the 1-bit TurboQuant cache (lossy, ~32x smaller);
+        # quantize=False uses the full-precision naive cache (exact).
+        cache = self.model.make_cache(batch_size, quantize=self.quantize)
+
+        for i in range(seq_len - 1):
+            self.model.forward_step(sequence[:, [i]], i, cache, quantize=self.quantize)
 
         for step in range(self.max_new_tokens):
-            logits = self.model.forward(sequence)  # (B, S, V)
-            step_logits = logits[:, -1, :]  # (B, V)
+            step_logits = self.model.forward_step(
+                sequence[:, [-1]], sequence.shape[1] - 1, cache, quantize=self.quantize
+            )  # (B, 1, V)
+            step_logits = step_logits[:, 0, :]  # (B, V)
 
             scaled_logits = step_logits / effective_temperature
-            logger.debug("generate_sampled() step=%d scaled_logits_batch0=%s", step + 1, [f"{v:.4f}" for v in scaled_logits[0].tolist()])
+            logger.debug(
+                "generate_sampled() step=%d scaled_logits_batch0=%s",
+                step + 1,
+                [f"{v:.4f}" for v in scaled_logits[0].tolist()],
+            )
 
             if self.top_k > 0:
                 scaled_logits = self._apply_top_k_mask(scaled_logits, self.top_k)
@@ -210,11 +238,10 @@ class TextGenerator:
             )
 
             if batch_size == 1:
-                next_token = rng.choice(self.model.vocab_size, p=probs[0])
+                # Wrap in an array so downstream batched indexing is uniform.
+                next_token = np.array([rng.choice(self.model.vocab_size, p=probs[0])])
             else:
-                next_token = np.array(
-                    [rng.choice(self.model.vocab_size, p=probs[b]) for b in range(batch_size)]
-                )
+                next_token = np.array([rng.choice(self.model.vocab_size, p=probs[b]) for b in range(batch_size)])
 
             if step == 0 or step == self.max_new_tokens - 1 or self.max_new_tokens <= 5:
                 # Use np.asarray to ensure proper numpy array type

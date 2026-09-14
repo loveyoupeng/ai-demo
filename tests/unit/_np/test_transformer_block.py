@@ -1,11 +1,13 @@
-"""B5.1: TransformerBlock — standard decoder block with MHA + MoE + LN + residuals.
+"""B5.1: TransformerBlock — standard pre-norm decoder block (RMSNorm + MHA + SwiGLU/MoE + residuals).
 
-Forward: h = x + MHA(RMSNorm(x)) + MoE(RMSNorm(x + MHA(x)))
+Forward: h = x + MHA(RMSNorm(x)); out = h + FFN(RMSNorm(h))
 """
 
 import numpy as np
 
-from impl._np.modules import TransformerBlock
+from impl._np.block import TransformerBlock
+from impl._np.moe import MixtureOfExperts
+from shared.config import TransformerConfig
 
 
 class TestTransformerBlockForward:
@@ -15,7 +17,9 @@ class TestTransformerBlockForward:
         """Input [B, S, D] → output [B, S, D]."""
         x = np.random.default_rng(0).random((2, 4, 16)).astype(np.float32)
 
-        block = TransformerBlock(16, n_heads=4, n_experts=4, ff_dim=32, k=2, seed=0)
+        block = TransformerBlock(
+            TransformerConfig(embed_dim=16, n_heads=4, n_groups=4, n_experts=4, top_k=2, expert_dim=32, seed=0)
+        )
         out = block.forward(x)
 
         assert out.shape == x.shape, f"Expected {x.shape}, got {out.shape}"
@@ -28,7 +32,9 @@ class TestTransformerBlockForward:
         """
         x = np.random.default_rng(10).random((1, 3, 8)).astype(np.float32)
 
-        block = TransformerBlock(8, n_heads=2, n_experts=2, ff_dim=16, k=1, seed=0)
+        block = TransformerBlock(
+            TransformerConfig(embed_dim=8, n_heads=2, n_groups=2, n_experts=2, top_k=1, expert_dim=16, seed=0)
+        )
         out = block.forward(x.copy())
 
         # The output = x + attn_out + moe_out
@@ -43,14 +49,16 @@ class TestTransformerBlockForward:
         """
         x = np.random.default_rng(20).random((1, 3, 8)).astype(np.float32)
 
-        block = TransformerBlock(8, n_heads=2, n_experts=2, ff_dim=16, k=1, seed=0)
+        block = TransformerBlock(
+            TransformerConfig(embed_dim=8, n_heads=2, n_groups=2, n_experts=2, top_k=1, expert_dim=16, seed=0)
+        )
 
         # Get baseline output
         baseline = block.forward(x.copy())
 
-        # Zero MoE router — MoE component is suppressed (all routing weights = 0)
-        block.moe.router.fill(0.0)
-        block.moe.bias.fill(0.0)
+        # Zero the MoE router — suppresses the expert mixing
+        assert isinstance(block.mlp, MixtureOfExperts)
+        block.mlp.gate.fill(0.0)
 
         # After zero router, softmax produces uniform weights which are then
         # zeroed by top-k. So moe_out should be near zero.
@@ -67,13 +75,15 @@ class TestTransformerBlockForward:
         """
         x = np.random.default_rng(30).random((1, 3, 8)).astype(np.float32)
 
-        block = TransformerBlock(8, n_heads=2, n_experts=2, ff_dim=16, k=1, seed=0)
+        block = TransformerBlock(
+            TransformerConfig(embed_dim=8, n_heads=2, n_groups=2, n_experts=2, top_k=1, expert_dim=16, seed=0)
+        )
 
         baseline = block.forward(x.copy())
 
-        # Perturb the first RMSNorm (ln1) gamma
-        ln1_gamma_orig = block.ln1_gamma.copy()
-        block.ln1_gamma = ln1_gamma_orig * 2.0
+        # Perturb the first RMSNorm (input layernorm) gamma
+        ln1_gamma_orig = block.input_layernorm.gamma.copy()
+        block.input_layernorm.gamma = ln1_gamma_orig * 2.0
 
         out_perturbed = block.forward(x.copy())
 

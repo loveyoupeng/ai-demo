@@ -5,7 +5,7 @@ All tests fail initially. Implement after verifying failure.
 
 import numpy as np
 
-from impl._np.modules import RoPE
+from impl._np.rope import RoPE
 
 
 class TestRoPEForward:

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import torch
 
+from shared.config import TransformerConfig
+
 
 class TestValidatePrompt:
     """Test _validate_prompt helper function."""
@@ -108,12 +110,14 @@ class TestCudaTextGenerator:
         from impl._cuda.model import CUDAModel
 
         model = CUDAModel(
-            vocab_size=100,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=4,
-            n_experts=4,
-            ff_dim=64,
+            TransformerConfig(
+                vocab_size=100,
+                embed_dim=32,
+                n_layers=2,
+                n_heads=4,
+                n_experts=4,
+                expert_dim=64,
+            ),
         )
         gen = CudaTextGenerator(model, max_new_tokens=5)
 
@@ -127,12 +131,14 @@ class TestCudaTextGenerator:
         from impl._cuda.model import CUDAModel
 
         model = CUDAModel(
-            vocab_size=100,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=4,
-            n_experts=4,
-            ff_dim=64,
+            TransformerConfig(
+                vocab_size=100,
+                embed_dim=32,
+                n_layers=2,
+                n_heads=4,
+                n_experts=4,
+                expert_dim=64,
+            ),
         )
         gen = CudaTextGenerator(model, max_new_tokens=10)
 
@@ -146,12 +152,14 @@ class TestCudaTextGenerator:
         from impl._cuda.model import CUDAModel
 
         model = CUDAModel(
-            vocab_size=100,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=4,
-            n_experts=4,
-            ff_dim=64,
+            TransformerConfig(
+                vocab_size=100,
+                embed_dim=32,
+                n_layers=2,
+                n_heads=4,
+                n_experts=4,
+                expert_dim=64,
+            ),
         )
         gen = CudaTextGenerator(model, max_new_tokens=5, temperature=0.0)
 
@@ -166,12 +174,14 @@ class TestCudaTextGenerator:
         from impl._cuda.model import CUDAModel
 
         model = CUDAModel(
-            vocab_size=100,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=4,
-            n_experts=4,
-            ff_dim=64,
+            TransformerConfig(
+                vocab_size=100,
+                embed_dim=32,
+                n_layers=2,
+                n_heads=4,
+                n_experts=4,
+                expert_dim=64,
+            ),
         )
         prompt = torch.randint(0, 100, (1, 3))
 
@@ -189,12 +199,14 @@ class TestCudaTextGenerator:
         from impl._cuda.model import CUDAModel
 
         model = CUDAModel(
-            vocab_size=100,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=4,
-            n_experts=4,
-            ff_dim=64,
+            TransformerConfig(
+                vocab_size=100,
+                embed_dim=32,
+                n_layers=2,
+                n_heads=4,
+                n_experts=4,
+                expert_dim=64,
+            ),
         )
         gen = CudaTextGenerator(model, max_new_tokens=5)
 
@@ -208,12 +220,14 @@ class TestCudaTextGenerator:
         from impl._cuda.model import CUDAModel
 
         model = CUDAModel(
-            vocab_size=100,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=4,
-            n_experts=4,
-            ff_dim=64,
+            TransformerConfig(
+                vocab_size=100,
+                embed_dim=32,
+                n_layers=2,
+                n_heads=4,
+                n_experts=4,
+                expert_dim=64,
+            ),
         )
         gen = CudaTextGenerator(model, max_new_tokens=10)
 
@@ -228,12 +242,14 @@ class TestCudaTextGenerator:
 
         vocab_size = 100
         model = CUDAModel(
-            vocab_size=vocab_size,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=4,
-            n_experts=4,
-            ff_dim=64,
+            TransformerConfig(
+                vocab_size=vocab_size,
+                embed_dim=32,
+                n_layers=2,
+                n_heads=4,
+                n_experts=4,
+                expert_dim=64,
+            ),
         )
         gen = CudaTextGenerator(model, max_new_tokens=10)
 
@@ -249,12 +265,14 @@ class TestCudaTextGenerator:
         from impl._cuda.model import CUDAModel
 
         model = CUDAModel(
-            vocab_size=100,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=4,
-            n_experts=4,
-            ff_dim=64,
+            TransformerConfig(
+                vocab_size=100,
+                embed_dim=32,
+                n_layers=2,
+                n_heads=4,
+                n_experts=4,
+                expert_dim=64,
+            ),
         )
 
         torch.manual_seed(42)
@@ -273,12 +291,14 @@ class TestCudaTextGenerator:
         from impl._cuda.model import CUDAModel
 
         model = CUDAModel(
-            vocab_size=100,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=4,
-            n_experts=4,
-            ff_dim=64,
+            TransformerConfig(
+                vocab_size=100,
+                embed_dim=32,
+                n_layers=2,
+                n_heads=4,
+                n_experts=4,
+                expert_dim=64,
+            ),
         )
         gen = CudaTextGenerator(model, max_new_tokens=5, top_k=1)
 
@@ -293,12 +313,14 @@ class TestCudaTextGenerator:
         from impl._cuda.model import CUDAModel
 
         model = CUDAModel(
-            vocab_size=100,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=4,
-            n_experts=4,
-            ff_dim=64,
+            TransformerConfig(
+                vocab_size=100,
+                embed_dim=32,
+                n_layers=2,
+                n_heads=4,
+                n_experts=4,
+                expert_dim=64,
+            ),
         )
         gen = CudaTextGenerator(model, max_new_tokens=3)
 

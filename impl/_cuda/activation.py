@@ -26,7 +26,7 @@ import ctypes
 from typing import Any
 
 import torch
-from cuda import cuda as _cuda_lib
+from cuda.bindings import driver as _cuda_lib  # pyright: ignore[reportAttributeAccessIssue]
 
 from impl._cuda.compiler import compile_and_load, get_kernel_handle
 
@@ -177,9 +177,7 @@ def _ensure_cuda_context() -> None:
     times (it initializes the driver if not already initialized).
     """
     status = _cuda_lib.cuInit(0)
-    if status[0] not in (
-        _cuda_lib.CUresult.CUDA_SUCCESS,
-    ):
+    if status[0] not in (_cuda_lib.CUresult.CUDA_SUCCESS,):
         raise RuntimeError(f"Failed to initialize CUDA driver: {status}")
 
 
@@ -211,9 +209,7 @@ def _resolve_kernel_param(p: Any) -> tuple[int, Any]:
         return (2, p)
     if isinstance(p, (bytes, bytearray)):
         return (3, ctypes.addressof(ctypes.create_string_buffer(p if isinstance(p, bytes) else bytes(p))))
-    raise TypeError(
-        f"Unsupported param type: {type(p)} — expected torch.Tensor, int, ctypes.c_void_p, or None"
-    )
+    raise TypeError(f"Unsupported param type: {type(p)} — expected torch.Tensor, int, ctypes.c_void_p, or None")
 
 
 def _launch_kernel(kernel: Any, params: list, grid_x: int, block_x: int = 256) -> None:
@@ -273,15 +269,15 @@ def _launch_kernel(kernel: Any, params: list, grid_x: int, block_x: int = 256) -
         status = _cuda_lib.cuLaunchKernel(
             kernel,
             grid_x,  # grid x — 1D grid with one block per element chunk
-            1,       # grid y — single row of blocks (1D execution)
-            1,       # grid z — single layer of blocks
-            block_x, # block x — 256 threads per block
-            1,       # block y — 1 thread dimension (1D thread block)
-            1,       # block z — 1 thread dimension
-            0,       # shared memory size — none for this kernel
+            1,  # grid y — single row of blocks (1D execution)
+            1,  # grid z — single layer of blocks
+            block_x,  # block x — 256 threads per block
+            1,  # block y — 1 thread dimension (1D thread block)
+            1,  # block z — 1 thread dimension
+            0,  # shared memory size — none for this kernel
             stream,  # stream handle (not None — required on this platform)
             kernel_args,  # (values, types) tuple — required by cuda-python HelperKernelParams
-            0,       # extra launch attributes — must be 0, NOT None on Jetson/L4T
+            0,  # extra launch attributes — must be 0, NOT None on Jetson/L4T
         )
         if status[0] != _cuda_lib.CUresult.CUDA_SUCCESS:
             raise RuntimeError(f"cuLaunchKernel failed: {status}")
@@ -399,7 +395,7 @@ class _SiluCudaFunction(torch.autograd.Function):
         torch.Tensor
             Gradient with respect to input (same shape as input).
         """
-        input, = ctx.saved_tensors  # Retrieve saved input (gradients not computed here)
+        (input,) = ctx.saved_tensors  # Retrieve saved input (gradients not computed here)
         grad_output = grad_outputs[0]  # Get the gradient output
 
         # Compute gradient using PyTorch operations (automatic differentiation)

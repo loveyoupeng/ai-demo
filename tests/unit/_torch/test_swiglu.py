@@ -61,9 +61,9 @@ class TestSwiGLUFFN:
         loss = (output * output).sum()
         loss.backward()
 
-        assert layer.W1.grad is not None
-        assert layer.W3.grad is not None
-        assert layer.W2.grad is not None
-        assert torch.all(torch.isfinite(layer.W1.grad))
-        assert torch.all(torch.isfinite(layer.W3.grad))
-        assert torch.all(torch.isfinite(layer.W2.grad))
+        assert layer.gate_proj.grad is not None
+        assert layer.up_proj.grad is not None
+        assert layer.down_proj.grad is not None
+        assert torch.all(torch.isfinite(layer.gate_proj.grad))
+        assert torch.all(torch.isfinite(layer.up_proj.grad))
+        assert torch.all(torch.isfinite(layer.down_proj.grad))

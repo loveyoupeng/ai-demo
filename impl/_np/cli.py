@@ -8,6 +8,7 @@ import numpy as np
 
 from impl._np.inference import TextGenerator
 from impl._np.model import NumPyModel
+from shared.config import TransformerConfig
 
 
 def main() -> None:
@@ -33,15 +34,13 @@ def main() -> None:
     args = parser.parse_args()
 
     model = NumPyModel(
-        vocab_size=256,
-        embed_dim=args.embed_dim,
-        n_layers=args.n_layers,
-        n_heads=args.n_heads,
-        n_experts=2,
-        ff_dim=args.embed_dim * 2,
-        k=2,
-        rope_dim=args.embed_dim // args.n_heads,
-        seed=42,
+        TransformerConfig(
+            vocab_size=256,
+            embed_dim=args.embed_dim,
+            n_layers=args.n_layers,
+            n_heads=args.n_heads,
+            seed=42,
+        )
     )
 
     generator = TextGenerator(

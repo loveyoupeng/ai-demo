@@ -18,7 +18,10 @@ from __future__ import annotations
 import logging
 
 import numpy as np
+import pytest
 import torch
+
+from shared.config import TransformerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -27,32 +30,34 @@ logger = logging.getLogger(__name__)
 
 
 def _build_3way_models() -> tuple:
-    """Build NP / Torch / Triton models with identical weights."""
-    common = dict(
-        vocab_size=64,
-        embed_dim=32,
-        n_layers=2,
-        n_heads=4,
-        n_experts=2,
-        ff_dim=64,
-        k=2,
-        seed=123,
+    """Build NP / Torch / Triton models with identical weights (Keys scheme)."""
+    cfg = TransformerConfig.from_dict(
+        dict(
+            vocab_size=64,
+            embed_dim=32,
+            n_layers=2,
+            n_heads=4,
+            n_experts=2,
+            expert_dim=64,
+            top_k=2,
+            seed=123,
+        )
     )
 
     from impl._np.model import NumPyModel
 
-    np_model = NumPyModel(**common)
+    np_model = NumPyModel(cfg)
     np_model.forward(np.array([[0, 1, 2, 3, 4]], dtype=np.int32))
     np_params = np_model.get_all_parameters()
 
     from impl._torch.layers import TorchModel
 
-    torch_model = TorchModel(**common)
+    torch_model = TorchModel(cfg)
     torch_model.load_from_numpy_dict(np_params)
 
     from impl._triton.model import TritonModel
 
-    triton_model = TritonModel(**common)
+    triton_model = TritonModel(cfg)
     triton_model.load_from_numpy_dict(np_params)
     # Triton needs weights on CUDA for forward pass
     for param in triton_model.parameters():
@@ -123,13 +128,13 @@ def _sampling_demo(npm, tp, trp) -> dict:
 
     from impl._torch.inference import TorchTextGenerator
 
-    torch.manual_seed(npm.seed)
+    torch.manual_seed(npm.config.seed)
     g2 = TorchTextGenerator(tp, max_new_tokens=10, temperature=T)
     r2 = g2.generate_sampled(torch.tensor(prompt), T)[0].detach().cpu().tolist()
 
     from impl._triton.inference import TritonTextGenerator
 
-    torch.manual_seed(npm.seed)
+    torch.manual_seed(npm.config.seed)
     g3 = TritonTextGenerator(trp, max_new_tokens=10, temperature=T)
     r3 = g3._generate_sampled(torch.tensor(prompt, device="cuda"), T)[0].detach().cpu().tolist()
 
@@ -193,15 +198,19 @@ def _cuda_independent() -> dict:
     from impl._cuda.model import CUDAModel
 
     cd = CUDAModel(
-        vocab_size=64,
-        embed_dim=32,
-        n_layers=2,
-        n_heads=4,
-        n_experts=2,
-        ff_dim=64,
-        k=2,
-        rope_dim=0,
-        seed=123,
+        TransformerConfig.from_dict(
+            {
+                "vocab_size": 64,
+                "embed_dim": 32,
+                "n_layers": 2,
+                "n_heads": 4,
+                "n_experts": 2,
+                "expert_dim": 64,
+                "top_k": 2,
+                "rope_dim": 0,
+                "seed": 123,
+            }
+        )
     )
 
     prompt = np.array([[0, 1, 2, 3, 4]], dtype=np.int32)
@@ -236,7 +245,22 @@ def _cuda_independent() -> dict:
     }
 
 
-# ── Main ─────────────────────────────────────────────────────────────
+# ── pytest test ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No GPU")
+@pytest.mark.gpu
+def test_equivalence_demo_3way() -> None:
+    """NumPy/Torch/Triton with identical weights produce identical greedy output."""
+    npm, tp, trp = _build_3way_models()
+    greddy = _greedy_demo(npm, tp, trp)
+    base = greddy["numpy"]
+    assert all(greddy[n] == base for n in ["numpy", "torch", "triton"]), f"Greedy mismatch: {greddy}"
+    tl = _logits_demo(npm, tp, trp)
+    assert tl["numpy"]["indices"] == tl["torch"]["indices"] == tl["triton"]["indices"], f"Top-5 mismatch: {tl}"
+
+
+# ── Main ─────────────────────────────────────────────────────
 
 
 def main() -> None:

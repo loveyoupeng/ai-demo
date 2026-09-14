@@ -50,7 +50,7 @@ class TestDerivedFields:
 
     def test_k_dim_default(self):
         cfg = TransformerConfig()
-        assert cfg.k_dim == cfg.n_groups * cfg.head_dim
+        assert cfg.k_dim == cfg.kv_heads * cfg.head_dim
 
     def test_v_dim_equals_k_dim(self):
         cfg = TransformerConfig()
@@ -195,6 +195,7 @@ class TestSerialization:
             "kvcache_type",
             "load_balance_loss",
             "seed",
+            "norm_eps",
         }
         assert set(d.keys()) == expected_keys
 

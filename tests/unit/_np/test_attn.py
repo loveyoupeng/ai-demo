@@ -5,7 +5,7 @@ All tests fail initially. Implement after verifying failure.
 
 import numpy as np
 
-from impl._np.modules import MultiHeadAttention
+from impl._np.attention import MultiHeadAttention
 
 
 class TestMultiHeadAttentionForward:
@@ -15,7 +15,7 @@ class TestMultiHeadAttentionForward:
         """Input [batch, seq_len, embed_dim] → output same shape."""
         x = np.random.default_rng(42).random((2, 4, 16)).astype(np.float32)
 
-        mha = MultiHeadAttention(16, n_heads=4, rope_dim=0, seed=0)
+        mha = MultiHeadAttention(16, n_heads=4, n_groups=4, rope_dim=0, seed=0)
         out = mha.forward(x)
 
         assert out.shape == x.shape, f"Expected {x.shape}, got {out.shape}"
@@ -28,7 +28,7 @@ class TestMultiHeadAttentionForward:
         """
         x = np.random.default_rng(10).random((1, 5, 16)).astype(np.float32)
 
-        mha = MultiHeadAttention(16, n_heads=4, rope_dim=0, seed=42)
+        mha = MultiHeadAttention(16, n_heads=4, n_groups=4, rope_dim=0, seed=42)
 
         # With n_heads=4, head_dim=4, we have 4 heads
         # After attention: scores sum to 1 across seq for each head
@@ -45,19 +45,17 @@ class TestMultiHeadAttentionForward:
         """
         x = np.ones((1, 3, 12), dtype=np.float32)
 
-        mha = MultiHeadAttention(12, n_heads=3, rope_dim=0, seed=0)
+        mha = MultiHeadAttention(12, n_heads=3, n_groups=3, rope_dim=0, seed=0)
 
         # Perturb Q projection
-        Wq_orig = mha.Wq.copy()
-        mha.Wq = Wq_orig + 0.1
+        Wq_orig = mha.q_proj.copy()
+        mha.q_proj = Wq_orig + 0.1
         out_q = mha.forward(x.copy())
 
         # Reset and perturb O projection
-        mha.Wq = Wq_orig
-        Wo_orig = mha.Wo.copy()
-        mha.Wo = Wo_orig + 0.1
-        Wo_orig = mha.Wo.copy()
-        mha.Wo = Wo_orig + 0.1
+        mha.q_proj = Wq_orig
+        Wo_orig = mha.o_proj.copy()
+        mha.o_proj = Wo_orig + 0.1
         out_o = mha.forward(x.copy())
 
         # All perturbations should change output
@@ -67,8 +65,8 @@ class TestMultiHeadAttentionForward:
         """Same input, same seed → same output (no randomness in forward)."""
         x = np.random.default_rng(55).random((1, 6, 8)).astype(np.float32)
 
-        mha1 = MultiHeadAttention(8, n_heads=2, rope_dim=0, seed=42)
-        mha2 = MultiHeadAttention(8, n_heads=2, rope_dim=0, seed=42)
+        mha1 = MultiHeadAttention(8, n_heads=2, n_groups=2, rope_dim=0, seed=42)
+        mha2 = MultiHeadAttention(8, n_heads=2, n_groups=2, rope_dim=0, seed=42)
 
         out1 = mha1.forward(x.copy())
         out2 = mha2.forward(x.copy())
@@ -86,6 +84,20 @@ class TestMultiHeadAttentionForward:
         mha = MultiHeadAttention(12, n_heads=6, n_groups=3, rope_dim=0, seed=0)
         out = mha.forward(x)
 
-        assert out.shape == x.shape, f"GQA output shape {out.shape} != input {x.shape}"
+        assert out.shape == x.shape, f"GQA output shape {out.shape} != input {out.shape}"
         assert np.all(np.isfinite(out)), "GQA output should be finite"
         assert not np.allclose(out, 0.0), "GQA output should not be all zeros"
+
+    def test_causal_prefix_invariance(self):
+        """Causality: extending the sequence leaves every prefix output unchanged.
+
+        In a causal (decoder-only) model the output at position i depends only
+        on tokens 0..i. Appending more tokens must not change any prefix output.
+        """
+        mha = MultiHeadAttention(16, n_heads=4, n_groups=4, rope_dim=0, seed=42)
+        rng = np.random.default_rng(7)
+        x_long = rng.random((1, 8, 16)).astype(np.float32)
+
+        out_long = mha.forward(x_long)
+        out_short = mha.forward(x_long[:, :5])
+        np.testing.assert_allclose(out_short, out_long[:, :5], rtol=1e-5, atol=1e-5)

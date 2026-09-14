@@ -25,6 +25,7 @@ from impl._np.inference import TextGenerator
 from impl._np.model import NumPyModel
 from impl._np.optimizer import AdamW
 from impl._np.training import train_step
+from shared.config import TransformerConfig
 
 
 class TestFullTraining:
@@ -41,15 +42,18 @@ class TestFullTraining:
         """
 
         model = NumPyModel(
-            vocab_size=16,
-            embed_dim=8,  # slightly larger for tractable optimization
-            n_layers=1,
-            n_heads=1,  # minimum: stable with tiny embed_dim
-            n_experts=2,
-            ff_dim=8,  # reduced to keep params low for numerical backward
-            k=1,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=8,  # slightly larger for tractable optimization
+                n_layers=1,
+                n_heads=1,
+                n_groups=1,  # minimum: stable with tiny embed_dim
+                n_experts=2,
+                expert_dim=8,  # reduced to keep params low for numerical backward
+                top_k=1,
+                rope_dim=0,
+                seed=0,
+            ),
         )
 
         # 10 sequences of length 8 — small but enough for stable gradient signal
@@ -89,15 +93,18 @@ class TestModelSerialization:
         """
 
         model = NumPyModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=8,
+                n_layers=1,
+                n_heads=1,
+                n_groups=1,
+                n_experts=2,
+                expert_dim=8,
+                top_k=1,
+                rope_dim=0,
+                seed=0,
+            ),
         )
 
         input_ids = np.array([[0, 1, 2, 3]], dtype=np.int32)
@@ -117,15 +124,18 @@ class TestModelSerialization:
 
             # Load into a new model with identical config
             model2 = NumPyModel(
-                vocab_size=16,
-                embed_dim=8,
-                n_layers=1,
-                n_heads=1,
-                n_experts=2,
-                ff_dim=8,
-                k=1,
-                rope_dim=0,
-                seed=0,
+                TransformerConfig(
+                    vocab_size=16,
+                    embed_dim=8,
+                    n_layers=1,
+                    n_heads=1,
+                    n_groups=1,
+                    n_experts=2,
+                    expert_dim=8,
+                    top_k=1,
+                    rope_dim=0,
+                    seed=0,
+                ),
             )
             loaded: dict[str, np.ndarray] = {}
             for name in params:
@@ -154,15 +164,18 @@ class TestModelSerialization:
         """
 
         model = NumPyModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=8,
+                n_layers=1,
+                n_heads=1,
+                n_groups=1,
+                n_experts=2,
+                expert_dim=8,
+                top_k=1,
+                rope_dim=0,
+                seed=0,
+            ),
         )
         loss_fn = CrossEntropyLoss()
         optimizer = AdamW(lr=0.01)
@@ -186,15 +199,18 @@ class TestModelSerialization:
                 np.save(str(checkpoint_dir / f"{name}.npy"), param, allow_pickle=False)
 
             model2 = NumPyModel(
-                vocab_size=16,
-                embed_dim=8,
-                n_layers=1,
-                n_heads=1,
-                n_experts=2,
-                ff_dim=8,
-                k=1,
-                rope_dim=0,
-                seed=0,
+                TransformerConfig(
+                    vocab_size=16,
+                    embed_dim=8,
+                    n_layers=1,
+                    n_heads=1,
+                    n_groups=1,
+                    n_experts=2,
+                    expert_dim=8,
+                    top_k=1,
+                    rope_dim=0,
+                    seed=0,
+                ),
             )
             loaded: dict[str, np.ndarray] = {}
             for name in model_params:
@@ -229,15 +245,18 @@ class TestInference:
         """
 
         model = NumPyModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=8,
+                n_layers=1,
+                n_heads=1,
+                n_groups=1,
+                n_experts=2,
+                expert_dim=8,
+                top_k=1,
+                rope_dim=0,
+                seed=0,
+            ),
         )
         loss_fn = CrossEntropyLoss()
         optimizer = AdamW(lr=0.01)
@@ -271,15 +290,18 @@ class TestInference:
         """Temperature-sampled generation produces valid token sequences."""
 
         model = NumPyModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=8,
+                n_layers=1,
+                n_heads=1,
+                n_groups=1,
+                n_experts=2,
+                expert_dim=8,
+                top_k=1,
+                rope_dim=0,
+                seed=0,
+            ),
         )
         loss_fn = CrossEntropyLoss()
         optimizer = AdamW(lr=0.01)
@@ -303,15 +325,18 @@ class TestInference:
     def test_multi_batch_generate(self):
         """Greedy generation with batch_size > 1 works correctly."""
         model = NumPyModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=16,
-            k=1,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=8,
+                n_layers=1,
+                n_heads=2,
+                n_groups=2,
+                n_experts=2,
+                expert_dim=16,
+                top_k=1,
+                rope_dim=0,
+                seed=0,
+            ),
         )
 
         generator = TextGenerator(model, max_new_tokens=2, temperature=0.0)

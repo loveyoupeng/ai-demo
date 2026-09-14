@@ -5,6 +5,8 @@ TDD: Write test → all fail → implement → all pass → ruff + pyright → c
 
 import torch
 
+from shared.config import TransformerConfig
+
 
 class TestDecoderStackForward:
     """Test the DecoderStack nn.Module forward pass."""
@@ -21,14 +23,17 @@ class TestDecoderStackForward:
         n_layers = 3
 
         stack = DecoderStack(
-            n_layers=n_layers,
-            embed_dim=embed_dim,
-            n_heads=n_heads,
-            n_experts=n_experts,
-            ff_dim=ff_dim,
-            k=k,
-            rope_dim=0,
-        )
+            TransformerConfig(
+                n_layers=n_layers,
+                embed_dim=embed_dim,
+                n_heads=n_heads,
+                n_groups=n_heads,
+                n_experts=n_experts,
+                expert_dim=ff_dim,
+                top_k=k,
+                rope_dim=0,
+            ),
+        ).double()
 
         x = torch.randn(2, 8, embed_dim, dtype=torch.float64)
         output = stack(x)
@@ -49,14 +54,17 @@ class TestDecoderStackForward:
         n_layers = 3
 
         stack = DecoderStack(
-            n_layers=n_layers,
-            embed_dim=embed_dim,
-            n_heads=n_heads,
-            n_experts=n_experts,
-            ff_dim=ff_dim,
-            k=k,
-            rope_dim=0,
-        )
+            TransformerConfig(
+                n_layers=n_layers,
+                embed_dim=embed_dim,
+                n_heads=n_heads,
+                n_groups=n_heads,
+                n_experts=n_experts,
+                expert_dim=ff_dim,
+                top_k=k,
+                rope_dim=0,
+            ),
+        ).double()
 
         x = torch.randn(1, 4, embed_dim, dtype=torch.float64)
         output = stack(x)
@@ -67,16 +75,14 @@ class TestDecoderStackForward:
         block_module: list[torch.nn.Module] = list(stack.layers)  # noqa: TID251
         for layer_idx in range(len(block_module)):
             block: torch.nn.Module = block_module[layer_idx]
-            for name, param in block.mha.named_parameters():  # pyright: ignore
-                assert param.grad is not None, f"layer {layer_idx} mha {name} has no gradient"
+            for name, param in block.self_attn.named_parameters():  # pyright: ignore
+                assert param.grad is not None, f"layer {layer_idx} attn {name} has no gradient"
                 grad_norm = param.grad.norm().item()
-                # Wk.bias is zero by mathematical property of softmax attention
-                if name != "Wk.bias":
-                    assert grad_norm > 1e-9, f"layer {layer_idx} mha {name} grad norm {grad_norm} too small"
+                assert grad_norm > 1e-9, f"layer {layer_idx} attn {name} grad norm {grad_norm} too small"
 
-            # At least some MoE params must have gradients
-            for name, param in block.moe.named_parameters():  # pyright: ignore
-                assert param.grad is not None, f"layer {layer_idx} moe {name} has no gradient"
+            # At least some FFN/MoE params must have gradients
+            for name, param in block.mlp.named_parameters():  # pyright: ignore
+                assert param.grad is not None, f"layer {layer_idx} mlp {name} has no gradient"
 
     def test_single_layer(self) -> None:
         """Works with n_layers=1 — no special casing."""
@@ -89,14 +95,17 @@ class TestDecoderStackForward:
         k = 2
 
         stack = DecoderStack(
-            n_layers=1,
-            embed_dim=embed_dim,
-            n_heads=n_heads,
-            n_experts=n_experts,
-            ff_dim=ff_dim,
-            k=k,
-            rope_dim=0,
-        )
+            TransformerConfig(
+                n_layers=1,
+                embed_dim=embed_dim,
+                n_heads=n_heads,
+                n_groups=n_heads,
+                n_experts=n_experts,
+                expert_dim=ff_dim,
+                top_k=k,
+                rope_dim=0,
+            ),
+        ).double()
 
         x = torch.randn(1, 2, embed_dim, dtype=torch.float64)
         output = stack(x)

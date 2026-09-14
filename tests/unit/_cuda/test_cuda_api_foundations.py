@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 import torch
-from cuda import cuda as _cuda_lib
-from cuda import nvrtc as _nvrtc_lib
+from cuda.bindings import driver as _cuda_lib  # pyright: ignore[reportAttributeAccessIssue]
+from cuda.bindings import nvrtc as _nvrtc_lib  # pyright: ignore[reportAttributeAccessIssue]
 
 # ---------------------------------------------------------------------------
 # CUDA kernel source - vector addition: c[i] = a[i] + b[i]
@@ -56,12 +56,16 @@ def _ensure_cuda_context() -> None:
             raise RuntimeError(f"Failed to get CUDA device: {ret}")
         device = ret[1]
         try:
-            ret = _cuda_lib.cuCtxCreate(0, device)
+            ret = _cuda_lib.cuDevicePrimaryCtxRetain(device)
+            if ret[0] not in (_cuda_lib.CUresult.CUDA_SUCCESS,):
+                raise RuntimeError(f"Failed to retain primary CUDA context: {ret}")
+            primary = ret[1]
+            ret = _cuda_lib.cuCtxSetCurrent(primary)
             if ret[0] not in (
                 _cuda_lib.CUresult.CUDA_SUCCESS,
                 _cuda_lib.CUresult.CUDA_ERROR_UNKNOWN,
             ):
-                raise RuntimeError(f"Failed to create CUDA context: {ret}")
+                raise RuntimeError(f"Failed to set CUDA context: {ret}")
         except (OSError, RuntimeError):
             pass
 
@@ -222,7 +226,7 @@ class TestCUDAInit:
         assert ret[0] == _cuda_lib.CUresult.CUDA_SUCCESS, f"cuDeviceGet failed: {ret}"
         device = ret[1]
 
-        ret = _cuda_lib.cuCtxCreate(0, device)
+        ret = _cuda_lib.cuCtxCreate(None, 0, device)
         assert ret[0] == _cuda_lib.CUresult.CUDA_SUCCESS, f"cuCtxCreate failed: {ret}"
         ctx = ret[1]
         assert ctx is not None, "Context handle is None"

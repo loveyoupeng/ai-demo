@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from impl._torch.layers import TorchModel
+from shared.config import TransformerConfig
 
 
 class TestFullTraining:
@@ -26,15 +27,18 @@ class TestFullTraining:
         """
 
         model = TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=2,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=8,
+                n_layers=2,
+                n_heads=2,
+                n_groups=2,
+                n_experts=2,
+                expert_dim=8,
+                top_k=1,
+                rope_dim=0,
+                seed=0,
+            ),
         )
 
         # Create deterministic synthetic data
@@ -82,15 +86,18 @@ class TestModelSerialization:
             5. Verify logits match to 5 decimal places
         """
         model = TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=8,
+                n_layers=1,
+                n_heads=1,
+                n_groups=1,
+                n_experts=2,
+                expert_dim=8,
+                top_k=1,
+                rope_dim=0,
+                seed=0,
+            ),
         )
         input_ids = torch.tensor([[0, 1, 2, 3]], dtype=torch.int64)
 
@@ -104,15 +111,18 @@ class TestModelSerialization:
 
         # Load into a new model with identical config
         model2 = TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=8,
+                n_layers=1,
+                n_heads=1,
+                n_groups=1,
+                n_experts=2,
+                expert_dim=8,
+                top_k=1,
+                rope_dim=0,
+                seed=0,
+            ),
         )
         model2.load_from_numpy_dict(saved_params)
         model2.eval()
@@ -136,15 +146,18 @@ class TestModelSerialization:
         generate again — outputs must be identical.
         """
         model = TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=8,
+                n_layers=1,
+                n_heads=1,
+                n_groups=1,
+                n_experts=2,
+                expert_dim=8,
+                top_k=1,
+                rope_dim=0,
+                seed=0,
+            ),
         )
 
         # Train for 5 steps
@@ -174,15 +187,18 @@ class TestModelSerialization:
 
         # Load into new model
         model2 = TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=8,
+                n_layers=1,
+                n_heads=1,
+                n_groups=1,
+                n_experts=2,
+                expert_dim=8,
+                top_k=1,
+                rope_dim=0,
+                seed=0,
+            ),
         )
         model2.load_from_numpy_dict(saved_params)
 

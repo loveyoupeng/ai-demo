@@ -113,7 +113,7 @@ def train_step(
 
         1. Forward pass: model(batch_input) → logits (B, S, V)
         2. Loss computation: loss_fn(logits, batch_target) → scalar float
-        3. Backward pass: model.backward(logits, targets, input) → grads dict
+        3. Backward pass: model.backward(input, targets) → grads dict
         4. Gradient clipping: clip_gradients(grads, max_norm) — in-place
         5. Optimizer step: optimizer.step(params, grads) — modifies params in-place
         6. Return loss value
@@ -146,8 +146,7 @@ def train_step(
     >>> from impl._np.cross_entropy import CrossEntropyLoss
     >>> from impl._np.optimizer import AdamW
     >>> from impl._np.training import train_step
-    >>> model = NumPyModel(vocab_size=16, embed_dim=32, n_layers=1,
-    ...                    n_heads=2, n_experts=2, ff_dim=16, k=1)
+    >>> model = NumPyModel(TransformerConfig(vocab_size=16, embed_dim=32, n_layers=1, n_heads=2))
     >>> x = np.random.randint(0, 16, (2, 4), dtype=np.int32)
     >>> t = np.random.randint(0, 16, (2, 4), dtype=np.int32)
     >>> loss = train_step(model, x, t, CrossEntropyLoss(), AdamW(lr=0.01))
@@ -176,13 +175,14 @@ def train_step(
         loss,
     )
 
-    # --- 3. Backward pass (numerical gradients) ------------------------------
-    # model.backward recomputes the forward pass internally and uses
-    # finite-difference to compute gradient of loss w.r.t. every parameter.
+    # --- 3. Backward pass (analytic gradients) -------------------------------
+    # model.backward runs the analytic chain rule (CE → lm_head → final norm
+    # → stack → embedding) in O(forward); finite differences live in
+    # impl._np.gradcheck as a test reference only.
     #
     # grads[k] has the same shape as params[k], i.e. the gradient of the
     # scalar loss with respect to each element of the parameter tensor.
-    grads = model.backward(logits, batch_target, batch_input)  # dict[str, ndarray]
+    grads = model.backward(batch_input, batch_target)  # dict[str, ndarray]
     logger.info(
         "train_step() backward completed param_grads=%d",
         len(grads),
@@ -311,7 +311,12 @@ def clip_gradients(grads: dict[str, np.ndarray], max_norm: float) -> None:
         return
 
     # Step 2: Scale all gradients uniformly toward max_norm
-    logger.info("clip_gradients() clipping global_norm=%.6f → max_norm=%.4f factor=%.6f", global_norm, max_norm, max_norm / global_norm)
+    logger.info(
+        "clip_gradients() clipping global_norm=%.6f → max_norm=%.4f factor=%.6f",
+        global_norm,
+        max_norm,
+        max_norm / global_norm,
+    )
 
     # Step 2: Scale all gradients uniformly toward max_norm
     # scaling_factor = max_norm / global_norm  (always < 1.0 here)
@@ -343,7 +348,7 @@ def _log_grad_stats(grads: dict[str, np.ndarray]) -> None:
             layer_idx = int(parts[1])
             if layer_idx not in layer_norms:
                 layer_norms[layer_idx] = 0.0
-            layer_norms[layer_idx] += float(np.sum(grad ** 2))
+            layer_norms[layer_idx] += float(np.sum(grad**2))
     for layer_idx in layer_norms:
         layer_norms[layer_idx] = float(np.sqrt(layer_norms[layer_idx]))
     if not layer_norms:

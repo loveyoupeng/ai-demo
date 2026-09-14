@@ -1,420 +1,156 @@
-"""Parameter name constants for transformer modules.
+"""Parameter key scheme for cross-backend checkpoints.
 
-All parameter names are defined as class-level string constants.
-Helper functions that assemble compound paths use ONLY these constants —
-no magic string literals are permitted.
+This module is the SINGLE SOURCE OF TRUTH for the flat-dict checkpoint keys
+stored in ``ckpt.npz``. Every track (NumPy, PyTorch, Triton, CUDA) saves and
+loads parameters under these keys, which is what makes a model trained on one
+track runnable on any other.
 
-Naming convention across backends
-=================================
-The keys below define the EXACT save/load format shared by NumPy, PyTorch,
-and Triton backends.  Each backend's save_as_numpy() produces these keys,
-and load_from_numpy_dict() consumes them.
+Naming follows the industry convention used by HuggingFace Llama / Mixtral
+models, so every key is directly searchable on the web:
 
-NumPy keys:     impl/_np/model.py → get_all_parameters()
-PyTorch keys:   impl/_torch/layers.py → save_as_numpy() / load_from_numpy()
-Triton keys:    impl/_triton/model.py → save_as_numpy() / load_from_numpy_dict()
+    model.embed_tokens                                  (V, D)
+    model.layers.{i}.self_attn.q_proj.weight            (D, H*hd)
+    model.layers.{i}.self_attn.k_proj.weight            (D, G*hd)
+    model.layers.{i}.self_attn.v_proj.weight            (D, G*hd)
+    model.layers.{i}.self_attn.o_proj.weight            (H*hd, D)
+    model.layers.{i}.input_layernorm.weight             (D,)
+    model.layers.{i}.post_attention_layernorm.weight    (D,)
+    model.layers.{i}.mlp.gate_proj.weight               (D, FF)   dense SwiGLU
+    model.layers.{i}.mlp.up_proj.weight                 (D, FF)
+    model.layers.{i}.mlp.down_proj.weight               (FF, D)
+    model.layers.{i}.mlp.gate.weight                    (D, E)    MoE router
+    model.layers.{i}.mlp.experts.{j}.gate_proj.weight   (D, FF)   MoE experts
+    model.layers.{i}.mlp.experts.{j}.up_proj.weight     (D, FF)
+    model.layers.{i}.mlp.experts.{j}.down_proj.weight   (FF, D)
+    model.norm.weight                                   (D,)      final RMSNorm
+    model.lm_head.weight                                (D, V)
+
+where D = embed_dim, V = vocab_size, H = n_heads, G = n_groups (K/V heads),
+hd = head_dim, FF = expert_dim, E = n_experts, i = layer index, j = expert
+index. The model uses no bias terms (Llama convention), so every key ends in
+``.weight``.
 """
 
 from __future__ import annotations
 
 
-class Mha:
-    """Constants for Multi-Head Attention parameter names."""
+class Attn:
+    """Attention projection names (HuggingFace Llama convention)."""
 
-    WQ: str = "Wq"
-    BQ: str = "bq"
-    WK: str = "Wk"
-    BK: str = "bk"
-    WV: str = "Wv"
-    BV: str = "bv"
-    WO: str = "Wo"
-    BO: str = "bo"
+    Q_PROJ: str = "q_proj"
+    K_PROJ: str = "k_proj"
+    V_PROJ: str = "v_proj"
+    O_PROJ: str = "o_proj"
 
 
-class Attention:
-    """Constants for attention layer parameter names."""
+# All attention projections, in q/k/v/o order.
+ATTN_PROJS: tuple[str, str, str, str] = (Attn.Q_PROJ, Attn.K_PROJ, Attn.V_PROJ, Attn.O_PROJ)
 
-    Q_WEIGHT: str = "q.weight"
-    K_WEIGHT: str = "k.weight"
-    V_WEIGHT: str = "v.weight"
-    O_WEIGHT: str = "o.weight"
-    Q_BIAS: str = "q.bias"
-    K_BIAS: str = "k.bias"
-    V_BIAS: str = "v.bias"
-    O_BIAS: str = "o.bias"
 
-    # Save/load keys (cross-backend convention)
-    WEIGHTS: str = "mha"
+class Mlp:
+    """Feed-forward / MoE projection names (HuggingFace Llama/Mixtral convention).
+
+    SwiGLU naming: the *gate* projection is activated with SiLU and multiplies
+    the *up* projection element-wise; the *down* projection maps back to the
+    model width. In MoE layers, ``gate`` (without ``_proj``) is the router.
+    """
+
+    GATE_PROJ: str = "gate_proj"
+    UP_PROJ: str = "up_proj"
+    DOWN_PROJ: str = "down_proj"
+    GATE: str = "gate"  # MoE router (distinct from gate_proj)
+
+
+# All three SwiGLU projections, in gate/up/down order.
+FFN_PROJS: tuple[str, str, str] = (Mlp.GATE_PROJ, Mlp.UP_PROJ, Mlp.DOWN_PROJ)
 
 
 class LayerNorm:
-    """Constants for LayerNorm parameter names."""
+    """Per-block normalization names (Llama convention)."""
 
-    LN_GAMMA: str = "ln_gamma"
-    LN_BIAS: str = "ln_bias"
-
-    # Save/load keys (cross-backend convention)
-    LN1: str = "ln1_gamma"
-    LN2: str = "ln2_gamma"
+    INPUT: str = "input_layernorm"  # norm before attention
+    POST_ATTENTION: str = "post_attention_layernorm"  # norm before feed-forward
 
 
-class MoE:
-    """Constants for MoE (Mixture of Experts) parameter names."""
+class Keys:
+    """Builders for the flat-dict checkpoint keys.
 
-    W1: str = "w1"
-    W2: str = "w2"
-    W3: str = "w3"
-    GATE_WEIGHT: str = "gate.weight"
-    EXPERT_W1: str = "expert.w1"
-    EXPERT_W2: str = "expert.w2"
-    EXPERT_W3: str = "expert.w3"
-
-    # Save/load keys (cross-backend convention)
-    ROUTER: str = "router"
-    BIAS: str = "bias"
-    EXPERTS: str = "moe"
-    GATE1: str = "gate1"
-    GATE2: str = "gate2"
-
-
-class Transformer:
-    """Constants for Transformer-level parameter names."""
-
-    EMBEDDING: str = "embed"
-    LM_HEAD_WEIGHT: str = "lm_head"
-    LM_HEAD_BIAS: str = "lm_head_bias"
-
-    # Save/load keys (cross-backend convention)
-    EMBEDDING_WEIGHTS: str = "embedding_weights"
-    FINAL_GAMMA: str = "final_ln_gamma"  # also accept "final_gamma" for compat
-    OUTPUT_W1: str = "output.W1"
-    OUTPUT_W2: str = "output.W2"
-    OUTPUT_W3: str = "output.W3"
-    OUTPUT_PROJ_W: str = "output_proj_w"
-    OUTPUT_PROJ_B: str = "output_proj_b"
-
-
-class Block:
-    """Constants for per-block (layer) save/load keys.
-
-    Example usage:
-        >>> Block.prefix(0)
-        'blocks.0'
-        >>> Block.ln1_gamma(0)
-        'blocks.0.ln1_gamma'
+    Every save/load path in every track derives its keys from this class, so
+    the key scheme has exactly one definition.
     """
 
-    PREFIX: str = "blocks"
+    PREFIX: str = "model"
 
     @staticmethod
-    def prefix(layer_idx: int) -> str:
-        """Generate the base path for a transformer block.
-
-        Args:
-            layer_idx: 0-based transformer block index.
-
-        Returns:
-            Base path like 'blocks.0'.
-        """
-        return f"{Block.PREFIX}.{layer_idx}"
+    def embed() -> str:
+        """Token embedding table key — shape (vocab_size, embed_dim)."""
+        return "model.embed_tokens"
 
     @staticmethod
-    def ln1_gamma(layer_idx: int) -> str:
-        """Layer norm 1 gamma save/load key.
-
-        Args:
-            layer_idx: 0-based transformer block index.
-
-        Returns:
-            Key like 'blocks.0.ln1_gamma'.
-        """
-        return f"{Block.prefix(layer_idx)}.ln1_gamma"
+    def lm_head() -> str:
+        """Language-model head key — shape (embed_dim, vocab_size)."""
+        return "model.lm_head.weight"
 
     @staticmethod
-    def ln2_gamma(layer_idx: int) -> str:
-        """Layer norm 2 gamma save/load key.
-
-        Args:
-            layer_idx: 0-based transformer block index.
-
-        Returns:
-            Key like 'blocks.0.ln2_gamma'.
-        """
-        return f"{Block.prefix(layer_idx)}.ln2_gamma"
+    def final_norm() -> str:
+        """Final RMSNorm gamma key — shape (embed_dim,)."""
+        return "model.norm.weight"
 
     @staticmethod
-    def mha(layer_idx: int, param_key: str) -> str:
-        """MHA save/load key.
-
-        Args:
-            layer_idx: 0-based transformer block index.
-            param_key: MHA parameter key (e.g., Mha.WQ).
-
-        Returns:
-            Key like 'blocks.0.mha.Wq'.
-        """
-        return f"{Block.prefix(layer_idx)}.mha.{param_key}"
+    def layer(layer_idx: int) -> str:
+        """Base path for one transformer block (layer)."""
+        return f"model.layers.{layer_idx}"
 
     @staticmethod
-    def moe_router(layer_idx: int) -> str:
-        """MoE router save/load key.
-
-        Args:
-            layer_idx: 0-based transformer block index.
-
-        Returns:
-            Key like 'blocks.0.moe.router'.
-        """
-        return f"{Block.prefix(layer_idx)}.moe.{MoE.ROUTER}"
+    def attn(layer_idx: int, proj: str) -> str:
+        """Attention projection key, e.g. ``Keys.attn(0, Attn.Q_PROJ)``
+        → ``model.layers.0.self_attn.q_proj.weight``."""
+        return f"model.layers.{layer_idx}.self_attn.{proj}.weight"
 
     @staticmethod
-    def moe_bias(layer_idx: int) -> str:
-        """MoE router bias save/load key.
-
-        Args:
-            layer_idx: 0-based transformer block index.
-
-        Returns:
-            Key like 'blocks.0.moe.bias'.
-        """
-        return f"{Block.prefix(layer_idx)}.moe.{MoE.BIAS}"
+    def ln(layer_idx: int, which: str) -> str:
+        """Per-block normalization key, e.g. ``Keys.ln(0, LayerNorm.INPUT)``
+        → ``model.layers.0.input_layernorm.weight``."""
+        return f"model.layers.{layer_idx}.{which}.weight"
 
     @staticmethod
-    def moe_expert(layer_idx: int, expert_idx: int, param: str) -> str:
-        """MoE expert save/load key.
-
-        Args:
-            layer_idx: 0-based transformer block index.
-            expert_idx: 0-based expert index.
-            param: Parameter name (e.g., 'W1', 'W2', 'W3').
-
-        Returns:
-            Key like 'blocks.0.moe.experts.0.W1'.
-        """
-        return f"{Block.prefix(layer_idx)}.moe.experts.{expert_idx}.{param}"
+    def ffn(layer_idx: int, proj: str) -> str:
+        """Dense SwiGLU projection key, e.g. ``Keys.ffn(0, Mlp.GATE_PROJ)``
+        → ``model.layers.0.mlp.gate_proj.weight``."""
+        return f"model.layers.{layer_idx}.mlp.{proj}.weight"
 
     @staticmethod
-    def gate1(layer_idx: int) -> str:
-        """Gate 1 save/load key (PyTorch-specific).
-
-        Args:
-            layer_idx: 0-based transformer block index.
-
-        Returns:
-            Key like 'blocks.0.gate1'.
-        """
-        return f"{Block.prefix(layer_idx)}.gate1"
+    def moe_gate(layer_idx: int) -> str:
+        """MoE router key → ``model.layers.{i}.mlp.gate.weight``."""
+        return f"model.layers.{layer_idx}.mlp.{Mlp.GATE}.weight"
 
     @staticmethod
-    def gate2(layer_idx: int) -> str:
-        """Gate 2 save/load key (PyTorch-specific).
-
-        Args:
-            layer_idx: 0-based transformer block index.
-
-        Returns:
-            Key like 'blocks.0.gate2'.
-        """
-        return f"{Block.prefix(layer_idx)}.gate2"
+    def moe_expert(layer_idx: int, expert_idx: int, proj: str) -> str:
+        """MoE expert SwiGLU projection key →
+        ``model.layers.{i}.mlp.experts.{j}.gate_proj.weight``."""
+        return f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.{proj}.weight"
 
 
-def block_param(layer_idx: int, component: str) -> str:
-    """Generate the base path for a transformer block component.
+def all_param_keys(num_layers: int, has_moe: bool, n_experts: int) -> list[str]:
+    """Every parameter key for a model with ``num_layers`` blocks.
 
-    Args:
-        layer_idx: 0-based transformer block index.
-        component: Component name (e.g., 'attn', 'mlp', 'ln1').
-
-    Returns:
-        Base path like 'blocks.0.attn'.
+    Dense layers contribute the three SwiGLU projections; MoE layers
+    contribute the router plus the three projections per expert.
     """
-    return f"blocks.{layer_idx}.{component}"
-
-
-def attention_param(layer_idx: int, key: str) -> str:
-    """Generate the full parameter name for an attention weight component.
-
-    The key must be one of the Attention class attributes (e.g. Attention.Q_WEIGHT).
-
-    Args:
-        layer_idx: 0-based block index.
-        key: Attention class attribute string (e.g. Attention.Q_WEIGHT).
-
-    Returns:
-        Full path like 'blocks.0.attn.q.weight'.
-    """
-    return f"{block_param(layer_idx, 'attn')}.{key}"
-
-
-def layer_norm_param(layer_idx: int, part: str) -> str:
-    """Generate the full parameter name for a LayerNorm component within a block.
-
-    Args:
-        layer_idx: 0-based transformer block index.
-        part: Which layer norm component ("ln1", "ln2", "final").
-              "ln2" uniquely returns .bias, all others return .gamma.
-
-    Returns:
-        Full path like 'blocks.0.ln1.gamma' or 'blocks.1.ln2.bias'.
-    """
-    suffix = ".gamma" if part != "ln2" else ".bias"
-    return f"blocks.{layer_idx}.{part}{suffix}"
-
-
-def moe_param(layer_idx: int, expert_idx: int, key: str) -> str:
-    """Generate MoE parameter name.
-
-    For expert weights, returns: blocks.{layer}.moe.expert_{expert}.{key_name}
-    For gate/non-expert, returns: blocks.{layer}.moe.{key}
-
-    Args:
-        layer_idx: 0-based block index.
-        expert_idx: 0-based expert index.
-        key: MoE class attr (e.g. "expert.w1", "gate.weight", "w1").
-
-    Returns:
-        Full parameter path.
-    """
-    if key.startswith("expert."):
-        return f"blocks.{layer_idx}.moe.expert_{expert_idx}.{key.split('.', 1)[1]}"
-    return f"blocks.{layer_idx}.moe.{key}"
-
-
-def transformer_param(key: str) -> str:
-    """Generate a Transformer-level parameter name.
-
-    Args:
-        key: A Transformer class attribute that is a key in the mapping below.
-
-    Returns:
-        Full parameter name with appropriate suffixes.
-    """
-    mapping = {
-        Transformer.EMBEDDING: "embed.weight",
-        Transformer.LM_HEAD_WEIGHT: "lm_head.weight",
-        Transformer.LM_HEAD_BIAS: "lm_head.bias",
-    }
-    return mapping[key]
-
-
-def get_all_params(num_layers: int) -> dict[str, str]:
-    """Generate all parameter names for a transformer with num_layers layers.
-
-    Every key in the returned dictionary is built from the existing
-    constants (Attention, LayerNorm, Transformer, MoE) — no magic strings.
-
-    Args:
-        num_layers: Number of transformer blocks (can be 0).
-
-    Returns:
-        Dict where all keys are parameter name strings and values are identical
-        strings (used for parameter name lookup, not actual parameter values).
-
-    Example:
-        >>> params = get_all_params(0)
-        >>> "embed.weight" in params
-        True
-        >>> len(params) == 3
-        True
-    """
-    params: dict[str, str] = {}
-
-    # Transformer-level parameters (always present)
-    params[transformer_param(Transformer.EMBEDDING)] = transformer_param(
-        Transformer.EMBEDDING
-    )
-    params[transformer_param(Transformer.LM_HEAD_WEIGHT)] = transformer_param(
-        Transformer.LM_HEAD_WEIGHT
-    )
-    params[transformer_param(Transformer.LM_HEAD_BIAS)] = transformer_param(
-        Transformer.LM_HEAD_BIAS
-    )
-
-    for layer_idx in range(num_layers):
-        # Attention weights (use constants — no magic strings)
-        params[attention_param(layer_idx, Attention.Q_WEIGHT)] = (
-            attention_param(layer_idx, Attention.Q_WEIGHT)
-        )
-        params[attention_param(layer_idx, Attention.K_WEIGHT)] = (
-            attention_param(layer_idx, Attention.K_WEIGHT)
-        )
-        params[attention_param(layer_idx, Attention.V_WEIGHT)] = (
-            attention_param(layer_idx, Attention.V_WEIGHT)
-        )
-        params[attention_param(layer_idx, Attention.O_WEIGHT)] = (
-            attention_param(layer_idx, Attention.O_WEIGHT)
-        )
-        # Attention biases
-        params[attention_param(layer_idx, Attention.Q_BIAS)] = (
-            attention_param(layer_idx, Attention.Q_BIAS)
-        )
-        params[attention_param(layer_idx, Attention.K_BIAS)] = (
-            attention_param(layer_idx, Attention.K_BIAS)
-        )
-        params[attention_param(layer_idx, Attention.V_BIAS)] = (
-            attention_param(layer_idx, Attention.V_BIAS)
-        )
-        params[attention_param(layer_idx, Attention.O_BIAS)] = (
-            attention_param(layer_idx, Attention.O_BIAS)
-        )
-        # LayerNorm
-        params[layer_norm_param(layer_idx, "ln1")] = layer_norm_param(
-            layer_idx, "ln1"
-        )
-        params[layer_norm_param(layer_idx, "ln2")] = layer_norm_param(
-            layer_idx, "ln2"
-        )
-        # MoE
-        params[moe_param(layer_idx, 0, MoE.GATE_WEIGHT)] = moe_param(
-            layer_idx, 0, MoE.GATE_WEIGHT
-        )
-        params[moe_param(layer_idx, 0, MoE.EXPERT_W1)] = moe_param(
-            layer_idx, 0, MoE.EXPERT_W1
-        )
-        params[moe_param(layer_idx, 0, MoE.EXPERT_W2)] = moe_param(
-            layer_idx, 0, MoE.EXPERT_W2
-        )
-
-    return params
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Save/load key lookup functions (used by all three backends)
-# ──────────────────────────────────────────────────────────────────────
-
-
-def block_ln1_gamma(layer_idx: int) -> str:
-    """Save/load key for block 1 layer norm gamma.
-
-    Cross-backend convention — all three backends use this key.
-
-    Args:
-        layer_idx: 0-based transformer block index.
-
-    Returns:
-        Key like 'blocks.0.ln1_gamma'.
-    """
-    return Block.ln1_gamma(layer_idx)
-
-
-def block_ln2_gamma(layer_idx: int) -> str:
-    """Save/load key for block 2 layer norm gamma.
-
-    Cross-backend convention — all three backends use this key.
-
-    Args:
-        layer_idx: 0-based transformer block index.
-
-    Returns:
-        Key like 'blocks.0.ln2_gamma'.
-    """
-    return Block.ln2_gamma(layer_idx)
-
-
-def save_load_prefix() -> str:
-    """Return the prefix used in all cross-backend save/load keys.
-
-    Returns:
-        Always 'blocks'.
-    """
-    return Block.PREFIX
+    keys: list[str] = [Keys.embed()]
+    for i in range(num_layers):
+        keys.append(Keys.ln(i, LayerNorm.INPUT))
+        keys.append(Keys.ln(i, LayerNorm.POST_ATTENTION))
+        for proj in ATTN_PROJS:
+            keys.append(Keys.attn(i, proj))
+        if has_moe:
+            keys.append(Keys.moe_gate(i))
+            for j in range(n_experts):
+                for proj in FFN_PROJS:
+                    keys.append(Keys.moe_expert(i, j, proj))
+        else:
+            for proj in FFN_PROJS:
+                keys.append(Keys.ffn(i, proj))
+    keys.append(Keys.final_norm())
+    keys.append(Keys.lm_head())
+    return keys

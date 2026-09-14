@@ -27,7 +27,7 @@ import ctypes
 from typing import Any
 
 import torch
-from cuda import cuda as _cuda_lib
+from cuda.bindings import driver as _cuda_lib  # pyright: ignore[reportAttributeAccessIssue]
 
 from impl._cuda.compiler import compile_and_load, get_kernel_handle
 
@@ -222,7 +222,7 @@ def _launch_rope_kernel(
     sin_table: torch.Tensor,
     out_tensor: torch.Tensor,
     total_tokens: int,
-    S: int,
+    positions: torch.Tensor,
     D: int,
     rope_dim: int,
     block_size: int = 256,
@@ -243,8 +243,8 @@ def _launch_rope_kernel(
         Output tensor (tokens, D) flattened.
     total_tokens : int
         Total number of tokens (B * S * H).
-    S : int
-        Sequence length (used for position computation).
+    positions : torch.Tensor
+        Per-token position indices (int32), shape (total_tokens,).
     D : int
         Head dimension.
     rope_dim : int
@@ -254,14 +254,14 @@ def _launch_rope_kernel(
     """
     grid_size = (total_tokens + block_size - 1) // block_size
 
-    # Build kernel parameters: f32/f64: x, cos, sin, x_out, total_tokens, S, D, rope_dim
+    # Build kernel parameters: f32/f64: x, cos, sin, x_out, total_tokens, positions, D, rope_dim
     params = [
         input_tensor,  # const float* / const double*
         cos_table,  # const float* / const double*
         sin_table,  # const float* / const double*
         out_tensor,  # float* / double*
         ctypes.c_int(total_tokens),
-        ctypes.c_int(S),
+        positions,
         ctypes.c_int(D),
         ctypes.c_int(rope_dim),
     ]
@@ -294,6 +294,38 @@ def _launch_rope_kernel(
     )
     if status[0] != _cuda_lib.CUresult.CUDA_SUCCESS:
         raise RuntimeError(f"cuLaunchKernel failed: {status}")
+
+
+def _flatten_positions(
+    positions: torch.Tensor,
+    B: int,
+    S: int,
+    H: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Expand a (S,) or (B, S) position tensor to per-token (B*S*H,) int32.
+
+    The token flat index is ``((b * S) + s) * H + h`` (head fastest), matching
+    the ``(tokens, D)`` layout used by the kernel. Each token therefore needs
+    the position of its (batch, seq) cell, broadcast across its H heads.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position indices of shape (S,) or (B, S).
+    B, S, H : int
+        Batch, sequence length, and number of heads.
+    device : torch.device
+        Target device for the result.
+
+    Returns
+    -------
+    torch.Tensor, shape (B*S*H,)
+        Per-token position indices as int32 on ``device``.
+    """
+    pos2 = positions.unsqueeze(0).expand(B, S) if positions.dim() == 1 else positions  # (S,)→(B,S) or (B,S)
+    pos3 = pos2.unsqueeze(-1).expand(B, S, H)  # (B, S, H) — head dimension
+    return pos3.reshape(-1).to(torch.int32).to(device)
 
 
 # ---------------------------------------------------------------------------
@@ -358,9 +390,8 @@ class _RoPECudaFunction(torch.autograd.Function):
         x_flat = x.view(-1, x.shape[-1])
         n_tokens = x_flat.shape[0]
 
-        # Get per-token positions from positions tensor
-        # positions is (S,) or (B, S); we use (token_idx // H) % S
-        # For simplicity in CUDA kernel, we pass a full positions vector of length S
+        # Per-token position vector (B*S*H,) for the kernel (one entry per head)
+        pos_flat = _flatten_positions(positions, x.shape[0], x.shape[1], x.shape[2], x.device)
 
         rope_dim = x.shape[-1]  # All dimensions are rotated
 
@@ -386,7 +417,7 @@ class _RoPECudaFunction(torch.autograd.Function):
                 sin_table,
                 output_flat,
                 n_tokens,
-                x.shape[1],  # S
+                pos_flat,
                 x.shape[-1],  # D
                 rope_dim,
             )
@@ -398,7 +429,7 @@ class _RoPECudaFunction(torch.autograd.Function):
                 sin_table,
                 output_flat,
                 n_tokens,
-                x.shape[1],  # S
+                pos_flat,
                 x.shape[-1],  # D
                 rope_dim,
             )
@@ -433,6 +464,13 @@ class _RoPECudaFunction(torch.autograd.Function):
         # Flatten gradient
         grad_flat = grad_outputs[0].reshape(-1, input_tensor.shape[-1])
         n_tokens = grad_flat.shape[0]
+        pos_flat = _flatten_positions(
+            positions,
+            input_tensor.shape[0],
+            input_tensor.shape[1],
+            input_tensor.shape[2],
+            input_tensor.device,
+        )
 
         # Compute cos/sin tables (same as forward)
         max_pos = int(positions.max()) + 1
@@ -456,7 +494,7 @@ class _RoPECudaFunction(torch.autograd.Function):
                 sin_table,
                 grad_x_flat,
                 n_tokens,
-                input_tensor.shape[1],  # S
+                pos_flat,
                 input_tensor.shape[-1],  # D
                 rope_dim,
             )
@@ -468,7 +506,7 @@ class _RoPECudaFunction(torch.autograd.Function):
                 sin_table,
                 grad_x_flat,
                 n_tokens,
-                input_tensor.shape[1],  # S
+                pos_flat,
                 input_tensor.shape[-1],  # D
                 rope_dim,
             )

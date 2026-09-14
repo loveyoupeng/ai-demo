@@ -59,12 +59,15 @@ def _spawn_file_subprocess(test_file: Path, batch_id: str) -> int:
         subprocess return code (0 = all tests passed)
     """
     cmd = [
-        PYTHON, "-m", "pytest",
+        PYTHON,
+        "-m",
+        "pytest",
         str(test_file),
         "-q",
         "--timeout=120",
         "--tb=short",
-        "-p", "no:cacheprovider",
+        "-p",
+        "no:cacheprovider",
     ]
     env = _clean_env()
     env["CUDA_CACHE_DISABLE"] = "1"

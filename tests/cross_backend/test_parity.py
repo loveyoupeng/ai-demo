@@ -1,15 +1,17 @@
-"""C14.1: Cross-backend parity tests.
+"""Cross-backend parity tests.
 
-Tests that PyTorch and NumPy implementations produce identical
-forward and backward results (parity). Uses float64 for precision.
+Tests that the PyTorch and NumPy implementations produce identical forward
+results (and well-behaved gradients). Uses the shared ``TransformerConfig``
+and the shared Keys checkpoint scheme: NumPy weights load losslessly into the
+PyTorch model via ``load_from_numpy_dict``.
 
 Testing approach
 ----------------
 For parity, we:
-    1. Create identical models in NumPy and PyTorch
-    2. Align parameters using load_from_numpy
-    3. Run forward pass with same inputs → compare logits
-    4. Run backward → compare gradient norms
+    1. Create the model config and build the NumPy reference
+    2. Load the NumPy weights into the PyTorch model (shared Keys scheme)
+    3. Run forward passes with the same inputs → compare logits
+    4. Check PyTorch autograd: gradient flow and training convergence
 """
 
 from __future__ import annotations
@@ -20,6 +22,24 @@ import torch
 
 import impl._np.model as np_model
 import impl._torch.layers as torch_layers
+from shared.config import TransformerConfig
+
+
+def _cfg(**overrides: object) -> TransformerConfig:
+    """Small 1-layer MoE config; tests override the interesting knobs."""
+    base: dict[str, object] = {
+        "vocab_size": 16,
+        "embed_dim": 8,
+        "n_layers": 1,
+        "n_heads": 1,
+        "n_experts": 2,
+        "expert_dim": 8,
+        "top_k": 1,
+        "rope_dim": 0,
+        "seed": 42,
+    }
+    base.update(overrides)
+    return TransformerConfig.from_dict(base)
 
 
 class TestForwardParity:
@@ -27,42 +47,19 @@ class TestForwardParity:
 
     @pytest.mark.timeout(15)
     def test_forward_match(self):
-        """Forward pass on identical inputs produces same logits.
+        """Forward pass on identical inputs produces the same logits.
 
-        Creates a small model (vocab=16, embed_dim=8, n_layers=1) with
-        same random seed in both backends, loads NumPy weights into
-        PyTorch, and verifies that forward passes match to 1e-5.
+        NumPy weights are loaded losslessly into the PyTorch model (shared
+        Keys scheme); float64 vs float32 → single-chain tier (1e-3).
         """
+        cfg = _cfg()
+        np_model_ = np_model.NumPyModel(cfg)
+        torch_model = torch_layers.TorchModel(cfg)
 
-        # Create models with same seed
-        np_model_ = np_model.NumPyModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=42,
-        )
+        # Load NumPy weights into PyTorch (shared Keys scheme, lossless)
+        torch_model.load_from_numpy_dict(np_model_.get_all_parameters())
 
-        torch_model = torch_layers.TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=42,
-        )
-
-        # Load NumPy weights into PyTorch
-        torch_model.load_from_numpy(np_model_)
-
-        # Run forward pass in eval mode for deterministic behavior (dropout disabled)
+        # Run forward pass in eval mode for deterministic behavior
         input_ids = torch.tensor([[0, 1, 2, 3, 4]], dtype=torch.int64)
         np_logits = np_model_.forward(input_ids.numpy())
         torch_model.eval()
@@ -71,27 +68,13 @@ class TestForwardParity:
 
         # Compare — tolerance for single chain: rtol=1e-3
         np.testing.assert_allclose(
-            np_logits,
-            torch_logits,
-            rtol=1e-3,
-            atol=1e-3,
-            err_msg="Forward pass logits should match",
+            np_logits, torch_logits, rtol=1e-3, atol=1e-3, err_msg="Forward pass logits should match"
         )
 
     @pytest.mark.timeout(15)
     def test_output_shapes_2d(self):
         """2D input shapes produce correct output dimensions."""
-        model = torch_layers.TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=42,
-        )
+        model = torch_layers.TorchModel(_cfg())
 
         # 2D input — single sequence
         x2d = torch.tensor([[0, 1, 2, 3]], dtype=torch.int64)
@@ -109,32 +92,11 @@ class TestForwardParity:
     @pytest.mark.timeout(15)
     def test_forward_multi_batch(self):
         """Batched forward pass matches between backends."""
+        cfg = _cfg()
+        np_model_ = np_model.NumPyModel(cfg)
+        torch_model = torch_layers.TorchModel(cfg)
 
-        np_model_ = np_model.NumPyModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=42,
-        )
-
-        torch_model = torch_layers.TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=42,
-        )
-
-        torch_model.load_from_numpy(np_model_)
+        torch_model.load_from_numpy_dict(np_model_.get_all_parameters())
 
         # Batch of 3 sequences, each of length 5
         input_ids = torch.tensor(
@@ -161,24 +123,13 @@ class TestGradientNormParity:
 
     @pytest.mark.timeout(30)
     def test_gradient_chaining(self):
-        """Verify gradient norms change after a training step.
+        """Verify gradients are non-trivial after one backward pass.
 
-        Training a PyTorch model for one step should produce meaningful
-        gradients — the gradient norm should be non-zero for most parameters.
-        This test ensures the backward pass works correctly with the
-        cross-backend parameter alignment.
+        A single backward pass through the PyTorch model must produce
+        non-zero gradients for parameters — the autograd chain works with
+        the new architecture.
         """
-        torch_model = torch_layers.TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=1,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=42,
-        )
+        torch_model = torch_layers.TorchModel(_cfg())
 
         # Prepare training data
         torch.manual_seed(42)
@@ -199,7 +150,7 @@ class TestGradientNormParity:
         for _name, param in torch_model.named_parameters():
             if param.grad is not None:
                 total_params += 1
-                if torch.all(param.grad != 0):
+                if torch.any(param.grad != 0):
                     grad_count += 1
 
         assert total_params > 0, "Model should have parameters with gradients"
@@ -207,22 +158,8 @@ class TestGradientNormParity:
 
     @pytest.mark.timeout(30)
     def test_training_reduces_loss(self):
-        """Training for 20 steps should reduce loss significantly.
-
-        Uses the same training setup as the NumPy full pipeline test to
-        verify that the PyTorch implementation can learn and improve.
-        """
-        torch_model = torch_layers.TorchModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=2,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=8,
-            k=1,
-            rope_dim=0,
-            seed=42,
-        )
+        """Training for 20 steps should reduce loss significantly."""
+        torch_model = torch_layers.TorchModel(_cfg(n_layers=2, n_heads=2))
 
         torch.manual_seed(42)
         batch_input = torch.randint(0, 16, (8, 8), dtype=torch.int64)

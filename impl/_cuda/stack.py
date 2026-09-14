@@ -20,6 +20,7 @@ from __future__ import annotations
 import torch
 
 from impl._cuda.block import CuTransformerBlock
+from shared.config import TransformerConfig
 
 
 class CuDecoderStack:
@@ -67,39 +68,15 @@ class CuDecoderStack:
 
     """
 
-    def __init__(
-        self,
-        n_layers: int,
-        embed_dim: int,
-        n_heads: int,
-        n_experts: int,
-        ff_dim: int,
-        k: int = 2,
-        rope_dim: int = 0,
-    ) -> None:
-        self.n_layers = n_layers
-        self.embed_dim = embed_dim
-        self.n_heads = n_heads
-        self.n_experts = n_experts
-        self.ff_dim = ff_dim
-        self.k = k
-        self.rope_dim = rope_dim
-        self.head_dim = embed_dim // n_heads
+    def __init__(self, config: TransformerConfig) -> None:
+        self.config = config
+        self.n_layers = config.n_layers
+        self.embed_dim = config.embed_dim
+        self.head_dim = config.head_dim
 
-        # Create transformer blocks in sequence
-        # Each block uses the same architecture (no per-layer parameter separation)
-        self.blocks = [
-            CuTransformerBlock(
-                embed_dim=embed_dim,
-                n_heads=n_heads,
-                n_experts=n_experts,
-                ff_dim=ff_dim,
-                k=k,
-                rope_dim=rope_dim,
-                seed=100 + layer_idx,  # Same offset scheme as NumPy/PyTorch
-            )
-            for layer_idx in range(n_layers)
-        ]
+        # Create transformer blocks in sequence (distinct seed per layer,
+        # matching the NumPy/PyTorch offset scheme)
+        self.blocks = [CuTransformerBlock(config, seed=100 + layer_idx) for layer_idx in range(config.n_layers)]
 
     def forward(
         self,

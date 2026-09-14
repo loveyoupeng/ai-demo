@@ -5,6 +5,8 @@ TDD: Write test → all fail → implement → all pass → ruff + pyright → c
 
 import torch
 
+from shared.config import TransformerConfig
+
 
 class TestTransformerBlockForward:
     """Test the TransformerBlock nn.Module forward pass."""
@@ -20,13 +22,16 @@ class TestTransformerBlockForward:
         k = 2
 
         block = TransformerBlock(
-            embed_dim=embed_dim,
-            n_heads=n_heads,
-            n_experts=n_experts,
-            ff_dim=ff_dim,
-            k=k,
-            rope_dim=0,
-        )
+            TransformerConfig(
+                embed_dim=embed_dim,
+                n_heads=n_heads,
+                n_groups=n_heads,
+                n_experts=n_experts,
+                expert_dim=ff_dim,
+                top_k=k,
+                rope_dim=0,
+            ),
+        ).double()
 
         x = torch.randn(2, 8, embed_dim, dtype=torch.float64)
         output = block(x)
@@ -50,13 +55,16 @@ class TestTransformerBlockForward:
         k = 2
 
         block = TransformerBlock(
-            embed_dim=embed_dim,
-            n_heads=n_heads,
-            n_experts=n_experts,
-            ff_dim=ff_dim,
-            k=k,
-            rope_dim=0,
-        )
+            TransformerConfig(
+                embed_dim=embed_dim,
+                n_heads=n_heads,
+                n_groups=n_heads,
+                n_experts=n_experts,
+                expert_dim=ff_dim,
+                top_k=k,
+                rope_dim=0,
+            ),
+        ).double()
 
         x = torch.randn(1, 4, embed_dim, dtype=torch.float64)
         output = block(x)
@@ -84,43 +92,36 @@ class TestTransformerBlockForward:
         k = 2
 
         block = TransformerBlock(
-            embed_dim=embed_dim,
-            n_heads=n_heads,
-            n_experts=n_experts,
-            ff_dim=ff_dim,
-            k=k,
-            rope_dim=0,
-        )
+            TransformerConfig(
+                embed_dim=embed_dim,
+                n_heads=n_heads,
+                n_groups=n_heads,
+                n_experts=n_experts,
+                expert_dim=ff_dim,
+                top_k=k,
+                rope_dim=0,
+            ),
+        ).double()
 
         x = torch.randn(1, 2, embed_dim, dtype=torch.float64)
         output = block(x)
         loss = output.sum()
         loss.backward()
 
-        # MHA: all weights should have non-zero gradients.
-        # Note: Wk.bias gradient is exactly zero for self-attention with
-        # softmax due to the mathematical cancellation of the bias term
-        # in the attention score computation (known property of
-        # self-attention — the K-bias gradient is zero because softmax
-        # attention weights sum to 1 for each query position, making all
-        # parallel shifts in K cancel out).
-        for name, param in block.mha.named_parameters():
+        # Attention: all projection weights should have non-zero gradients.
+        for name, param in block.self_attn.named_parameters():
             assert param.grad is not None, f"{name} has no gradient"
             grad_norm = param.grad.norm().item()
-            # Wk.bias is zero by mathematical property of softmax attention
-            if name == "Wk.bias":
-                continue
             assert grad_norm > 1e-9, f"{name} gradient norm {grad_norm} too small"
 
-        # MoE: router always gets gradients (softmax over all experts)
+        # FFN/MoE: router (MoE) or dense weights all get gradients
         moe_grad_norms = []
-        for name, param in block.moe.named_parameters():
+        for name, param in block.mlp.named_parameters():
             assert param.grad is not None, f"{name} has no gradient"
             moe_grad_norms.append(param.grad.norm().item())
 
-        # At least one expert should have non-zero gradients
-        # (the top-k selected experts fire; router always fires on all)
-        assert any(n > 1e-9 for n in moe_grad_norms), "At least one MoE param must have gradient"
+        # At least one param should have non-zero gradients
+        assert any(n > 1e-9 for n in moe_grad_norms), "At least one FFN/MoE param must have gradient"
 
     def test_deterministic(self) -> None:
         """TransformerBlock forward with same input → same output in eval mode."""
@@ -133,13 +134,16 @@ class TestTransformerBlockForward:
         k = 2
 
         block = TransformerBlock(
-            embed_dim=embed_dim,
-            n_heads=n_heads,
-            n_experts=n_experts,
-            ff_dim=ff_dim,
-            k=k,
-            rope_dim=0,
-        )
+            TransformerConfig(
+                embed_dim=embed_dim,
+                n_heads=n_heads,
+                n_groups=n_heads,
+                n_experts=n_experts,
+                expert_dim=ff_dim,
+                top_k=k,
+                rope_dim=0,
+            ),
+        ).double()
 
         x = torch.randn(1, 4, embed_dim, dtype=torch.float64)
 

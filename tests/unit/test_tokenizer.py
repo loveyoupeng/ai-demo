@@ -42,10 +42,10 @@ class TestDecodeTokens:
     """Test token IDs → text conversion."""
 
     def test_decode_returns_string(self):
-        from shared.tokenizer import create_tokenizer, decode_tokens
+        from shared.tokenizer import create_tokenizer, decode_tokens, encode_text
 
         tok = create_tokenizer()
-        tokens = tok.encode("hello world")
+        tokens = encode_text(tok, "hello world")
         result = decode_tokens(tok, tokens)
         assert isinstance(result, str)
         assert len(result) > 0
@@ -67,10 +67,10 @@ class TestDecodeTokens:
         """decode_tokens should accept numpy arrays."""
         import numpy as np
 
-        from shared.tokenizer import create_tokenizer, decode_tokens
+        from shared.tokenizer import create_tokenizer, decode_tokens, encode_text
 
         tok = create_tokenizer()
-        tokens = np.array(tok.encode("test"), dtype=np.int64)
+        tokens = np.array(encode_text(tok, "test"), dtype=np.int64)
         decoded = decode_tokens(tok, tokens)
         assert isinstance(decoded, str)
 

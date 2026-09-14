@@ -120,139 +120,41 @@ def load_model_from_checkpoint(model_path: str, backend: str):
     if backend == "numpy":
         from impl._np.model import NumPyModel
 
-        model = NumPyModel(
-            vocab_size=cfg.vocab_size,
-            embed_dim=cfg.embed_dim,
-            n_layers=cfg.n_layers,
-            n_heads=cfg.n_heads,
-            n_experts=cfg.n_experts,
-            ff_dim=cfg.expert_dim or (cfg.embed_dim * 4),
-            k=cfg.top_k,
-            rope_dim=cfg.rope_dim,
-            seed=cfg.seed,
-        )
-        loaded = model.get_all_parameters()
-        for key, value in loaded.items():
-            if key in params:
-                value[:] = params[key]
-            else:
-                normalized = key.replace("blocks.", "layers.")
-                if normalized in params:
-                    value[:] = params[normalized]
-        config_dict = {
-            "vocab_size": cfg.vocab_size,
-            "context_length": cfg.context_length,
-            "embed_dim": cfg.embed_dim,
-        }
-        return model, config_dict
-
-    import torch
+        model = NumPyModel(cfg)
+        model.load_from_numpy_dict(params)
+        return model, _config_dict(cfg)
 
     if backend == "torch":
         from impl._torch.layers import TorchModel
 
-        model = TorchModel(
-            vocab_size=cfg.vocab_size,
-            embed_dim=cfg.embed_dim,
-            n_layers=cfg.n_layers,
-            n_heads=cfg.n_heads,
-            n_experts=cfg.n_experts,
-            ff_dim=cfg.expert_dim or (cfg.embed_dim * 4),
-            k=cfg.top_k,
-            rope_dim=cfg.rope_dim,
-            seed=cfg.seed,
-        )
-        params_torch = {k: torch.tensor(v) for k, v in params.items()}
-        model.load_state_dict(params_torch)
-        config_dict = {
-            "vocab_size": cfg.vocab_size,
-            "context_length": cfg.context_length,
-            "embed_dim": cfg.embed_dim,
-        }
-        return model, config_dict
+        model = TorchModel(cfg)
+        model.load_from_numpy_dict(params)
+        return model, _config_dict(cfg)
 
     if backend == "triton":
         from impl._triton.model import TritonModel
 
-        model = TritonModel(
-            vocab_size=cfg.vocab_size,
-            embed_dim=cfg.embed_dim,
-            n_layers=cfg.n_layers,
-            n_heads=cfg.n_heads,
-            n_experts=cfg.n_experts,
-            ff_dim=cfg.expert_dim or (cfg.embed_dim * 2),
-            k=cfg.top_k,
-        )
+        model = TritonModel(cfg)
         model.load_from_numpy_dict(params)
-        config_dict = {
-            "vocab_size": cfg.vocab_size,
-            "context_length": cfg.context_length,
-            "embed_dim": cfg.embed_dim,
-        }
-        return model, config_dict
+        return model, _config_dict(cfg)
 
     if backend == "cuda":
         from impl._cuda.model import CUDAModel
 
-        D = cfg.embed_dim
-        V = cfg.vocab_size
-        model = CUDAModel(
-            vocab_size=V,
-            embed_dim=D,
-            n_layers=cfg.n_layers,
-            n_heads=cfg.n_heads,
-            n_experts=cfg.n_experts,
-            ff_dim=D * 2,
-            k=cfg.top_k,
-            rope_dim=D // cfg.n_heads if cfg.n_heads > 0 else 0,
-            seed=42,
-        )
-
-        def _load_tensor(module, src_dict, key):
-            attr = getattr(module, key, None)
-            if attr is not None and key in src_dict:
-                tensor = torch.from_numpy(src_dict[key]).to(attr.device)
-                attr.data.copy_(tensor)
-            elif key in src_dict:
-                setattr(module, key, torch.from_numpy(src_dict[key]).float())
-
-        # Load model-level params
-        for key in [
-            "embedding_weights",
-            "final_ln_gamma",
-            "output_proj_weights",
-            "output_proj_bias",
-            "output_W1",
-            "output_W2",
-            "output_W3",
-        ]:
-            _load_tensor(model, params, key)
-
-        # Load block-level params
-        for i, block in enumerate(model.stacking.blocks):
-            for attr_name in [
-                "Wq",
-                "Wk",
-                "Wv",
-                "Wo",
-                "gate1",
-                "gate2",
-                "expert_weights",
-                "expert_bias",
-                "routing_weights",
-                "ln1_gamma",
-                "ln2_gamma",
-            ]:
-                _load_tensor(block, params, f"blocks.{i}.{attr_name}")
-
-        config_dict = {
-            "vocab_size": cfg.vocab_size,
-            "context_length": cfg.context_length,
-            "embed_dim": cfg.embed_dim,
-        }
-        return model, config_dict
+        model = CUDAModel(cfg)
+        model.load_from_numpy_dict(params)
+        return model, _config_dict(cfg)
 
     raise ValueError(f"Unsupported backend: {backend}. Must be numpy, torch, triton, or cuda.")
+
+
+def _config_dict(cfg) -> dict:
+    """Build the small config dict used for logging and reporting."""
+    return {
+        "vocab_size": cfg.vocab_size,
+        "context_length": cfg.context_length,
+        "embed_dim": cfg.embed_dim,
+    }
 
 
 def encode_prompt(text: str, vocab_size: int = 256) -> list[int]:
@@ -389,7 +291,11 @@ def main() -> int:
         # Load model and config
         logger.info("run_inference() loading_model path=%s backend=%s", model_path, backend)
         model, config = load_model_from_checkpoint(model_path, backend)
-        logger.info("run_inference() model_loaded vocab=%d context=%d", config.get("vocab_size", 256), config.get("context_length", 128))
+        logger.info(
+            "run_inference() model_loaded vocab=%d context=%d",
+            config.get("vocab_size", 256),
+            config.get("context_length", 128),
+        )
 
         # Decode strategy from args
         temp = args.temperature if not args.greedy else 0.0
@@ -400,12 +306,24 @@ def main() -> int:
         print(f"Vocab: {config.get('vocab_size', 256)}")
         print(f"Context: {config.get('context_length', 128)}")
         print(f"Embed: {config.get('embed_dim', 256)}, Layers: {config.get('n_layers', 4)}")
-        logger.info("run_inference() config backend=%s vocab=%d context=%d layers=%d", backend, config.get("vocab_size", 256), config.get("context_length", 128), config.get("n_layers", 4))
+        logger.info(
+            "run_inference() config backend=%s vocab=%d context=%d layers=%d",
+            backend,
+            config.get("vocab_size", 256),
+            config.get("context_length", 128),
+            config.get("n_layers", 4),
+        )
         print()
 
         if args.prompt:
             # Single prompt mode
-            logger.info("run_inference() single_prompt mode prompt=%r max_tokens=%d temp=%.2f top_k=%d", args.prompt, args.max_new_tokens, args.temperature if not args.greedy else 0.0, args.top_k)
+            logger.info(
+                "run_inference() single_prompt mode prompt=%r max_tokens=%d temp=%.2f top_k=%d",
+                args.prompt,
+                args.max_new_tokens,
+                args.temperature if not args.greedy else 0.0,
+                args.top_k,
+            )
             result = generate_single(model, config, args.prompt, args.max_new_tokens, temp, top_k_val, backend)
             logger.info(
                 "run_inference() generation_complete prompt_len=%d gen_len=%d",

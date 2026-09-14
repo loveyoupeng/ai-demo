@@ -106,7 +106,7 @@ def set_level(logger_name: str, level: str) -> None:
     Parameters
     ----------
     logger_name : str
-        Dotted logger name, e.g. ``impl._np.modules``.
+        Dotted logger name, e.g. ``impl._np.model``.
     level : str
         New logging level as a string.
 

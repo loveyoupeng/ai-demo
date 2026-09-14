@@ -53,7 +53,7 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-from cuda import cuda as _cuda_lib
+from cuda.bindings import driver as _cuda_lib  # pyright: ignore[reportAttributeAccessIssue]
 
 from impl._cuda.compiler import compile_and_load, get_kernel_handle
 
@@ -338,6 +338,7 @@ class _CUDASDPACudaFunction(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        is_causal: bool,
     ) -> torch.Tensor:
         """Forward pass: compute attention(Q, K, V).
 
@@ -368,6 +369,11 @@ class _CUDASDPACudaFunction(torch.autograd.Function):
         # scores: (B, H, Sq, Sk)
         head_dim_sqrt = 1.0 / (D**0.5)
         scores = (q @ k.transpose(-2, -1)) * head_dim_sqrt  # (B, H, Sq, Sk)
+
+        # Causal mask: position i attends only to positions j <= i (decoder-only).
+        if is_causal:
+            causal = torch.triu(torch.ones(Sq, Sk, device=q.device, dtype=torch.bool), diagonal=1)
+            scores = torch.where(causal, torch.tensor(float("-inf"), device=q.device, dtype=scores.dtype), scores)
 
         # Step 2: Stable softmax per row using CUDA kernel
         # Flatten to (total_queries, num_keys) for kernel
@@ -424,6 +430,7 @@ class _CUDASDPACudaFunction(torch.autograd.Function):
 
         # Save for backward
         ctx.save_for_backward(q, k, v, scores)
+        ctx.is_causal = is_causal
 
         return output
 
@@ -431,7 +438,7 @@ class _CUDASDPACudaFunction(torch.autograd.Function):
     def backward(
         ctx: Any,
         *grad_outputs: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
         """Backward pass: use PyTorch's F.scaled_dot_product_attention.
 
         Parameters
@@ -462,12 +469,10 @@ class _CUDASDPACudaFunction(torch.autograd.Function):
         import torch.nn.functional as F
 
         with torch.enable_grad():
-            out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
-            grad_q, grad_k, grad_v = torch.autograd.grad(
-                out, (q, k, v), grad_output, retain_graph=False
-            )
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=ctx.is_causal)
+            grad_q, grad_k, grad_v = torch.autograd.grad(out, (q, k, v), grad_output, retain_graph=False)
 
-        return grad_q, grad_k, grad_v
+        return grad_q, grad_k, grad_v, None
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +484,7 @@ def scaled_dot_product_attention(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    is_causal: bool = False,
 ) -> torch.Tensor:
     """Compute scaled dot-product attention via CUDA kernel.
 
@@ -541,4 +547,4 @@ def scaled_dot_product_attention(
     Vaswani et al. "Attention Is All You Need" (2017)
     https://arxiv.org/abs/1706.03762
     """
-    return _CUDASDPACudaFunction.apply(q, k, v)
+    return _CUDASDPACudaFunction.apply(q, k, v, is_causal)

@@ -36,13 +36,9 @@ class TestScaledAttention:
         v = torch.randn(B, H, S, D, dtype=torch.float32, device="cuda")
 
         out_cuda = scaled_dot_product_attention(q, k, v)
-        out_torch = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, is_causal=False
-        )
+        out_torch = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=False)
 
-        torch.testing.assert_close(
-            out_cuda, out_torch, rtol=1e-4, atol=1e-4, msg="CUDA SDPA != torch SDPA (f32)"
-        )
+        torch.testing.assert_close(out_cuda, out_torch, rtol=1e-4, atol=1e-4, msg="CUDA SDPA != torch SDPA (f32)")
 
     @pytest.mark.timeout(30)
     def test_attention_matches_torch_float64(self):
@@ -57,13 +53,9 @@ class TestScaledAttention:
         v = torch.randn(B, H, S, D, dtype=torch.float64, device="cuda")
 
         out_cuda = scaled_dot_product_attention(q, k, v)
-        out_torch = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, is_causal=False
-        )
+        out_torch = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=False)
 
-        torch.testing.assert_close(
-            out_cuda, out_torch, rtol=1e-4, atol=1e-4, msg="CUDA SDPA != torch SDPA (f64)"
-        )
+        torch.testing.assert_close(out_cuda, out_torch, rtol=1e-4, atol=1e-4, msg="CUDA SDPA != torch SDPA (f64)")
 
     @pytest.mark.timeout(30)
     def test_attention_shapes(self):
@@ -73,8 +65,8 @@ class TestScaledAttention:
 
         torch.manual_seed(42)
         config = [
-            (1, 1, 4, 8),    # minimal
-            (2, 4, 8, 16),   # medium
+            (1, 1, 4, 8),  # minimal
+            (2, 4, 8, 16),  # medium
             (2, 8, 16, 64),  # larger
         ]
 
@@ -102,9 +94,7 @@ class TestScaledAttention:
         out = scaled_dot_product_attention(q, k, v)
         # With V=1, attention output should be average of rows (which all equal 1)
         expected = torch.ones_like(out)
-        torch.testing.assert_close(
-            out, expected, rtol=1e-4, atol=1e-4, msg="Attention output ≠ 1 when V=1"
-        )
+        torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4, msg="Attention output ≠ 1 when V=1")
 
 
 class TestMoERoute:
@@ -123,16 +113,13 @@ class TestMoERoute:
         expert_bias = torch.zeros(N, D, dtype=torch.float32, device="cuda")
         routing_weights = torch.randn(N, D, dtype=torch.float32, device="cuda")
 
-        out_cuda, indices, weights = moe_forward(
-            tokens, expert_weights, expert_bias, routing_weights, top_k=K
-        )
+        out_cuda, indices, weights = moe_forward(tokens, expert_weights, expert_bias, routing_weights, top_k=K)
 
         # Reference: compute expert outputs, routing scores, top-k
         # expert_outputs[b, s, n, d] = tokens[b, s] @ expert_weights[n] + bias[n][d]
-        expert_outputs = torch.stack([
-            torch.nn.functional.linear(tokens, expert_weights[n])
-            for n in range(N)
-        ], dim=2)  # (B, S, N, D)
+        expert_outputs = torch.stack(
+            [torch.nn.functional.linear(tokens, expert_weights[n]) for n in range(N)], dim=2
+        )  # (B, S, N, D)
 
         # Routing: scores[b,s,n] = tokens[b,s] ⋅ routing_weights[n]
         # F.linear(tokens, routing_weights) where routing_weights is (N, D)
@@ -150,10 +137,7 @@ class TestMoERoute:
                     out_ref[b, s] += topk_weights[b, s, k_val] * expert_outputs[b, s, idx]
 
         assert out_cuda.shape == (B, S, D)
-        torch.testing.assert_close(
-            out_cuda, out_ref, rtol=1e-3, atol=1e-3,
-            msg="CUDA MoE != torch MoE (f32)"
-        )
+        torch.testing.assert_close(out_cuda, out_ref, rtol=1e-3, atol=1e-3, msg="CUDA MoE != torch MoE (f32)")
 
     @pytest.mark.timeout(30)
     def test_topk_matches_torch_float64(self):
@@ -168,15 +152,12 @@ class TestMoERoute:
         expert_bias = torch.zeros(N, D, dtype=torch.float64, device="cuda")
         routing_weights = torch.randn(N, D, dtype=torch.float64, device="cuda")
 
-        out_cuda, indices, _w = moe_forward(
-            tokens, expert_weights, expert_bias, routing_weights, top_k=K
-        )
+        out_cuda, indices, _w = moe_forward(tokens, expert_weights, expert_bias, routing_weights, top_k=K)
 
         # Reference
-        expert_outputs = torch.stack([
-            torch.nn.functional.linear(tokens, expert_weights[n])
-            for n in range(N)
-        ], dim=2)  # (B, S, N, D)
+        expert_outputs = torch.stack(
+            [torch.nn.functional.linear(tokens, expert_weights[n]) for n in range(N)], dim=2
+        )  # (B, S, N, D)
         scores = torch.nn.functional.linear(tokens, routing_weights)  # (B, S, N)
 
         topk_scores, topk_idx = torch.topk(scores, K, dim=-1)
@@ -189,7 +170,4 @@ class TestMoERoute:
                     idx = int(topk_idx[b, s, k_val])
                     out_ref[b, s] += topk_weights[b, s, k_val] * expert_outputs[b, s, idx]
 
-        torch.testing.assert_close(
-            out_cuda, out_ref, rtol=1e-3, atol=1e-3,
-            msg="CUDA MoE != torch MoE (f64)"
-        )
+        torch.testing.assert_close(out_cuda, out_ref, rtol=1e-3, atol=1e-3, msg="CUDA MoE != torch MoE (f64)")

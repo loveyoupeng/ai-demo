@@ -150,6 +150,8 @@ https://arxiv.org/abs/2205.14135
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 import torch.nn.functional as F
 import triton
@@ -164,7 +166,8 @@ def scaled_dot_product_attention(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-) -> torch.Tensor:
+    is_causal: bool = False,
+):
     """Compute scaled dot-product attention using Triton GPU kernel.
 
     Implements: attention(Q, K, V) = softmax(QK^T / sqrt(d)) @ V
@@ -189,6 +192,9 @@ def scaled_dot_product_attention(
         Key tensor.  Sk=key_len.
     v : torch.Tensor, shape (B, H, Sk, D)
         Value tensor.  Sk must match k.shape[-2]. D must match q.shape[-1].
+    is_causal : bool, default False
+        When True, apply the causal (lower-triangular) mask: query position i
+        attends only to key positions j <= i (decoder-only / autoregressive).
 
     Returns
     -------
@@ -224,7 +230,7 @@ def scaled_dot_product_attention(
     -----
     - Tensor dtype must be float16, bfloat16, or float32
     - All tensors must be on the same CUDA device
-    - No causal mask is applied — use a pre-masked K if needed
+    - is_causal=True applies the causal mask (position i → keys j <= i)
 
     """
     assert q.device.type == "cuda"
@@ -234,37 +240,31 @@ def scaled_dot_product_attention(
     _, _, Sk, _ = k.shape
     assert v.shape[-1] == D
 
-    return _ScaledDotProductAttentionTF.apply(q, k, v)
+    return _ScaledDotProductAttentionTF.apply(q, k, v, is_causal)
 
 
 class _ScaledDotProductAttentionTF(torch.autograd.Function):
     """Autograd wrapper for Triton SDPA attention kernel.
 
-    Forward pass: Triton JIT kernel (GPU-optimized attention computation).
-    Backward pass: PyTorch F.scaled_dot_product_attention (reuse well-tested).
+    Forward pass: Triton JIT kernel (GPU-optimized attention computation) with
+    ``input_precision="ieee"`` so fp32 results match the framework reference
+    (the Triton default is tf32, which drifts by ~1e-3).
 
-    Why compute backward inside forward?
-    ------------------------------------
-    We compute gradients DURING forward to avoid double computation:
-    1. Forward Triton kernel: attention output (no grad) — ~100ms
-    2. Backward PyTorch kernel: gradients at same time — ~100ms
-    Total: computed once instead of twice.
-
-    This is different from the typical PyTorch pattern where backward
-    is computed lazily during .backward(). Here we eagerly compute
-    gradients during forward to save a full kernel launch.
+    Backward pass: recompute attention through PyTorch's well-tested
+    ``F.scaled_dot_product_attention`` and let autograd differentiate it with
+    the *actual* incoming gradient. (The attention gradients are linear in
+    ``grad_output`` — e.g. ``dk = softmax(QK^T/sqrt(D))^T @ grad_output`` —
+    so precomputing them for a constant upstream gradient and scaling
+    elementwise is mathematically wrong.)
 
     Saved tensors (backwards)
     -------------------------
-    ctx.save_for_backward(dq, dk, dv) — gradients w.r.t. Q, K, V
-    In .backward(), we multiply these with incoming gradient:
-      grad_q = grad_output * dq
-      grad_k = grad_output * dk
-      grad_v = grad_output * dv
+    ctx.save_for_backward(q, k, v) — the attention inputs; backward
+    recomputes the forward through F.scaled_dot_product_attention and
+    differentiates it with ``grad_outputs=grad_output``.
     """
 
-    @staticmethod
-    def forward(ctx: torch.Any, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    def forward(ctx: Any, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, is_causal: bool = False) -> torch.Tensor:
         """Forward pass: compute attention via Triton kernel + PyTorch backward.
 
         Parameters
@@ -296,11 +296,11 @@ class _ScaledDotProductAttentionTF(torch.autograd.Function):
 
         # ── Dimension padding ───────────────────────────────────
         # Pad to power-of-2 for Triton tl.dot (cuBLAS alignment)
-        D_pad = max(_MIN_KERNEL_DIM, triton.next_power_of_2(D))
+        D_pad = int(max(_MIN_KERNEL_DIM, triton.next_power_of_2(D)))
         # Sk_pad is NOT power-of-2 (only D needs to be)
-        Sk_pad = max(Sk, _MIN_KERNEL_DIM)
+        Sk_pad = int(max(Sk, _MIN_KERNEL_DIM))
         if Sk_pad != triton.next_power_of_2(Sk_pad):
-            Sk_pad = triton.next_power_of_2(Sk_pad)
+            Sk_pad = int(triton.next_power_of_2(Sk_pad))
 
         # Zero-pad K and V to (B, H, Sk_pad, D_pad)
         k_pad = torch.zeros((B, H, Sk_pad, D_pad), device=q.device, dtype=q.dtype)
@@ -342,59 +342,57 @@ class _ScaledDotProductAttentionTF(torch.autograd.Function):
             Sq,
             D,
             Sk,  # Runtime parameters (not constexpr)
-            D_pad=D_pad,
-            Sk_pad=Sk_pad,
+            1 if is_causal else 0,  # Causal mask flag (position i → keys j <= i)
+            D_pad=D_pad,  # pyright: ignore[reportArgumentType]
+            Sk_pad=Sk_pad,  # pyright: ignore[reportArgumentType]
             scale=D**-0.5,
-            BLOCK_M=BLOCK_M,
+            BLOCK_M=BLOCK_M,  # pyright: ignore[reportArgumentType]
         )
 
         # Crop output: only first D columns are valid
         out = out[:, :, :, :D].to(q.dtype)
 
-        # ── Backward gradient computation ───────────────────────
-        # Compute gradients during forward to avoid double computation.
-        # The Triton kernel has no gradient tracking, so we need F.scaled_dot_product_attention
-        # with torch.enable_grad() to get gradients. This runs a CUDA kernel.
-        with torch.enable_grad():
-            q2 = q.detach().requires_grad_(True)
-            k2 = k.detach().requires_grad_(True)
-            v2 = v.detach().requires_grad_(True)
-            out2 = F.scaled_dot_product_attention(q2, k2, v2)
-            dq, dk, dv = torch.autograd.grad(
-                out2,
-                (q2, k2, v2),
-                grad_outputs=torch.ones_like(out2),
-                retain_graph=True,
-                create_graph=False,
-            )
-        ctx.save_for_backward(dq, dk, dv)
+        # Save the attention inputs for the backward pass (recomputed through
+        ctx.save_for_backward(q, k, v)
+        ctx.is_causal = is_causal
         return out
 
     @staticmethod
-    def backward(
+    def backward(  # pyright: ignore[reportIncompatibleMethodOverride]
         ctx,
         grad_out: torch.Tensor,  # type: ignore[override]
-    ) -> tuple:
-        """Compute gradient for SDPA forward.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
+        """Compute gradients w.r.t. (q, k, v) via the framework SDPA.
 
-        The gradients (dq, dk, dv) were already computed during forward.
-        We just multiply by the incoming gradient from the chain rule.
+        Attention gradients are linear in the incoming gradient:
+          dq = softmax(S) @ (grad_out V^T)  /sqrt(D)  (per-head)
+          dk = softmax(S)^T @ grad_out @ Q  /sqrt(D)
+          dv = softmax(S)^T @ grad_out
+        Rather than re-deriving them here, we recompute the forward through
+        PyTorch's fused (and exactly correct) SDPA and let autograd do the
+        chain rule with the real ``grad_out``.
 
         Parameters
         ----------
         ctx : context
-            Saved tensors: (dq, dk, dv).
+            Saved tensors: (q, k, v).
         grad_out : torch.Tensor
-            Gradient w.r.t. forward output (from later layer).
+            Gradient w.r.t. the forward output (from the chain rule).
 
         Returns
         -------
-        grad_q : torch.Tensor, grad_k : torch.Tensor, grad_v : torch.Tensor
+        grad_q, grad_k, grad_v : torch.Tensor
             Gradients w.r.t. Q, K, V respectively.
 
         """
-        dq, dk, dv = ctx.saved_tensors
-        return grad_out * dq, grad_out * dk, grad_out * dv
+        q, k, v = ctx.saved_tensors
+        with torch.enable_grad():
+            q2 = q.detach().requires_grad_(True)
+            k2 = k.detach().requires_grad_(True)
+            v2 = v.detach().requires_grad_(True)
+            out2 = F.scaled_dot_product_attention(q2, k2, v2, is_causal=ctx.is_causal)
+        grad_q, grad_k, grad_v = torch.autograd.grad(out2, (q2, k2, v2), grad_outputs=grad_out)
+        return grad_q, grad_k, grad_v, None
 
 
 @triton.jit
@@ -423,6 +421,7 @@ def _attn_fwd_kernel(
     Sq,
     D,
     Sk,
+    IS_CAUSAL,
     D_pad: tl.constexpr,
     Sk_pad: tl.constexpr,
     scale,
@@ -576,7 +575,7 @@ def _attn_fwd_kernel(
     # [BLOCK_M, D_pad] @ [D_pad, Sk_pad] = [BLOCK_M, Sk_pad]
     # tl.dot() is a GPU-compute-intensive operation: it uses shared memory
     # to efficiently load and compute with tile matrix multiplication.
-    scores = tl.dot(q_block, k_block.T) * scale  # [BLOCK_M, Sk_pad]
+    scores = tl.dot(q_block, k_block.T, input_precision="ieee") * scale  # [BLOCK_M, Sk_pad]
 
     # ---- Mask padded key positions with -inf ----
     # After softmax, -inf becomes 0 attention weight, effectively ignoring
@@ -584,19 +583,25 @@ def _attn_fwd_kernel(
     key_col = tl.arange(0, Sk_pad)[None, :]  # [1, Sk_pad]
     scores = tl.where(key_col < Sk, scores, float("-inf"))  # [BLOCK_M, Sk_pad]
 
+    # ---- Causal mask: query row i attends only to keys j <= i ----
+    # (Decoder-only / autoregressive attention.)
+    if IS_CAUSAL:
+        q_idx = (row_start + tl.arange(0, BLOCK_M))[:, None]  # [BLOCK_M, 1]
+        k_idx = tl.arange(0, Sk_pad)[None, :]  # [1, Sk_pad]
+        scores = tl.where(k_idx <= q_idx, scores, float("-inf"))  # [BLOCK_M, Sk_pad]
+
     # ---- Softmax per row ----
     # Stable softmax: softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))
     # Subtracting max per row prevents overflow in exp() for large values.
     scores_max = scores.max(axis=1, keep_dims=True)  # [BLOCK_M, 1]
     exp_scores = (scores - scores_max).exp()  # [BLOCK_M, Sk_pad]
     scores_sum = exp_scores.sum(axis=1, keep_dims=True)  # [BLOCK_M, 1]
-    # Guard against division by zero (all positions masked → sum = 0)
     scores_sum = tl.where(scores_sum > 0, scores_sum, 1.0)  # numerical guard
     attn_weights = exp_scores / scores_sum  # [BLOCK_M, Sk_pad]
 
     # ---- Weighted sum: attn_weights @ V ----
     # [BLOCK_M, Sk_pad] @ [Sk_pad, D_pad] = [BLOCK_M, D_pad]
-    output = tl.dot(attn_weights, v_block)  # [BLOCK_M, D_pad]
+    output = tl.dot(attn_weights, v_block, input_precision="ieee")  # [BLOCK_M, D_pad]
 
     # ---- Store output: [BLOCK_M, D_pad] → [Sq, D] ----
     col_idx = tl.arange(0, D_pad)[None, :]  # [1, D_pad]

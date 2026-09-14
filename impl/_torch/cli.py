@@ -8,6 +8,7 @@ import torch
 
 from impl._torch.inference import TorchTextGenerator
 from impl._torch.layers import TorchModel
+from shared.config import TransformerConfig
 
 
 def _get_device() -> torch.device:
@@ -65,15 +66,13 @@ def main() -> None:
     print(f"Device: {device_label} ({'CUDA' if device.type == 'cuda' else 'CPU'})")
 
     model = TorchModel(
-        vocab_size=256,
-        embed_dim=args.embed_dim,
-        n_layers=args.n_layers,
-        n_heads=args.n_heads,
-        n_experts=2,
-        ff_dim=args.embed_dim * 2,
-        k=2,
-        rope_dim=args.embed_dim // args.n_heads,
-        seed=42,
+        TransformerConfig(
+            vocab_size=256,
+            embed_dim=args.embed_dim,
+            n_layers=args.n_layers,
+            n_heads=args.n_heads,
+            seed=42,
+        )
     ).to(device)
 
     generator = TorchTextGenerator(

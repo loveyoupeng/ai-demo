@@ -25,7 +25,7 @@ import ctypes
 from typing import Any
 
 import torch
-from cuda import cuda as _cuda_lib
+from cuda.bindings import driver as _cuda_lib  # pyright: ignore[reportAttributeAccessIssue]
 
 from impl._cuda.compiler import compile_and_load, get_kernel_handle
 
@@ -204,7 +204,7 @@ class _RmsNormCudaFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx: Any, input: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
+    def forward(ctx: Any, input: torch.Tensor, gamma: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
         """Forward: out = x / rms_norm(x) * gamma.
 
         Parameters
@@ -215,6 +215,8 @@ class _RmsNormCudaFunction(torch.autograd.Function):
             Input tensor (..., embed_dim) on device.
         gamma : torch.Tensor
             Learnable scale parameter (embed_dim,).
+        eps : float
+            Epsilon for the RMS normalization (default 1e-6).
 
         Returns
         -------
@@ -223,6 +225,7 @@ class _RmsNormCudaFunction(torch.autograd.Function):
         """
         ctx.save_for_backward(input, gamma)
         ctx.original_shape = input.shape
+        ctx.eps = eps
         is_float64 = input.dtype == torch.float64
 
         # input: (..., embed_dim) -> flatten to (N, D)
@@ -243,8 +246,6 @@ class _RmsNormCudaFunction(torch.autograd.Function):
         # Shared memory: one float64 per warp (8 bytes), one float32 per warp (4 bytes)
         num_warps = max(1, (block_size + 31) // 32)
         shared_mem = num_warps * (8 if is_float64 else 4)
-
-        eps = 1e-6
 
         if is_float64:
             x_ptr = ctypes.c_void_p(x_flat.data_ptr())
@@ -290,6 +291,7 @@ class _RmsNormCudaFunction(torch.autograd.Function):
             Gradient w.r.t. input and gamma (for weight).
         """
         input, gamma = ctx.saved_tensors
+        eps = getattr(ctx, "eps", 1e-6)
 
         # Reshape to (N, D) for computation
         N = input.numel() // input.shape[-1]
@@ -297,17 +299,16 @@ class _RmsNormCudaFunction(torch.autograd.Function):
 
         if input.dim() > 2:
             x = input.view(N, D)
-            normalized = input / (torch.sqrt(torch.mean(input**2, dim=-1, keepdim=True) + 1e-6))
+            normalized = input / (torch.sqrt(torch.mean(input**2, dim=-1, keepdim=True) + eps))
         else:
             x = input
-            normalized = x / (torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + 1e-6))
+            normalized = x / (torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + eps))
 
         grad_output = grad_outputs[0].view(N, D)
 
         # RMSNorm gradient (standard derivation):
         # d_x = gamma * inv_rms * (d_out - mean(d_out * x * inv_rms) * (x * inv_rms))
         # where x * inv_rms is the normalized (before scaling)
-        eps = 1e-6
         inv_rms = 1.0 / torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + eps)
         x_norm = x * inv_rms  # normalized (before gamma scaling)
 
@@ -330,7 +331,7 @@ class _RmsNormCudaFunction(torch.autograd.Function):
         else:  # input is 3D, sum over batch dimensions to get (D,)
             grad_gamma = torch.sum(grad_output * normalized_flat, dim=0)
 
-        return grad_input.view(ctx.original_shape) if input.dim() > 2 else grad_input, grad_gamma
+        return grad_input.view(ctx.original_shape) if input.dim() > 2 else grad_input, grad_gamma, None
 
 
 # ---------------------------------------------------------------------------
@@ -338,45 +339,36 @@ class _RmsNormCudaFunction(torch.autograd.Function):
 # ---------------------------------------------------------------------------
 
 
-def rmsnorm(x: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
+def rmsnorm(x: torch.Tensor, gamma: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """Compute RMSNorm: x / sqrt(mean(x^2, dim=-1) + eps) * gamma.
 
     This kernel uses CUDA warp reduction to compute the RMS normalization
-    factor in a fully parallel manner. Each row of the input is processed
-    independently by one block of threads.
-
-    The kernel demonstrates:
-    - Warp-level reduction using shfl_down
-    - Shared memory for multi-warp coordination
-    - Synchronization barriers (__syncthreads)
-    - 2D thread mapping: 1D grid (rows) × 1D block (features)
+    in a single pass, with backward in PyTorch.
 
     Parameters
     ----------
     x : torch.Tensor
-        Input tensor of shape (..., embed_dim). Any leading batch dimensions
-        are allowed. Shape can be 1D, 2D, 3D, etc.
+        Input tensor (..., embed_dim) on CUDA device.
     gamma : torch.Tensor
-        Learnable scale parameter of shape (embed_dim,). Must be on the
-        same device as x.
+        Learnable scale parameter (embed_dim,) on CUDA device.
+    eps : float
+        Epsilon for the RMS normalization (default 1e-6).
 
     Returns
     -------
     torch.Tensor
-        RMS-normalized output with the same shape as x. The output is
-        scaled by gamma so that each output vector has unit RMS.
+        Normalized, scaled output — same shape as input.
 
     Example
     -------
-    >>> x = torch.randn(2, 4, 128, device="cuda")  # (batch, seq, embed)
+    >>> x = torch.randn(2, 4, 128, device="cuda")
     >>> gamma = torch.ones(128, device="cuda")
     >>> y = rmsnorm(x, gamma)  # (2, 4, 128) — each feature vector normalized
 
     Kernel configuration
     --------------------
-    - Block size: min(256, embed_dim) threads
-    - Grid size: batch_size * seq_len blocks (one per normalization row)
-    - Shared memory: ceil(block_size / 32) * 4 bytes (warp reduction storage)
-    - Memory access: fully coalesced (consecutive threads access consecutive elements)
+    - One block per row (blockIdx.x = row index)
+    - Block size = min(256, D) — one thread per feature element (or less)
+    - Shared memory: one float per thread for the RMS value
     """
-    return _RmsNormCudaFunction.apply(x, gamma)
+    return _RmsNormCudaFunction.apply(x, gamma, eps)

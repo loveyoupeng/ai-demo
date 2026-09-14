@@ -50,7 +50,12 @@ def clip_gradients(grads: dict[str, torch.Tensor], max_norm: float) -> None:
     if global_norm <= max_norm:
         logger.debug("clip_gradients() norm %.6f <= max_norm %.4f skipping", global_norm, max_norm)
         return
-    logger.info("clip_gradients() clipping global_norm=%.6f -> max_norm=%.4f factor=%.6f", global_norm, max_norm, max_norm / global_norm)
+    logger.info(
+        "clip_gradients() clipping global_norm=%.6f -> max_norm=%.4f factor=%.6f",
+        global_norm,
+        max_norm,
+        max_norm / global_norm,
+    )
     scaling_factor = max_norm / global_norm
     for grad in grads.values():
         grad *= scaling_factor  # in-place scalar multiplication
@@ -92,7 +97,7 @@ def _log_grad_stats(grads: dict[str, torch.Tensor]) -> None:
             layer_idx = int(match.group(1))
             if layer_idx not in layer_norms:
                 layer_norms[layer_idx] = 0.0
-            layer_norms[layer_idx] += float(torch.sum(grad ** 2))
+            layer_norms[layer_idx] += float(torch.sum(grad**2))
     for layer_idx in layer_norms:
         layer_norms[layer_idx] = float(torch.sqrt(torch.tensor(layer_norms[layer_idx], dtype=torch.float64)))
     if not layer_norms:

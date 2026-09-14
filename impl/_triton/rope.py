@@ -381,7 +381,7 @@ class _RoPETriton(torch.autograd.Function):
             num_tokens,
             pair_dim,
             D,
-            BLOCK_SIZE=BLOCK_SIZE,
+            BLOCK_SIZE=BLOCK_SIZE,  # pyright: ignore[reportArgumentType]
         )
 
         ctx.save_for_backward(cos, sin)

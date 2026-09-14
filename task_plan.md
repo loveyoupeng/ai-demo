@@ -31,6 +31,7 @@ NumPy PyT Trit CUDA (4 backends, same structure)
 | F | CUDA Bare-Metal | ✅ Done | 121 | (multiple) |
 | G | Weight Diff Tests | ✅ Done | 10 | (multiple) |
 | H | Logging Architecture | ✅ Done | — | (current) |
+| Arch | Architecture Fixes: Standardize + Interchange + Backprop + Causal Mask + KV Cache + PyTorch Idioms + Flash Kernel + Docs & Naming | ✅ Done (2026-09-14) | 406 np+torch / 103 triton / 99 cuda unit, 42 cross-backend, 6/6 equivalence scenarios | uncommitted |
 
 ## CLI Commands
 ```bash
@@ -85,8 +86,8 @@ uv run pytest tests/cross_backend/ -v
 shared.utils.logger_setup   — singleton to create & configure all loggers
 scripts.train               — top-level training orchestration
 scripts.infer               — top-level inference orchestration
-impl._np.model              — NumPyModel forward/backward
-impl._np.modules            — low-level modules (Embedding, RMSNorm, DecoderStack, MHA, MoE, RoPE)
+impl._np.model              — NumPyModel forward/analytic backward
+impl._np.{embedding,layernorm,rope,ffn,attention,moe,block,stack} — per-operator modules (forward + analytic backward)
 impl._np.training           — training loop, gradient clipping, optimiser steps
 impl._np.inference          — TextGenerator generate/generate_greedy/generate_sampled
 impl._np.kv_cache           — KV cache operations
@@ -125,7 +126,7 @@ Example output:
 ```
 2025-06-26 14:30:01 [  INFO] scripts.train Starting epoch 1/10, 5000 batches
 2025-06-26 14:30:01 [ DEBUG] impl._np.model forward() input_ids=[1, 128] → logits=[1, 128, 256]
-2025-06-26 14:30:01 [ TRACE] impl._np.modules.mha() q=[1, 8, 128, 32] k=[1, 8, 128, 32] v=[1, 8, 128, 32] → attn=[1, 8, 128, 32]
+2025-06-26 14:30:01 [ TRACE] impl._np.attention.forward() q=[1, 8, 128, 32] k=[1, 8, 128, 32] v=[1, 8, 128, 32] → attn=[1, 8, 128, 32]
 ```
 
 Users can control verbosity:
@@ -169,7 +170,7 @@ These are the **core of learning** — show how data flows through the network:
 | **forward** | DEBUG | Overall input→output shape chain | `forward() input_ids=[1, 128] → embedding=[1, 128, 256] → stack=[1, 128, 256] → logits=[1, 128, 256]` |
 | **backward** | DEBUG | Input shape, output param count | `backward() input_shape=[1, 128] params=2500000` |
 
-#### H.4.4 `impl/_np/modules.py` — Building Block Operations
+#### H.4.4 `impl/_np/{embedding,layernorm,attention,moe,ffn,rope,block,stack}.py` — Per-Operator Modules
 
 This is where users **learn how the transformer works internally**. Log every operation with shapes:
 
@@ -229,18 +230,18 @@ These are **non-standard** log types that help learners understand *why* the mod
 | **Gradient norm stats** | DEBUG | `training.py` | Per-layer gradient norms — helps spot vanishing/exploding gradients | `grad_stats() layer=0 norm=0.023 layer=1 norm=0.045 layer=2 norm=0.019` |
 | **Loss curve** | DEBUG | `train.py` | Rolling average loss for smoothing | `loss_curve() current=2.345 rolling_avg=2.412 trend=down` |
 | **LR schedule** | DEBUG | `optimizer.py` | Current learning rate with schedule info | `lr_schedule() step=1000 lr=0.000291 schedule=warmup_cosine total_steps=50000` |
-| **Activation stats** | TRACE | `modules.py` | Min/max/mean/percentiles of activations at each layer | `act_stats() layer=2 module=rms_norm x_min=-2.34 x_max=5.67 x_mean=0.01` |
+| **Activation stats** | TRACE | `block.py` / `stack.py` | Min/max/mean/percentiles of activations at each layer | `act_stats() layer=2 module=rms_norm x_min=-2.34 x_max=5.67 x_mean=0.01` |
 | **Token sampling** | DEBUG | `inference.py` | Top-5 token probabilities at each generation step | `sample_top5() top5=[7851(0.12), 17(0.08), 307(0.05), 4521(0.03), 64(0.02)]` |
 
 ### H.6 Implementation Status — ALL COMPLETE
 
 | # | Educational Log | Level | Status | Location |
 |---|----------------|-------|--------|----------|
-| 1 | **Attention entropy** (Shannon entropy of attention distribution) | DEBUG | ✅ Done | `impl/_np/modules.py` (MHA.forward), `impl/_torch/layers.py` (MHA.forward), `impl/_triton/transformer.py` (TritonMHA.forward), `impl/_cuda/block.py` (CuTransformerBlock.forward) |
+| 1 | **Attention entropy** (Shannon entropy of attention distribution) | DEBUG | ✅ Done | `impl/_np/attention.py` (MHA.forward), `impl/_torch/layers.py` (MHA.forward), `impl/_triton/transformer.py` (TritonMHA.forward), `impl/_cuda/block.py` (CuTransformerBlock.forward) |
 | 2 | **Gradient norm stats** (per-layer gradient L2 norms) | DEBUG | ✅ Done | `impl/_np/training.py`, `impl/_torch/training.py`, `impl/_triton/training.py`, `impl/_cuda/training.py` |
 | 3 | **Loss curve** (rolling avg 50, trend direction) | INFO | ✅ Done | `scripts/train.py` (`_compute_loss_curve()`, batch loop) |
 | 4 | **LR schedule** | DEBUG | ⏸️ Deferred | Requires scheduler implementation (currently fixed LR) |
-| 5 | **Activation stats** (min/max/mean per module) | DEBUG | ✅ Done | `impl/_np/modules.py` (TransformerBlock + DecoderStack), `impl/_torch/layers.py` (TransformerBlock + DecoderStack) |
+| 5 | **Activation stats** (min/max/mean per module) | DEBUG | ✅ Done | `impl/_np/block.py` (TransformerBlock + DecoderStack), `impl/_torch/layers.py` (TransformerBlock + DecoderStack) |
 | 6 | **Token sampling top-5** (probabilities per step) | DEBUG | ✅ Done | `impl/_np/inference.py`, `impl/_torch/inference.py`, `impl/_triton/inference.py`, `impl/_cuda/inference.py` |
 
 **Log format examples:**

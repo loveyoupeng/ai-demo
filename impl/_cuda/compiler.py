@@ -20,8 +20,8 @@ from pathlib import Path
 from typing import Any
 
 # CUDA runtime and compilation libraries
-from cuda import cuda as _cuda_lib
-from cuda import nvrtc as _nvrtc_lib
+from cuda.bindings import driver as _cuda_lib  # pyright: ignore[reportAttributeAccessIssue]
+from cuda.bindings import nvrtc as _nvrtc_lib  # pyright: ignore[reportAttributeAccessIssue]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -72,9 +72,7 @@ def _ensure_cuda_context() -> None:
     exists (which is fine — we just skip).
     """
     status = _cuda_lib.cuInit(0)
-    if status[0] not in (
-        _cuda_lib.CUresult.CUDA_SUCCESS,
-    ):
+    if status[0] not in (_cuda_lib.CUresult.CUDA_SUCCESS,):
         raise RuntimeError(f"Failed to initialize CUDA driver: {status}")
 
     # Try to get current context — 0x0 context is not valid
@@ -84,21 +82,22 @@ def _ensure_cuda_context() -> None:
     if current_ctx is not None and int(current_ctx) != 0:
         return  # Valid context already exists
 
-    # No valid context — create one on device 0
+    # No valid context on this thread — attach to the device's PRIMARY
+    # context. PyTorch allocates into the primary context, so loading our
+    # NVRTC modules into a separate fresh context would make kernel launches
+    # reference memory from a different context (invalid handles / illegal
+    # addresses).
     status, device = _cuda_lib.cuDeviceGet(0)
     if status != _cuda_lib.CUresult.CUDA_SUCCESS:
         raise RuntimeError(f"Failed to get CUDA device: {status}")
 
-    try:
-        status, _ = _cuda_lib.cuCtxCreate(0, device)
-        if status != _cuda_lib.CUresult.CUDA_SUCCESS:
-            if status == _cuda_lib.CUresult.CUDA_ERROR_UNKNOWN:
-                # Context might already exist — this is OK
-                return
-            raise RuntimeError(f"Failed to create CUDA context: {status}")
-    except (OSError, RuntimeError):
-        # If context creation fails because one exists, that's fine
-        pass
+    status, primary = _cuda_lib.cuDevicePrimaryCtxRetain(device)
+    if status != _cuda_lib.CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"Failed to retain primary context: {status}")
+
+    status = _cuda_lib.cuCtxSetCurrent(primary)
+    if status[0] != _cuda_lib.CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"Failed to set primary context current: {status}")
 
 
 _PTCL_BUFFER: bytes | None = None
@@ -164,17 +163,13 @@ def _compile_and_cache(source: bytes, key: str) -> tuple[Any, bytes]:
 
     try:
         # Compile with options — returns (status,)
-        compile_status = _nvrtc_lib.nvrtcCompileProgram(
-            prog, len(_COMPILE_OPTIONS), _COMPILE_OPTIONS
-        )
+        compile_status = _nvrtc_lib.nvrtcCompileProgram(prog, len(_COMPILE_OPTIONS), _COMPILE_OPTIONS)
         if compile_status[0] != _nvrtc_lib.nvrtcResult.NVRTC_SUCCESS:
             # Get log for debugging
             log_size_status, log_size = _nvrtc_lib.nvrtcGetProgramLogSize(prog)
             log_buf = bytearray(log_size + 1)
             _nvrtc_lib.nvrtcGetProgramLog(prog, log_buf)
-            raise RuntimeError(
-                f"nvrtcCompileProgram failed:\n{bytes(log_buf).decode('utf-8', errors='ignore')}"
-            )
+            raise RuntimeError(f"nvrtcCompileProgram failed:\n{bytes(log_buf).decode('utf-8', errors='ignore')}")
 
         # Get PTX size and data
         ptx_size_status, ptx_size = _nvrtc_lib.nvrtcGetPTXSize(prog)
@@ -282,10 +277,7 @@ def get_kernel_handle(module: Any, kernel_name: str, ptx_data: bytes) -> Any:
     pattern = f"_Z{len(kernel_name)}{kernel_name}".encode()
     lowered = ptx_data.find(pattern)
     if lowered == -1:
-        raise RuntimeError(
-            f"Could not find kernel '{kernel_name}' in PTX source. "
-            f"Looking for pattern: {pattern}"
-        )
+        raise RuntimeError(f"Could not find kernel '{kernel_name}' in PTX source. Looking for pattern: {pattern}")
     # Extract until ')' or '(' — that's the full lowered name
     end = lowered
     while end < len(ptx_data) and ptx_data[end : end + 1] not in (b"(", b")", b"\n", b" "):

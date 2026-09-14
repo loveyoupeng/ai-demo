@@ -8,6 +8,7 @@ import torch
 
 from impl._torch.layers import TorchModel
 from impl._torch.training import clip_gradients, compute_gradient_norm, train_step
+from shared.config import TransformerConfig
 
 
 class TestGradientClippingIntegration:
@@ -16,15 +17,18 @@ class TestGradientClippingIntegration:
     def test_clip_gradients_is_called_by_train_step(self) -> None:
         """train_step must call clip_gradients before optimizer.step."""
         model = TorchModel(
-            vocab_size=16,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=64,
-            k=2,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=32,
+                n_layers=2,
+                n_heads=2,
+                n_groups=2,
+                n_experts=2,
+                expert_dim=64,
+                top_k=2,
+                rope_dim=0,
+                seed=0,
+            ),
         )
         x = torch.randint(0, 16, (2, 4))
         y = torch.randint(0, 16, (2, 4))
@@ -48,15 +52,18 @@ class TestGradientClippingIntegration:
     def test_train_step_clips_gradients(self) -> None:
         """Gradient clipping reduces gradient norm to at most max_norm."""
         model = TorchModel(
-            vocab_size=16,
-            embed_dim=32,
-            n_layers=4,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=64,
-            k=2,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=32,
+                n_layers=4,
+                n_heads=2,
+                n_groups=2,
+                n_experts=2,
+                expert_dim=64,
+                top_k=2,
+                rope_dim=0,
+                seed=0,
+            ),
         )
         x = torch.randint(0, 16, (4, 8))
         y = torch.randint(0, 16, (4, 8))
@@ -88,15 +95,18 @@ class TestGradientClippingIntegration:
     def test_no_clip_when_below_max_norm(self) -> None:
         """If gradient norm < max_norm, no clipping occurs."""
         model = TorchModel(
-            vocab_size=16,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=64,
-            k=2,
-            rope_dim=0,
-            seed=42,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=32,
+                n_layers=2,
+                n_heads=2,
+                n_groups=2,
+                n_experts=2,
+                expert_dim=64,
+                top_k=2,
+                rope_dim=0,
+                seed=42,
+            ),
         )
         x = torch.randint(0, 16, (4, 8))
         y = torch.randint(0, 16, (4, 8))
@@ -117,15 +127,18 @@ class TestGradientClippingIntegration:
     def test_zero_max_norm_no_clip(self) -> None:
         """max_norm=0 should skip all clipping."""
         model = TorchModel(
-            vocab_size=16,
-            embed_dim=32,
-            n_layers=2,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=64,
-            k=2,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=32,
+                n_layers=2,
+                n_heads=2,
+                n_groups=2,
+                n_experts=2,
+                expert_dim=64,
+                top_k=2,
+                rope_dim=0,
+                seed=0,
+            ),
         )
         x = torch.randint(0, 16, (2, 4))
         y = torch.randint(0, 16, (2, 4))

@@ -79,9 +79,7 @@ def _xavier_uniform_tensor(shape: tuple[int, ...], rng: np.random.Generator) -> 
     return arr
 
 
-def _xavier_uniform_torch(
-    shape: tuple[int, ...], seed: int, device: str = "cpu"
-) -> torch.Tensor:
+def _xavier_uniform_torch(shape: tuple[int, ...], seed: int, device: str = "cpu") -> torch.Tensor:
     """Xavier uniform initialization for torch tensors.
 
     Parameters

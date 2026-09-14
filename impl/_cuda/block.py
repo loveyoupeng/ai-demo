@@ -3,27 +3,26 @@
 Assembles:
   - RMSNorm     → impl/_cuda/layernorm.rmsnorm    (warp-reduction kernel)
   - MHA         → impl/_cuda/attention.scaled_dot_product_attention (CUDA softmax/weighted-sum)
-  - MoE         → impl/_cuda/moe.moe_forward       (CUDA score + weighted-sum kernels)
+  - SwiGLU FFN  → impl/_cuda/ffn.swiglu_ffn       (CUDA SiLU kernel inside SwiGLU)
   - RoPE        → impl/_cuda/rope.apply_rope       (CUDA rotary embedding kernel)
-  - SiLU        → impl/_cuda/ffn._CUDASiLU         (CUDA SiLU kernel inside SwiGLU)
-  - gated residual + dropout
+  - MoE         → torch routing (same math as the other tracks) + per-expert
+                 CUDA SwiGLU FFN
 
-Architecture (post-norm, gated residual):
+Architecture (LLaMA-style pre-norm, identical to the NumPy/PyTorch tracks):
     Input:  x [B, S, D]
     │
     ├─ Stream 1: Attention ──────────────────────────────────────────────
-    │   1. attn_out = MHA(x)                         # (B, S, D)
-    │   2. h = x + attn_out                          # residual FIRST
-    │   3. h = RMSNorm(h, ln1_gamma)                 # post-norm
-    │   4. h = h + sigmoid(gate1) * h                # gated residual
-    │   5. h = dropout(h)                           # training only
+    │   1. xn = RMSNorm(x, input_ln)                    # (B, S, D)
+    │   2. q = xn @ Wq; k = xn @ Wk; v = xn @ Wv        # (B, ·, S, hd)
+    │   3. q, k ← RoPE(q), RoPE(k)                      # CUDA rope kernel
+    │   4. if G < H: repeat k, v to H heads (GQA)
+    │   5. attn = SDPA(q, k, v) @ Wo                    # (B, S, D)
+    │   6. h = x + attn                                  # residual
     │
-    ├─ Stream 2: MoE ────────────────────────────────────────────────────
-    │   6. moe_out = MoE(h)                          # (B, S, D)
-    │   7. out = h + moe_out                         # residual FIRST
-    │   8. out = RMSNorm(out, ln2_gamma)             # post-norm
-    │   9. out = out + sigmoid(gate2) * out          # gated residual
-    │  10. out = dropout(out)                        # training only
+    ├─ Stream 2: Feed-forward (dense SwiGLU or MoE) ─────────────────────
+    │   7. hn = RMSNorm(h, post_ln)                     # (B, S, D)
+    │   8. ff = SwiGLU(hn) | MoE(hn)                    # (B, S, D)
+    │   9. out = h + ff                                  # residual
     │
     Output: out [B, S, D]
 
@@ -41,13 +40,13 @@ from __future__ import annotations
 import logging
 import math
 
-import numpy as np
 import torch
 
 from impl._cuda.attention import scaled_dot_product_attention as cuda_sdp_attention
+from impl._cuda.ffn import swiglu_ffn
 from impl._cuda.layernorm import rmsnorm
-from impl._cuda.moe import moe_forward
 from impl._cuda.rope import apply_rope
+from shared.config import TransformerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -57,26 +56,10 @@ logger = logging.getLogger(__name__)
 def _init_weight(rows: int, cols: int, seed: int) -> torch.Tensor:
     """Xavier/uniform initialization for attention/FFN weights.
 
-    Uses Kaiming (Xavier) uniform initialization with the bound:
-        bound = sqrt(6 / (fan_in + fan_out))
-    This is the same formula used by torch.nn.Linear default.
-
-    Parameters
-    ----------
-    rows : int
-        Input dimension (fan_in).
-    cols : int
-        Output dimension (fan_out).
-    seed : int
-        Random seed for reproducibility.
-
-    Returns
-    -------
-    torch.Tensor
-        Initialized weight matrix of shape (rows, cols) on CPU,
-        values in [-bound, +bound].
+    Returns a (rows, cols) float32 tensor with values drawn from
+    U(-limit, limit) where limit = sqrt(6 / (rows + cols)).
     """
-    bound = (6.0 / (rows + cols)) ** 0.5
+    bound = math.sqrt(6.0 / (rows + cols))
     tensor = torch.empty(rows, cols, dtype=torch.float32)
     torch.nn.init.uniform_(tensor, -bound, bound, generator=torch.Generator().manual_seed(seed))
     return tensor
@@ -85,15 +68,10 @@ def _init_weight(rows: int, cols: int, seed: int) -> torch.Tensor:
 def _init_zeros(shape: tuple[int, ...]) -> torch.Tensor:
     """Initialize a tensor to zeros.
 
-    Parameters
-    ----------
-    shape : tuple[int, ...]
-        Desired shape.
-
     Returns
     -------
     torch.Tensor
-        Zero-initialized tensor on CPU.
+        Zeros tensor of the given shape, float32.
     """
     return torch.zeros(shape)
 
@@ -104,298 +82,189 @@ def _init_zeros(shape: tuple[int, ...]) -> torch.Tensor:
 class CuTransformerBlock:
     """CUDA TransformerBlock — assembly of all CUDA primitives.
 
-    This class follows the same architecture as the NumPy/PyTorch TransformerBlock
-    but delegates all heavy computation to CUDA kernels.
+    Mirrors ``impl._np.block.TransformerBlock``: same pre-norm layout,
+    same GQA, same RoPE, same MoE routing math — with the heavy compute
+    delegated to CUDA kernels.
 
     It does NOT inherit from nn.Module — weights are stored as plain tensors
-    (attributes or __dict__) for parity checking against the NumPy implementation.
-    This makes it easy to extract raw parameter arrays for comparison.
-
-    Parameters
-    ----------
-    embed_dim : int
-        Input/output embedding dimension.
-    n_heads : int
-        Number of attention heads.
-    n_experts : int
-        Number of MoE experts.
-    ff_dim : int
-        Hidden dimension per MoE expert.
-    k : int
-        Number of top experts to activate per token (default: 2).
-    rope_dim : int
-        Number of head dimensions for RoPE (0 = disabled).
-    seed : int
-        Random seed for weight initialization (default: 0).
+    for parity checking against the NumPy implementation (easy to extract
+    raw arrays for comparison).
 
     Attributes
     ----------
-    ln1_gamma : torch.Tensor, shape (D,)
-        Learnable RMSNorm scale parameter for attention post-norm.
-    ln2_gamma : torch.Tensor, shape (D,)
-        Learnable RMSNorm scale parameter for MoE post-norm.
-    gate1 : torch.Tensor, shape (1,)
-        Learnable scalar gate for attention residual (initialized to 0).
-    gate2 : torch.Tensor, shape (1,)
-        Learnable scalar gate for MoE residual (initialized to 0).
-    Wq : torch.Tensor, shape (D, D)
-        Query projection weights.
-    Wk : torch.Tensor, shape (D, D)
-        Key projection weights.
-    Wv : torch.Tensor, shape (D, D)
-        Value projection weights.
-    Wo : torch.Tensor, shape (D, D)
-        Attention output projection weights.
-    expert_weights : torch.Tensor, shape (N, D, D)
-        Expert weight matrices — all experts share the same W (D, D).
-    expert_bias : torch.Tensor, shape (N, D)
-        Expert bias vectors — all experts share the same bias (D,).
-    routing_weights : torch.Tensor, shape (N, D)
-        Routing score weights for expert selection.
-
-    Forward
-    -------
-    x : torch.Tensor, shape (batch_size, seq_len, embed_dim) on CUDA device
-
-    Returns
-    -------
-    out : torch.Tensor, shape (batch_size, seq_len, embed_dim) on CUDA device
-
+    input_layernorm_gamma : torch.Tensor, shape (D,)
+        RMSNorm gain before attention (LLaMA naming).
+    post_attention_layernorm_gamma : torch.Tensor, shape (D,)
+        RMSNorm gain before the feed-forward.
+    q_proj / k_proj / v_proj / o_proj : torch.Tensor
+        Attention projections (in, out) layout: (D, H·hd), (D, G·hd),
+        (D, G·hd), (H·hd, D).
+    Dense FFN: gate_proj (D, FF), up_proj (D, FF), down_proj (FF, D).
+    MoE: router (D, E); experts stacked as (E, D, FF), (E, D, FF), (E, FF, D).
     """
 
     # ------------------------------------------------------------------ init
-    def __init__(
-        self,
-        embed_dim: int,
-        n_heads: int,
-        n_experts: int,
-        ff_dim: int,
-        k: int = 2,
-        rope_dim: int = 0,
-        seed: int = 0,
-    ) -> None:
-        self.embed_dim = embed_dim
-        self.n_heads = n_heads
-        self.n_experts = n_experts
-        self.k = k
-        self.rope_dim = rope_dim
-        self.head_dim = embed_dim // n_heads
+    def __init__(self, config: TransformerConfig, seed: int = 0) -> None:
+        self.config = config
+        D, H, G = config.embed_dim, config.n_heads, config.kv_heads
+        hd, FF, E = config.head_dim, config.expert_dim, config.n_experts
+        self.n_heads = H
+        self.n_groups = G
+        self.n_experts = E
+        self.head_dim = hd
+        self.rope_dim = config.rope_dim
 
-        # RMSNorm weights — gamma for layer normalization
-        # Shape: (D,) per layer
-        self.ln1_gamma = torch.ones(embed_dim)
-        self.ln1_gamma.requires_grad_(True)
-        self.ln2_gamma = torch.ones(embed_dim)
-        self.ln2_gamma.requires_grad_(True)
+        # RMSNorm gains (D,) — identity at init
+        self.input_layernorm_gamma = torch.ones(D, dtype=torch.float32)
+        self.input_layernorm_gamma.requires_grad_(True)
+        self.post_attention_layernorm_gamma = torch.ones(D, dtype=torch.float32)
+        self.post_attention_layernorm_gamma.requires_grad_(True)
 
-        # Gated residuals — learnable scalar gates initialized to zero
-        # Initialized to zero → identity at start → gates learn to open
-        self.gate1 = torch.zeros(1)
-        self.gate1.requires_grad_(True)
-        self.gate2 = torch.zeros(1)
-        self.gate2.requires_grad_(True)
+        # ── Attention projections (no bias, Llama convention) ──────────
+        self.q_proj = _init_weight(D, H * hd, seed=seed + 2)
+        self.k_proj = _init_weight(D, G * hd, seed=seed + 3)
+        self.v_proj = _init_weight(D, G * hd, seed=seed + 4)
+        self.o_proj = _init_weight(H * hd, D, seed=seed + 5)
+        for p in (self.q_proj, self.k_proj, self.v_proj, self.o_proj):
+            p.requires_grad_(True)
 
-        # ── Multi-Head Attention weights ───────────────────────────────
-        # Q, K, V projections: D → D (one projection per head = D)
-        # Output projection: D → D
-        self.Wq = _init_weight(embed_dim, embed_dim, seed=seed + 2)
-        self.Wq.requires_grad_(True)
-        self.Wk = _init_weight(embed_dim, embed_dim, seed=seed + 3)
-        self.Wk.requires_grad_(True)
-        self.Wv = _init_weight(embed_dim, embed_dim, seed=seed + 4)
-        self.Wv.requires_grad_(True)
-        self.Wo = _init_weight(embed_dim, embed_dim, seed=seed + 5)
-        self.Wo.requires_grad_(True)
-
-        # ── MoE weights ────────────────────────────────────────────────
-        # Expert weights: (N, D, D) — Xavier uniform for each expert
-        # Expert bias: (N, D) — zeros
-        # Routing weights: (N, D) — Xavier uniform
-        rng = np.random.default_rng(seed + 7)
-        bound = math.sqrt(6.0 / (embed_dim + embed_dim))
-
-        self.expert_weights = torch.empty(
-            n_experts, embed_dim, embed_dim, dtype=torch.float32
-        )
-        torch.nn.init.uniform_(
-            self.expert_weights, -bound, bound,
-            generator=torch.Generator().manual_seed(seed + 7)
-        )
-        self.expert_weights.requires_grad_(True)
-
-        self.expert_bias = torch.zeros(n_experts, embed_dim, dtype=torch.float32)
-        self.expert_bias.requires_grad_(True)
-
-        self.routing_weights = _init_weight(embed_dim, n_experts, seed=seed + 8).T
-        # _init_weight returns (D, N), transpose to (N, D) to match NumPy
-        self.routing_weights.requires_grad_(True)
-
-        # Compute RoPE tables cache (shared across all calls for one block)
-        self._rope_cos = None
-        self._rope_sin = None
+        if config.has_moe():
+            # ── MoE: router + SwiGLU experts ───────────────────────────
+            # Router: (D, E), no bias (Mixtral convention)
+            self.router = _init_weight(D, E, seed=seed + 8)
+            self.router.requires_grad_(True)
+            # Experts: stacked SwiGLU projections
+            bound = math.sqrt(6.0 / (D + FF))
+            gen = torch.Generator().manual_seed(seed + 7)
+            self.expert_gate_proj = torch.empty(E, D, FF, dtype=torch.float32)
+            torch.nn.init.uniform_(self.expert_gate_proj, -bound, bound, generator=gen)
+            self.expert_up_proj = torch.empty(E, D, FF, dtype=torch.float32)
+            torch.nn.init.uniform_(self.expert_up_proj, -bound, bound, generator=gen)
+            self.expert_down_proj = torch.empty(E, FF, D, dtype=torch.float32)
+            torch.nn.init.uniform_(self.expert_down_proj, -bound, bound, generator=gen)
+            for p in (self.expert_gate_proj, self.expert_up_proj, self.expert_down_proj):
+                p.requires_grad_(True)
+        else:
+            # ── Dense SwiGLU feed-forward ──────────────────────────────
+            self.gate_proj = _init_weight(D, FF, seed=seed + 9)
+            self.up_proj = _init_weight(D, FF, seed=seed + 10)
+            self.down_proj = _init_weight(FF, D, seed=seed + 11)
+            for p in (self.gate_proj, self.up_proj, self.down_proj):
+                p.requires_grad_(True)
 
     # ---------------------------------------------------------------- forward
-    def forward(
-        self,
-        x: torch.Tensor,
-        positions: torch.Tensor | None = None,
-        dropout: float = 0.0,
-        training: bool = False,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, positions: torch.Tensor | None = None) -> torch.Tensor:
         """Forward pass through the TransformerBlock.
 
-        Implements the post-norm gated residual architecture with MoE:
-            attn_out = MHA(x)
-            h = x + attn_out → RMSNorm → gated → (dropout)
-            moe_out = MoE(h)
-            out = h + moe_out → RMSNorm → gated → (dropout)
+        Pre-norm layout (identical math to the NumPy/PyTorch tracks):
 
-        Parameters
-        ----------
-        x : torch.Tensor, shape (B, S, D)
-            Input activations on CUDA device. Weights must be on the
-            same device.
-        positions : torch.Tensor, shape (S,) or None
-            Position indices for RoPE. If None, uses arange(S).
-        dropout : float
-            Dropout rate (default: 0.0, no dropout).
-        training : bool
-            Whether in training mode (dropout active).
+            xn = RMSNorm(x);  h   = x + SDPA(RoPE(q), RoPE(k), v) @ Wo
+            hn = RMSNorm(h);  out = h + FFN(hn)          # FFN = SwiGLU | MoE
 
-        Returns
-        -------
-        torch.Tensor, shape (B, S, D)
-            Block output with same shape as input.
-
-        Shape flow
-        ----------
+        Shape flow:
           x: (B, S, D)
-            → Wq/Wk/Wv proj: (B, S, D)
-            → reshape: (B, S, H, hd) → (B, H, S, hd)
-            → RoPE: (B, H, S, hd)
-            → QK^T: (B, H, S, S) — CUDA softmax + weighted sum
-            → @V: (B, H, S, hd)
-            → reshape/transpose: (B, S, D)
-            → Wo proj: (B, S, D) = attn_out
-
-          h = x + attn_out       # (B, S, D)
-          h = RMSNorm(h, ln1)    # (B, S, D)
-          h = h + gate1 * h      # (B, S, D)
-          h = dropout(h)         # (B, S, D)
-
-          moe_out = MoE(h)       # (B, S, D)
-          out = h + moe_out      # (B, S, D)
-          out = RMSNorm(out, ln2)# (B, S, D)
-          out = out + gate2 * out# (B, S, D)
-          out = dropout(out)     # (B, S, D)
-
+            → q: (B, S, H·hd) → (B, H, S, hd); k, v: (B, G, S, hd)
+            → RoPE: (B, ·, S, hd); GQA repeat → (B, H, S, hd)
+            → SDPA: (B, H, S, hd) → (B, S, H·hd) → @Wo: (B, S, D)
+            → residual, pre-norm, FFN, residual: (B, S, D)
         """
         B, S, D = x.shape
         device = x.device
+        H, G, hd = self.n_heads, self.n_groups, self.head_dim
 
-        # Ensure all weights are on the same device as input
-        # Use .to(device) to handle cases where caller forgot to move weights
-        Wq = self.Wq.to(device)
-        Wk = self.Wk.to(device)
-        Wv = self.Wv.to(device)
-        Wo = self.Wo.to(device)
-        ln1_gamma = self.ln1_gamma.to(device)
-        ln2_gamma = self.ln2_gamma.to(device)
-        gate1 = self.gate1.to(device)
-        gate2 = self.gate2.to(device)
-        expert_weights = self.expert_weights.to(device)
-        expert_bias = self.expert_bias.to(device)
-        routing_weights = self.routing_weights.to(device)
+        # Move weights to the input's device (caller may have built them on CPU)
+        Wq, Wk, Wv, Wo = (
+            self.q_proj.to(device),
+            self.k_proj.to(device),
+            self.v_proj.to(device),
+            self.o_proj.to(device),
+        )
+        ln1 = self.input_layernorm_gamma.to(device)
+        ln2 = self.post_attention_layernorm_gamma.to(device)
 
-        # ── Stream 1: Attention ──────────────────────────────────────────
-        # Q, K, V projections: (B, S, D) → (B, S, D)
-        q = x @ Wq  # (B, S, D)
-        k = x @ Wk  # (B, S, D)
-        v = x @ Wv  # (B, S, D)
+        # ── Stream 1: attention (pre-norm) ─────────────────────────────
+        xn = rmsnorm(x, ln1, eps=self.config.norm_eps)  # (B, S, D)
 
-        # Reshape: (B, S, D) → (B, S, H, hd) → (B, H, S, hd)
-        # Note: .transpose() creates non-contiguous tensor — .contiguous() ensures
-        # the RoPE kernel can safely use .view() without stride errors
-        q = q.view(B, S, self.n_heads, self.head_dim).transpose(1, 2).contiguous()  # (B, H, S, hd)
-        k = k.view(B, S, self.n_heads, self.head_dim).transpose(1, 2).contiguous()  # (B, H, S, hd)
-        v = v.view(B, S, self.n_heads, self.head_dim).transpose(1, 2).contiguous()  # (B, H, S, hd)
+        # Q, K, V projections: (B, S, D) @ (D, ·) → (B, S, ·)
+        q = xn @ Wq  # (B, S, H·hd)
+        k = xn @ Wk  # (B, S, G·hd)
+        v = xn @ Wv  # (B, S, G·hd)
 
-        # Apply RoPE if enabled
-        if self.rope_dim > 0:
-            if positions is None:
-                positions = torch.arange(S, device=x.device)
-            q = apply_rope(q, positions, rope_dim=self.rope_dim)
-            k = apply_rope(k, positions, rope_dim=self.rope_dim)
+        # Split into heads: (B, S, ·) → (B, S, H, hd)
+        q = q.view(B, S, H, hd)  # (B, S, H, hd)
+        k = k.view(B, S, G, hd)  # (B, S, G, hd)
+        v = v.view(B, S, G, hd)
+        v = v.transpose(1, 2).contiguous()  # (B, G, S, hd) — attention-kernel layout
+
+        # RoPE on q and k (rope_dim=0 rotates all hd dims — the standard case).
+        # The RoPE kernel expects (B, S, H, D) layout; transpose to the
+        # attention kernel's (B, H, S, hd) layout afterwards.
+        if positions is None:
+            positions = torch.arange(S, device=x.device, dtype=torch.long)
+        q = apply_rope(q, positions, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, S, hd)
+        k = apply_rope(k, positions, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, S, hd)
+        # GQA: broadcast each K/V group to its H // G query heads
+        if G != H:
+            k = k.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
+            v = v.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
 
         # Scaled dot-product attention — CUDA softmax + weighted-sum kernels
-        # q, k, v: (B, H, S, hd) — no causal mask (caller can pre-mask if needed)
-        attn_out = cuda_sdp_attention(q, k, v)  # (B, H, S, hd)
+        attn = cuda_sdp_attention(q, k, v, is_causal=True)  # (B, H, S, hd)
 
-        # ── Attention entropy logging (recompute weights for logging) ─
-        eps = 1e-9
-        scores = (q @ k.transpose(-2, -1)) * (self.head_dim ** -0.5)  # (B, H, S, S)
-        scores = scores - scores.max(dim=-1, keepdim=True).values  # stable
-        attn_weights = torch.nn.functional.softmax(scores, dim=-1)  # (B, H, S, S)
-        attn_log_prob = torch.log(attn_weights + eps)  # (B, H, S, S)
-        entropy = -(attn_weights * attn_log_prob).sum(dim=-1)  # (B, H, S)
-        if entropy.numel() > 0:
-            entropy = entropy.detach()
-            mean_entropy = float(entropy.mean())
-            min_entropy = float(entropy.min())
-            max_entropy = float(entropy.max())
-            max_seq = int(attn_weights.shape[-1])
-            if max_seq <= 256:
-                logger.debug(
-                    "attention_entropy() avg=%.2f min=%.2f max=%.2f range_entropy=%.2f",
-                    mean_entropy, min_entropy, max_entropy,
-                    max_entropy - min_entropy,
-                )
-        # ── End attention entropy logging ────────────────────────────
+        # Output projection: (B, H, S, hd) → (B, S, H·hd) → (B, S, D)
+        attn_out = attn.transpose(1, 2).contiguous().view(B, S, H * hd) @ Wo  # (B, S, D)
 
-        # Output projection: (B, H, S, hd) → (B, S, D)
-        attn_out = (
-            attn_out.transpose(1, 2).contiguous().view(B, S, self.embed_dim) @ Wo  # (B, S, D)
-        )
-
-        # Residual FIRST (post-norm): x + attn_out
+        # Residual
         h = x + attn_out  # (B, S, D)
 
-        # Post-norm: RMSNorm via CUDA kernel
-        h = rmsnorm(h, ln1_gamma)  # (B, S, D)
+        # ── Stream 2: feed-forward (pre-norm) ──────────────────────────
+        hn = rmsnorm(h, ln2, eps=self.config.norm_eps)  # (B, S, D)
 
-        # Gated residual: h = h + sigmoid(gate1) * h
-        gate1_sigmoid = torch.sigmoid(gate1)
-        h = h + gate1_sigmoid * h  # (B, S, D)
+        if self.config.has_moe():
+            ff_out = self._moe_forward(hn, device)  # (B, S, D)
+        else:
+            gp = self.gate_proj.to(device)
+            up = self.up_proj.to(device)
+            dn = self.down_proj.to(device)
+            ff_out = swiglu_ffn(hn, gp, up, dn)  # (B, S, D)
 
-        # Dropout (training only)
-        if training and dropout > 0.0:
-            h = torch.nn.functional.dropout(h, p=dropout, training=True)
+        out = h + ff_out  # (B, S, D)
+        return out
 
-        # ── Stream 2: MoE ────────────────────────────────────────────────
-        # MoE forward — CUDA kernel for scoring and weighted sum
-        # Returns: (output, indices, weights) — all on CUDA
-        # output: (B, S, D), indices: (B, S, k), weights: (B, S, k)
-        moe_out, _, _ = moe_forward(
-            tokens=h,
-            expert_weights=expert_weights,
-            expert_bias=expert_bias,
-            routing_weights=routing_weights,
-            top_k=self.k,
-        )
-        # moe_out: (B, S, D) — weighted sum of expert outputs via CUDA kernel
+    def _moe_forward(self, x: torch.Tensor, device: torch.device) -> torch.Tensor:
+        """MoE forward: torch routing (identical to the other tracks) + CUDA SwiGLU experts.
 
-        # Residual: h + moe_out
-        out = h + moe_out  # (B, S, D)
+        scores = x @ router            (B, S, E)
+        probs  = softmax(scores)       (B, S, E)
+        top-k mask + renormalize       (B, S, E)
+        out    = Σ_j probs_j · SwiGLU_j(x)   (B, S, D)
 
-        # Post-norm: RMSNorm via CUDA kernel
-        out = rmsnorm(out, ln2_gamma)  # (B, S, D)
+        Every expert is computed and multiplied by its (possibly zero)
+        weight — the math is identical to the gathered-token variant.
+        """
+        E = self.n_experts
+        router = self.router.to(device)
+        eg = self.expert_gate_proj.to(device)
+        eu = self.expert_up_proj.to(device)
+        ed = self.expert_down_proj.to(device)
 
-        # Gated residual: out = out + sigmoid(gate2) * out
-        gate2_sigmoid = torch.sigmoid(gate2)
-        out = out + gate2_sigmoid * out  # (B, S, D)
+        # Router scores and softmax over all experts: (B, S, E)
+        scores = x @ router  # (B, S, E)
+        scores = scores - scores.max(dim=-1, keepdim=True).values
+        exp_scores = torch.exp(scores)
+        probs = exp_scores / exp_scores.sum(dim=-1, keepdim=True)  # (B, S, E)
 
-        # Dropout (training only)
-        if training and dropout > 0.0:
-            out = torch.nn.functional.dropout(out, p=dropout, training=True)
+        # Top-k mask: keep the k largest probs per token, zero the rest.
+        if self.config.top_k < E:
+            kth_vals, _ = torch.topk(probs, self.config.top_k, dim=-1)  # (B, S, k)
+            threshold = kth_vals[..., -1:].expand_as(probs)  # (B, S, E)
+            probs = torch.where(probs >= threshold, probs, torch.zeros_like(probs))
+            probs = probs / torch.clamp(probs.sum(dim=-1, keepdim=True), min=1e-8)  # renormalize
 
+        # Weighted sum of expert outputs (CUDA SwiGLU per expert).
+        out = torch.zeros_like(x)  # (B, S, D)
+        for expert_idx in range(E):
+            w = probs[..., expert_idx : expert_idx + 1]  # (B, S, 1)
+            expert_out = swiglu_ffn(x, eg[expert_idx], eu[expert_idx], ed[expert_idx])  # (B, S, D)
+            out = out + w * expert_out
         return out

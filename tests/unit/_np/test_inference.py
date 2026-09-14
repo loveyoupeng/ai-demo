@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from shared.config import TransformerConfig
+
 if TYPE_CHECKING:
     from impl._np.model import NumPyModel
 
@@ -22,15 +24,18 @@ class TestTextGenerator:
         from impl._np.model import NumPyModel
 
         return NumPyModel(
-            vocab_size=16,
-            embed_dim=8,
-            n_layers=1,
-            n_heads=2,
-            n_experts=2,
-            ff_dim=16,
-            k=1,
-            rope_dim=0,
-            seed=0,
+            TransformerConfig(
+                vocab_size=16,
+                embed_dim=8,
+                n_layers=1,
+                n_heads=2,
+                n_groups=2,
+                n_experts=2,
+                expert_dim=16,
+                top_k=1,
+                rope_dim=0,
+                seed=0,
+            ),
         )
 
     def test_greedy_deterministic(self) -> None:

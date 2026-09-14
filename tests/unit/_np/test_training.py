@@ -6,25 +6,31 @@ accumulation produces correct results.
 
 import numpy as np
 
+from shared.config import TransformerConfig
+
 
 def _make_tiny_model():
-    """Create the smallest feasible model for fast numerical gradient testing.
+    """Create the smallest feasible model for fast gradient testing.
 
     Config: vocab=4, embed_dim=4, layers=1, heads=1, experts=2, ff_dim=4, k=1, rope_dim=0
-    This keeps parameter count low enough for numerical backward to complete within tests.
+    This keeps parameter count low enough for the analytic backward to
+    complete quickly within tests.
     """
     from impl._np.model import NumPyModel
 
     return NumPyModel(
-        vocab_size=4,
-        embed_dim=4,
-        n_layers=1,
-        n_heads=1,
-        n_experts=2,
-        ff_dim=4,
-        k=1,
-        rope_dim=0,
-        seed=0,
+        TransformerConfig(
+            vocab_size=4,
+            embed_dim=4,
+            n_layers=1,
+            n_heads=1,
+            n_groups=1,
+            n_experts=2,
+            expert_dim=4,
+            top_k=1,
+            rope_dim=0,
+            seed=0,
+        ),
     )
 
 
@@ -61,7 +67,7 @@ class TestTrainingLoop:
             total_delta += np.sum(np.abs(current_param - initial_param))
 
         # With 5 backward/forward cycles, at least some params should change
-        # due to numerical gradients; allow a small threshold
+        # due to the analytic gradients; allow a small threshold
         assert total_delta > 1e-6, f"Parameters did not change after training: total_delta={total_delta}"
 
     def test_gradient_accumulation(self):
@@ -109,8 +115,8 @@ class TestTrainingLoop:
             final_loss = train_step(model, batch_input, batch_target, loss_fn, optimizer)
             assert np.isfinite(final_loss), f"Loss not finite at step {i + 1}: {final_loss}"
 
-        # The final loss should be lower than initial — with numerical gradients
-        # we use a wider tolerance since early steps may be affected by noise.
+        # The final loss should be lower than initial; we use a wider tolerance
+        # since the tiny model needs several steps to adapt.
         # After 16 steps with lr=0.05, the model should have adapted to some extent.
         assert initial_loss > 0, f"Expected positive initial loss, got {initial_loss}"
         if final_loss < initial_loss:

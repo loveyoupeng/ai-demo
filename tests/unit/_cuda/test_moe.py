@@ -30,16 +30,13 @@ class TestMoERouting:
         expert_bias = torch.zeros(N, D, dtype=torch.float32, device="cuda")
         routing_weights = torch.randn(N, D, dtype=torch.float32, device="cuda")
 
-        out_cuda, indices, weights = moe_forward(
-            tokens, expert_weights, expert_bias, routing_weights, top_k=K
-        )
+        out_cuda, indices, weights = moe_forward(tokens, expert_weights, expert_bias, routing_weights, top_k=K)
 
         # Reference: compute expert outputs, routing scores, top-k
         # expert_outputs[b, s, n, d] = tokens[b, s] @ expert_weights[n] + bias[n][d]
-        expert_outputs = torch.stack([
-            torch.nn.functional.linear(tokens, expert_weights[n])
-            for n in range(N)
-        ], dim=2)  # (B, S, N, D)
+        expert_outputs = torch.stack(
+            [torch.nn.functional.linear(tokens, expert_weights[n]) for n in range(N)], dim=2
+        )  # (B, S, N, D)
 
         # Routing: scores[b,s,n] = tokens[b,s] ⋅ routing_weights[n]
         # F.linear(tokens, routing_weights) where routing_weights is (N, D)
@@ -57,10 +54,7 @@ class TestMoERouting:
                     out_ref[b, s] += topk_weights[b, s, k_val] * expert_outputs[b, s, idx]
 
         assert out_cuda.shape == (B, S, D)
-        torch.testing.assert_close(
-            out_cuda, out_ref, rtol=1e-3, atol=1e-3,
-            msg="CUDA MoE != torch MoE (f32)"
-        )
+        torch.testing.assert_close(out_cuda, out_ref, rtol=1e-3, atol=1e-3, msg="CUDA MoE != torch MoE (f32)")
 
     @pytest.mark.timeout(30)
     def test_topk_matches_torch_float64(self):
@@ -75,15 +69,12 @@ class TestMoERouting:
         expert_bias = torch.zeros(N, D, dtype=torch.float64, device="cuda")
         routing_weights = torch.randn(N, D, dtype=torch.float64, device="cuda")
 
-        out_cuda, indices, _w = moe_forward(
-            tokens, expert_weights, expert_bias, routing_weights, top_k=K
-        )
+        out_cuda, indices, _w = moe_forward(tokens, expert_weights, expert_bias, routing_weights, top_k=K)
 
         # Reference
-        expert_outputs = torch.stack([
-            torch.nn.functional.linear(tokens, expert_weights[n])
-            for n in range(N)
-        ], dim=2)  # (B, S, N, D)
+        expert_outputs = torch.stack(
+            [torch.nn.functional.linear(tokens, expert_weights[n]) for n in range(N)], dim=2
+        )  # (B, S, N, D)
         scores = torch.nn.functional.linear(tokens, routing_weights)  # (B, S, N)
 
         topk_scores, topk_idx = torch.topk(scores, K, dim=-1)
@@ -96,10 +87,7 @@ class TestMoERouting:
                     idx = int(topk_idx[b, s, k_val])
                     out_ref[b, s] += topk_weights[b, s, k_val] * expert_outputs[b, s, idx]
 
-        torch.testing.assert_close(
-            out_cuda, out_ref, rtol=1e-3, atol=1e-3,
-            msg="CUDA MoE != torch MoE (f64)"
-        )
+        torch.testing.assert_close(out_cuda, out_ref, rtol=1e-3, atol=1e-3, msg="CUDA MoE != torch MoE (f64)")
 
 
 # ================================================================
@@ -124,29 +112,25 @@ class TestMoEExpertOutputsLayout:
 
     @pytest.mark.timeout(30)
     def test_expert_outputs_stack_shape(self):
-        """ torch.stack(..., dim=2) produces (B, S, N, D). """
+        """torch.stack(..., dim=2) produces (B, S, N, D)."""
         skip_if_no_gpu()
         B, S, D, N = 2, 3, 4, 5
         tokens = torch.randn(B, S, D, device="cuda")
         expert_weights = torch.randn(N, D, D, device="cuda")
-        expert_outputs = torch.stack([
-            torch.nn.functional.linear(tokens, expert_weights[n])
-            for n in range(N)
-        ], dim=2)
+        expert_outputs = torch.stack([torch.nn.functional.linear(tokens, expert_weights[n]) for n in range(N)], dim=2)
         assert expert_outputs.shape == (B, S, N, D)
 
     @pytest.mark.timeout(30)
     def test_expert_outputs_view_layout(self):
-        """ (B, S, N, D).view(B*S, N, D) should give (total_tokens, N, D)
-        where view(token_idx, expert_id, value_idx) gives correct data. """
+        """(B, S, N, D).view(B*S, N, D) should give (total_tokens, N, D)
+        where view(token_idx, expert_id, value_idx) gives correct data."""
         skip_if_no_gpu()
         B, S, D, N = 2, 3, 4, 5
         tokens = torch.randn(B, S, D, device="cuda")
         expert_weights = torch.randn(N, D, D, device="cuda")
-        exp_out = torch.stack([
-            torch.nn.functional.linear(tokens, expert_weights[n])
-            for n in range(N)
-        ], dim=2)  # (B, S, N, D)
+        exp_out = torch.stack(
+            [torch.nn.functional.linear(tokens, expert_weights[n]) for n in range(N)], dim=2
+        )  # (B, S, N, D)
 
         total = B * S
         flat = exp_out.view(total, N, D)
@@ -159,15 +143,12 @@ class TestMoEExpertOutputsLayout:
 
     @pytest.mark.timeout(30)
     def test_expert_outputs_contiguous(self):
-        """ expert_outputs.view(total, N, D) must be contiguous for kernel. """
+        """expert_outputs.view(total, N, D) must be contiguous for kernel."""
         skip_if_no_gpu()
         B, S, D, N = 2, 3, 4, 5
         tokens = torch.randn(B, S, D, device="cuda")
         expert_weights = torch.randn(N, D, D, device="cuda")
-        exp_out = torch.stack([
-            torch.nn.functional.linear(tokens, expert_weights[n])
-            for n in range(N)
-        ], dim=2)
+        exp_out = torch.stack([torch.nn.functional.linear(tokens, expert_weights[n]) for n in range(N)], dim=2)
         flat = exp_out.view(_total_tokens := B * S, N, D)
         assert flat.is_contiguous(), "expert_outputs.view() is not contiguous!"
 
@@ -199,7 +180,7 @@ class TestMoETopkRouting:
 
     @pytest.mark.timeout(30)
     def test_topk_idx_values_valid(self):
-        """ All topk_idx values must be in range [0, n_experts). """
+        """All topk_idx values must be in range [0, n_experts)."""
         skip_if_no_gpu()
         B, S, D, N, K = 2, 3, 4, 5, 2
         tokens = torch.randn(B, S, D, device="cuda")
@@ -211,8 +192,8 @@ class TestMoETopkRouting:
 
     @pytest.mark.timeout(30)
     def test_flat_view_order(self):
-        """ (B, S, K).view(-1) should give [topk_idx[0,0,0], topk_idx[0,0,1],
-            topk_idx[0,1,0], topk_idx[0,1,1], topk_idx[1,0,0], ...] """
+        """(B, S, K).view(-1) should give [topk_idx[0,0,0], topk_idx[0,0,1],
+        topk_idx[0,1,0], topk_idx[0,1,1], topk_idx[1,0,0], ...]"""
         skip_if_no_gpu()
         B, S, K = 2, 3, 2
         topk_idx = torch.arange(B * S * K, device="cuda").view(B, S, K)
@@ -222,8 +203,8 @@ class TestMoETopkRouting:
 
     @pytest.mark.timeout(30)
     def test_indices_weights_flat_alignment(self):
-        """ idx_flat[i * top_k + k] and w_flat[i * top_k + k] should correspond
-        to the same (token, expert) pair. """
+        """idx_flat[i * top_k + k] and w_flat[i * top_k + k] should correspond
+        to the same (token, expert) pair."""
         skip_if_no_gpu()
         B, S, D, N, K = 2, 3, 4, 5, 2
         tokens = torch.randn(B, S, D, device="cuda")
@@ -244,7 +225,7 @@ class TestMoETopkRouting:
 
     @pytest.mark.timeout(30)
     def test_flat_contiguous(self):
-        """ idx_flat and w_flat must be contiguous for GPU kernel. """
+        """idx_flat and w_flat must be contiguous for GPU kernel."""
         skip_if_no_gpu()
         B, S, D, N, K = 2, 3, 4, 5, 2
         tokens = torch.randn(B, S, D, device="cuda")
@@ -275,10 +256,14 @@ class TestMoEWrtapedSumManual:
         from impl._cuda.moe import _launch_moe_weighted_sum_kernel, _MoeKernels
 
         # 2 tokens, 2 experts, dim=2 → expert_outputs = (2, 2, 2)
-        expert_outputs = torch.tensor([
-            [[1.0, 2.0], [3.0, 4.0]],   # token 0: expert 0 = [1,2], expert 1 = [3,4]
-            [[5.0, 6.0], [7.0, 8.0]],   # token 1: expert 0 = [5,6], expert 1 = [7,8]
-        ], dtype=torch.float32, device="cuda")
+        expert_outputs = torch.tensor(
+            [
+                [[1.0, 2.0], [3.0, 4.0]],  # token 0: expert 0 = [1,2], expert 1 = [3,4]
+                [[5.0, 6.0], [7.0, 8.0]],  # token 1: expert 0 = [5,6], expert 1 = [7,8]
+            ],
+            dtype=torch.float32,
+            device="cuda",
+        )
 
         # For token 0: top_k_idx = [0, 1] (expert 0 and expert 1)
         # For token 1: top_k_idx = [0, 1] (expert 0 and expert 1)
@@ -288,17 +273,27 @@ class TestMoEWrtapedSumManual:
 
         _MoeKernels.get_weighted_sum_f32_kernel()
         _launch_moe_weighted_sum_kernel(
-            expert_outputs, topk_idx, topk_weights, output,
-            total_tokens=2, dim=2, n_experts=2, top_k=2,
+            expert_outputs,
+            topk_idx,
+            topk_weights,
+            output,
+            total_tokens=2,
+            dim=2,
+            n_experts=2,
+            top_k=2,
         )
 
         # Expected:
         # out[0] = 0.6 * [1,2] + 0.4 * [3,4] = [0.6+1.2, 1.2+1.6] = [1.8, 2.8]
         # out[1] = 0.7 * [5,6] + 0.3 * [7,8] = [3.5+2.1, 4.2+2.4] = [5.6, 6.6]
-        expected = torch.tensor([
-            [1.8, 2.8],
-            [5.6, 6.6],
-        ], dtype=torch.float32, device="cuda")
+        expected = torch.tensor(
+            [
+                [1.8, 2.8],
+                [5.6, 6.6],
+            ],
+            dtype=torch.float32,
+            device="cuda",
+        )
 
         torch.testing.assert_close(output, expected, rtol=1e-4, atol=1e-4)
 
@@ -312,18 +307,28 @@ class TestMoEWrtapedSumManual:
         skip_if_no_gpu()
         from impl._cuda.moe import _launch_moe_weighted_sum_kernel
 
-        expert_outputs = torch.tensor([
-            [[10.0, 20.0], [30.0, 40.0]],
-            [[50.0, 60.0], [70.0, 80.0]],
-        ], dtype=torch.float32, device="cuda")
+        expert_outputs = torch.tensor(
+            [
+                [[10.0, 20.0], [30.0, 40.0]],
+                [[50.0, 60.0], [70.0, 80.0]],
+            ],
+            dtype=torch.float32,
+            device="cuda",
+        )
 
         topk_idx = torch.tensor([1, 1], dtype=torch.long, device="cuda")  # top_k=1
         topk_weights = torch.tensor([1.0, 1.0], dtype=torch.float32, device="cuda")
         output = torch.zeros((2, 2), dtype=torch.float32, device="cuda")
 
         _launch_moe_weighted_sum_kernel(
-            expert_outputs, topk_idx, topk_weights, output,
-            total_tokens=2, dim=2, n_experts=2, top_k=1,
+            expert_outputs,
+            topk_idx,
+            topk_weights,
+            output,
+            total_tokens=2,
+            dim=2,
+            n_experts=2,
+            top_k=1,
         )
 
         expected = torch.tensor([[30.0, 40.0], [70.0, 80.0]], device="cuda")
@@ -335,17 +340,27 @@ class TestMoEWrtapedSumManual:
         skip_if_no_gpu()
         from impl._cuda.moe import _launch_moe_weighted_sum_kernel
 
-        expert_outputs = torch.tensor([
-            [[1.0, 2.0], [100.0, 200.0]],  # expert 1 has huge output
-        ], dtype=torch.float32, device="cuda")
+        expert_outputs = torch.tensor(
+            [
+                [[1.0, 2.0], [100.0, 200.0]],  # expert 1 has huge output
+            ],
+            dtype=torch.float32,
+            device="cuda",
+        )
 
         topk_idx = torch.tensor([0, 1], dtype=torch.long, device="cuda")
         topk_weights = torch.tensor([1.0, 0.0], dtype=torch.float32, device="cuda")
         output = torch.zeros((1, 2), dtype=torch.float32, device="cuda")
 
         _launch_moe_weighted_sum_kernel(
-            expert_outputs, topk_idx, topk_weights, output,
-            total_tokens=1, dim=2, n_experts=2, top_k=2,
+            expert_outputs,
+            topk_idx,
+            topk_weights,
+            output,
+            total_tokens=1,
+            dim=2,
+            n_experts=2,
+            top_k=2,
         )
 
         # Only expert 0 should contribute
@@ -368,8 +383,14 @@ class TestMoEWeightedSumKernelLaunch:
         output = torch.zeros((2, 4), dtype=torch.float32, device="cuda")
 
         _launch_moe_weighted_sum_kernel(
-            expert_outputs, topk_idx, topk_weights, output,
-            total_tokens=2, dim=4, n_experts=2, top_k=2,
+            expert_outputs,
+            topk_idx,
+            topk_weights,
+            output,
+            total_tokens=2,
+            dim=4,
+            n_experts=2,
+            top_k=2,
         )
 
         # All values should be 0.5 (0.5*0.5 + 0.5*0.5 = 0.5)
@@ -388,8 +409,14 @@ class TestMoEWeightedSumKernelLaunch:
         output = torch.zeros((6, 8), dtype=torch.float32, device="cuda")
 
         _launch_moe_weighted_sum_kernel(
-            expert_outputs, topk_idx, topk_weights, output,
-            total_tokens=6, dim=8, n_experts=4, top_k=2,
+            expert_outputs,
+            topk_idx,
+            topk_weights,
+            output,
+            total_tokens=6,
+            dim=8,
+            n_experts=4,
+            top_k=2,
         )
 
         assert output.shape == (6, 8)
@@ -414,14 +441,11 @@ class TestMoEE2ERegression:
         expert_bias = torch.zeros(N, D, dtype=torch.float32, device="cuda")
         routing_weights = torch.randn(N, D, dtype=torch.float32, device="cuda")
 
-        out_cuda, indices, weights = moe_forward(
-            tokens, expert_weights, expert_bias, routing_weights, top_k=K
-        )
+        out_cuda, indices, weights = moe_forward(tokens, expert_weights, expert_bias, routing_weights, top_k=K)
 
-        expert_outputs = torch.stack([
-            torch.nn.functional.linear(tokens, expert_weights[n])
-            for n in range(N)
-        ], dim=2)  # (B, S, N, D)
+        expert_outputs = torch.stack(
+            [torch.nn.functional.linear(tokens, expert_weights[n]) for n in range(N)], dim=2
+        )  # (B, S, N, D)
 
         scores = torch.nn.functional.linear(tokens, routing_weights)  # (B, S, N)
         topk_scores, topk_idx = torch.topk(scores, K, dim=-1)
@@ -435,7 +459,4 @@ class TestMoEE2ERegression:
                     out_ref[b, s] += topk_weights[b, s, k_val] * expert_outputs[b, s, idx]
 
         assert out_cuda.shape == (B, S, D)
-        torch.testing.assert_close(
-            out_cuda, out_ref, rtol=1e-3, atol=1e-3,
-            msg="CUDA MoE != torch MoE (f32)"
-        )
+        torch.testing.assert_close(out_cuda, out_ref, rtol=1e-3, atol=1e-3, msg="CUDA MoE != torch MoE (f32)")
