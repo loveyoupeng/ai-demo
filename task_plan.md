@@ -32,6 +32,7 @@ NumPy PyT Trit CUDA (4 backends, same structure)
 | G | Weight Diff Tests | ✅ Done | 10 | (multiple) |
 | H | Logging Architecture | ✅ Done | — | (current) |
 | Arch | Architecture Fixes: Standardize + Interchange + Backprop + Causal Mask + KV Cache + PyTorch Idioms + Flash Kernel + Docs & Naming | ✅ Done (2026-09-14) | 406 np+torch / 103 triton / 99 cuda unit, 42 cross-backend, 6/6 equivalence scenarios | uncommitted |
+| I | Learning Mode: NumPy CLI web host, architecture + math visualization, inference records, demo model | ✅ Done (2026-09-16) | 23 learning tests; green bar 429 np+torch / 103 triton / 99 cuda / 42 cross, 6/6 equivalence | (pending) |
 
 ## CLI Commands
 ```bash
@@ -361,3 +362,28 @@ EDUCATIONAL:
 - NVIDIA Jetson AGX Orin 64GB, JetPack 6.2.2, CUDA 12.6, ~20 TFLOPS
 - Must use `torch.zeros()`/`torch.ones()` for tensor init (never `torch.empty()`)
 - nvgpu driver requires contiguous tensors for `copy_()`
+
+## Phase I: Learning Mode (web learning page on the NumPy track)
+
+> **Goal:** an opt-in `--learning` mode on the NumPy inference CLI that hosts a webpage where the user can load a trained model (server-side `--model`, default: the demo model), submit text, see the architecture with the *actual numbers* at every stage, click any generated token → any component to inspect the math, and download a full **inference record**.
+
+### I.1 Design (settled in grilling session, 2026-09-16)
+
+| Decision | Choice |
+|----------|--------|
+| Server | stdlib `http.server` only — zero new dependencies (KISS) |
+| Entry point | `impl/_np/cli.py --learning [--port 8000] [--model resource/models/learning_demo]`; lazy import — flag off = zero impact |
+| NumPy track changes | none — the **instrumented forward** (`impl/_np/learning.py`) is an overlay that recomputes component math from public parameters; `impl/_np` components stay untouched and readable |
+| Model loading | server-side checkpoint dir via `--model` (no page upload); any repo checkpoint works |
+| Demo model | char vocab V=20 (top-19 TinyStories letters + space), D=8, H=4, L=3, E=3 MoE, ctx=32, trained on TinyStories (reproducible via `scripts/train_demo_model.py`), saved to `resource/models/learning_demo/` + `vocab.json` sidecar |
+| Vocab persistence | optional `vocab.json` (token string list) next to the checkpoint; learning mode requires it for text I/O |
+| Page | single vanilla-JS `index.html` in `impl/_np/web/`; KaTeX vendored (offline Jetson) with plain-text formula fallbacks |
+| Display | all positions (small model); per-component formula cards; token picker → component click → detail (e.g. MHA shows Q/K/V math, scores, attention weights) |
+| Records | per-token capture of every intermediate as JSON — in-page panels + download; default generation = seeded sampling (T=0.8, top-k=10) with greedy toggle |
+
+### I.2 Acceptance
+
+- `--learning` serves the page; submitting text returns generated tokens + per-step numbers; without the flag the CLI behaves exactly as before
+- demo model: `resource/models/learning_demo/` loads via `load_checkpoint`; generated text is word-like (not random)
+- record JSON contains every intermediate listed in I.1 for every token step
+- unit tests: instrumented forward ≡ NumPyModel.forward; server endpoints over a live socket; demo model loads + generates

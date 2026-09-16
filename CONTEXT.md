@@ -126,6 +126,16 @@ docs, and tests.
   smaller than the full-precision cache. See
   `impl/_np/turboquant_kv_cache.py` and the parity-budget test.
 
+
+## Learning Mode
+
+- **Learning mode**: the opt-in extension of the NumPy CLI (`--learning`) that hosts a web page for interactive inference — architecture visualization, the actual numbers at every step with click-to-inspect detail, and downloadable inference records. Off by default; when off it has no impact on the NumPy track.
+
+- **Inference record**: the per-token capture of every forward intermediate — embedding through each block's attention/FFN (or MoE) tensors, final norm, logits, and the sampled token — serialized as JSON for the page and for download.
+
+- **Instrumented forward**: the overlay that runs the model's own components and recomputes each component's math from its public parameters to capture intermediates, without modifying the NumPy track (the components stay untouched and readable as teaching code).
+
+- **Demo model**: the pretrained toy model — char-level vocabulary (V=20), D=8, H=4, L=3, E=3 MoE — exported to `resource/models/learning_demo/` (checkpoint + `vocab.json`). The learning mode's default model.
 ## Tracks
 
 - **NumPy track** (`impl/_np/`): the math reference. Hand-rolled

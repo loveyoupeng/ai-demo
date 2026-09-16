@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Learning Mode — decoder-only transformer, step by step</title>
+<link rel="stylesheet" href="/katex/katex.min.css">
+<script defer src="/katex/katex.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1e222c; --line: #2a2f3a;
+    --fg: #e6e9ef; --dim: #9aa3b2; --accent: #5aa9ff; --accent2: #7dcb6f;
+    --warn: #e0a35e; --hot: #ff7a59;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, sans-serif; }
+  h1 { font-size: 1.25rem; margin: 0; }
+  h2 { font-size: 1rem; margin: 0 0 8px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+  header { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+  .badges { display: flex; flex-wrap: wrap; gap: 6px; }
+  .badge { background: var(--panel2); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: .78rem; color: var(--dim); }
+  .badge b { color: var(--fg); font-weight: 600; }
+  main { display: grid; grid-template-columns: 1fr; gap: 14px; padding: 14px 18px; max-width: 1500px; margin: 0 auto; }
+  @media (min-width: 1100px) { main.record-open { grid-template-columns: 520px 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  label { font-size: .8rem; color: var(--dim); display: block; margin: 8px 0 3px; }
+  input[type=text], input[type=number], select { background: var(--panel2); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; width: 100%; font: inherit; }
+  input[type=number] { width: 90px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+  .row > div { min-width: 90px; }
+  .grow { flex: 1; min-width: 160px; }
+  button { background: var(--accent); color: #04121f; border: 0; border-radius: 8px; padding: 9px 16px; font: inherit; font-weight: 600; cursor: pointer; }
+  button.secondary { background: var(--panel2); color: var(--fg); border: 1px solid var(--line); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+  .chip { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; font-family: ui-monospace, monospace; font-size: .9rem; }
+  .chip small { color: var(--dim); }
+  .chip.gen { border-color: var(--accent2); color: var(--accent2); }
+  .big-text { font-size: 1.5rem; font-family: ui-monospace, monospace; letter-spacing: .15em; margin: 6px 0; word-break: break-all; }
+  .topbars { margin-top: 10px; }
+  .bar-row { display: grid; grid-template-columns: 70px 1fr 60px; gap: 8px; align-items: center; font-size: .85rem; margin: 3px 0; }
+  .bar { height: 14px; background: var(--panel2); border-radius: 4px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .bar-row .p { text-align: right; color: var(--dim); font-family: ui-monospace, monospace; }
+  #diagram { width: 100%; }
+  #diagram .node { cursor: pointer; }
+  #diagram .node rect { fill: var(--panel2); stroke: var(--line); stroke-width: 1.5; rx: 8; transition: stroke .15s; }
+  #diagram .node:hover rect { stroke: var(--accent); }
+  #diagram .node.active rect { stroke: var(--accent); stroke-width: 2.5; fill: #1c2c42; }
+  #diagram .node text { fill: var(--fg); font-size: 12px; font-family: system-ui, sans-serif; pointer-events: none; }
+  #diagram .node .sub { fill: var(--dim); font-size: 10px; }
+  #diagram line { stroke: var(--line); stroke-width: 1.5; }
+  #inspector { min-height: 300px; }
+  #inspector .matwrap { overflow-x: auto; }
+  .heat { display: grid; gap: 1px; margin: 6px 0; width: max-content; }
+  .heat i { width: 16px; height: 16px; border-radius: 3px; background: var(--panel2); }
+  .heat i.tiny { width: 11px; height: 11px; }
+  .matlabel { font-size: .78rem; color: var(--dim); margin-top: 10px; }
+  .formula { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 10px 0; overflow-x: auto; color: var(--fg); }
+  .formula .katex { font-size: 1.02em; }
+  .note { color: var(--dim); font-size: .85rem; }
+  .steps { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
+  .step { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; font-family: ui-monospace, monospace; font-size: .85rem; cursor: pointer; }
+  .step.active { border-color: var(--accent); color: var(--accent); }
+  .step small { color: var(--dim); }
+  .sel-head { display: flex; gap: 4px; flex-wrap: wrap; margin: 8px 0; }
+  .sel-head button { padding: 4px 10px; font-size: .8rem; background: var(--panel2); color: var(--dim); border: 1px solid var(--line); }
+  .sel-head button.on { border-color: var(--accent); color: var(--accent); background: #1c2c42; }
+  #status { min-height: 1.2em; font-size: .85rem; color: var(--dim); }
+  .kv { font-size: .8rem; color: var(--dim); margin: 4px 0; font-family: ui-monospace, monospace; }
+  a { color: var(--accent); }
+  #record-panel { display: none; }
+  main.record-open #record-panel { display: block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Learning Mode</h1>
+  <div class="badges" id="badges"><span class="badge">loading model…</span></div>
+</header>
+<main id="main">
+  <section>
+    <h2>Prompt</h2>
+    <label>Input text (chars outside the vocab are skipped and marked)</label>
+    <input type="text" id="prompt" value="the she to" spellcheck="false">
+    <div class="chips" id="prompt-chips"></div>
+    <div class="row" style="margin-top:10px">
+      <div><label>Tokens to generate</label><input type="number" id="ntokens" value="8" min="1" max="32"></div>
+      <div><label>Temperature (greedy = off)</label>
+        <select id="temp">
+          <option value="greedy">greedy</option>
+          <option value="0.5">0.5</option>
+          <option value="0.8" selected>0.8</option>
+          <option value="1.0">1.0</option>
+          <option value="1.5">1.5</option>
+        </select>
+      </div>
+      <div><label>Top-k (0 = off)</label><input type="number" id="topk" value="10" min="0" max="50"></div>
+      <div><label>Seed</label><input type="number" id="seed" value="42" min="0"></div>
+      <div><button id="btn-gen">Generate</button></div>
+      <div><button id="btn-rec" class="secondary">Generate + record</button></div>
+      <div><button id="btn-dl" class="secondary" disabled>Download record JSON</button></div>
+    </div>
+    <div id="status"></div>
+    <section style="background:var(--panel2); margin-top:12px; border-color:var(--line)">
+      <h2>Generated</h2>
+      <div class="big-text" id="gen-text"></div>
+      <div class="chips" id="gen-chips"></div>
+      <div class="topbars" id="gen-top"></div>
+    </section>
+  </section>
+
+  <section id="record-panel">
+    <h2>Inference record</h2>
+    <div class="kv" id="rec-meta"></div>
+    <div class="steps" id="rec-steps"></div>
+    <div class="row" style="margin-top:6px">
+      <div><button id="btn-play" class="secondary">▶ play</button></div>
+      <div class="note">Click any block in the diagram to inspect its exact numbers.</div>
+    </div>
+    <div id="diagram-holder" style="margin-top:10px"></div>
+    <section style="margin-top:12px" id="inspector">
+      <h2 id="ins-title">Inspector</h2>
+      <div id="ins-body"><p class="note">Pick a node in the diagram (or a step) to see its tensors and math.</p></div>
+    </section>
+  </section>
+</main>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------------------
+// State + API
+// ---------------------------------------------------------------------------
+let MODEL = null;      // /api/model response
+let RECORD = null;     // last /api/record response
+let CUR_STEP = 0;      // selected step index
+let CUR_NODE = "softmax";
+let HEAD = 0;          // selected attention head
+let PLAY_TIMER = null;
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function setStatus(msg) { $("status").textContent = msg || ""; }
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body ? "POST" : "GET",
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || (r.status + " " + r.statusText));
+  return j;
+}
+
+function promptParams() {
+  const t = $("temp").value;
+  return {
+    text: $("prompt").value,
+    n_tokens: Math.max(1, Math.min(32, parseInt($("ntokens").value || "8", 10))),
+    temperature: t === "greedy" ? null : parseFloat(t),
+    top_k: parseInt($("topk").value || "0", 10),
+    seed: parseInt($("seed").value || "42", 10),
+  };
+}
+
+function tokenizePreview(text) {
+  if (!MODEL || !MODEL.vocab) return;
+  const idx = Object.fromEntries(MODEL.vocab.map((c, i) => [c, i]));
+  const chips = [];
+  let skipped = 0;
+  for (const ch of text.toLowerCase()) {
+    if (ch in idx) {
+      chips.push(`<span class="chip" title="token ${idx[ch]}">${esc(ch)} <small>${idx[ch]}</small></span>`);
+    } else if (ch.trim() !== "") {
+      skipped++;
+      chips.push(`<span class="chip" style="opacity:.4;text-decoration:line-through" title="not in vocab">${esc(ch)}</span>`);
+    }
+  }
+  $("prompt-chips").innerHTML = chips.join("") + (skipped ? `<span class="note">${skipped} char(s) skipped (not in vocab)</span>` : "");
+}
+
+// ---------------------------------------------------------------------------
+// Heatmaps / bars (pure divs — matrices here are tiny)
+// ---------------------------------------------------------------------------
+function heatCSS(v, min, max) {
+  // diverging: negative → hot (red), positive → cool (blue)
+  const t = max > min ? (v - min) / (max - min) : 0.5;
+  const r = Math.round(23 + 200 * (1 - t));
+  const g = Math.round(27 + 90 * t);
+  const b = Math.round(42 + 160 * t);
+  return `rgb(${r},${g},${b})`;
+}
+
+function heatGrid(matrix, { cell = 16, title = "", labels = null, rows = null } = {}) {
+  if (matrix.length === 1 && Array.isArray(matrix[0]) && Array.isArray(matrix[0][0]) && matrix[0].length > 1) matrix = matrix[0]; // record arrays are (1, …) — drop the batch dim
+  const rowsArr = rows || matrix.length;
+  const cols = matrix[0]?.length || 0;
+  let min = Infinity, max = -Infinity;
+  for (const r of matrix) for (const v of r) { if (v < min) min = v; if (v > max) max = v; }
+  if (!isFinite(min)) { min = 0; max = 1; }
+  const el = document.createElement("div");
+  el.className = "heat";
+  el.style.gridTemplateColumns = `repeat(${cols}, ${cell}px)`;
+  for (let i = 0; i < rowsArr; i++) {
+    for (let j = 0; j < cols; j++) {
+      const c = document.createElement("i");
+      if (cell <= 12) c.className = "tiny";
+      const v = matrix[i][j];
+      c.style.background = heatCSS(v, min, max);
+      c.title = `${title} [${i}][${j}] = ${v.toFixed(4)}` + (labels && labels[j] !== undefined ? ` (${labels[j]})` : "");
+      el.appendChild(c);
+    }
+  }
+  el.insertAdjacentHTML("beforeend", "");
+  return el;
+}
+
+function barChart(values, labels, { maxW = 200 } = {}) {
+  const max = Math.max(...values, 1e-9);
+  const wrap = document.createElement("div");
+  wrap.className = "topbars";
+  values.forEach((v, i) => {
+    const row = document.createElement("div");
+    row.className = "bar-row";
+    const w = Math.round((Math.abs(v) / max) * maxW);
+    row.innerHTML = `<span>${esc(labels?.[i] ?? i)}</span><span class="bar"><i style="width:${w}px"></i></span><span class="p">${v.toFixed(4)}</span>`;
+    wrap.appendChild(row);
+  });
+  return wrap;
+}
+
+function matLabel(text) {
+  const el = document.createElement("div");
+  el.className = "matlabel";
+  el.textContent = text;
+  return el;
+}
+
+function formula(tex, note) {
+  const el = document.createElement("div");
+  el.className = "formula";
+  const k = document.createElement("span");
+  el.appendChild(k);
+  el.dataset.tex = tex;
+  renderTex(el);
+  if (note) {
+    const n = document.createElement("div");
+    n.className = "note";
+    n.textContent = note;
+    el.appendChild(n);
+  }
+  return el;
+}
+
+function renderTex(el) {
+  if (!window.katex) return;
+  try {
+    window.katex.render(el.dataset.tex, el, { throwOnError: false, displayMode: true });
+  } catch (e) { el.textContent = el.dataset.tex; }
+}
+
+// ---------------------------------------------------------------------------
+// Bootstrap: model info + badges
+// ---------------------------------------------------------------------------
+async function init() {
+  MODEL = await api("/api/model");
+  const c = MODEL.config;
+  const badges = [
+    [`V = ${c.vocab_size}`, "vocab size"],
+    [`D = ${c.embed_dim}`, "embed dim"],
+    [`L = ${c.n_layers}`, "layers"],
+    [`H = ${c.n_heads}`, "heads"],
+    [`ctx = ${c.context_length}`, "context"],
+  ];
+  if (MODEL.has_moe) badges.push([`E = ${c.n_experts}`, "MoE experts (top-k " + c.top_k + ")"]);
+  badges.push([`${MODEL.n_params.toLocaleString()}`, "parameters"]);
+  $("badges").innerHTML = badges.map(([v, t]) => `<span class="badge" title="${t}"><b>${v}</b> ${t}</span>`).join("");
+  if (!MODEL.has_vocab) setStatus("This checkpoint has no vocab.json — text input unavailable.");
+  $("prompt").addEventListener("input", () => tokenizePreview($("prompt").value));
+  tokenizePreview($("prompt").value);
+}
+
+// ---------------------------------------------------------------------------
+// Quick generation (/api/inference)
+// ---------------------------------------------------------------------------
+async function doGenerate() {
+  setStatus("generating…");
+  try {
+    const r = await api("/api/inference", promptParams());
+    if (r.prompt) $("prompt").value = r.prompt.text; // normalize (lowercased/in-vocab)
+    tokenizePreview(r.prompt.text);
+    $("gen-text").textContent = r.generated.text;
+    $("gen-chips").innerHTML = r.generated.tokens
+      .map((t, i) => `<span class="chip gen" title="token ${t}">${esc(MODEL.vocab?.[t] ?? t)} <small>${t}</small></span>`)
+      .join("");
+    const top = r.last_step.top_tokens;
+    $("gen-top").innerHTML = `<div class="matlabel">last position — top ${top.length} tokens</div>`;
+    $("gen-top").appendChild(barChart(top.map((t) => t[1]), top.map((t) => MODEL.vocab?.[t[0]] ?? t[0])));
+    setStatus(`done (${r.skipped_chars} skipped chars)`);
+  } catch (e) {
+    setStatus("error: " + e.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Full record (/api/record) + viewer
+// ---------------------------------------------------------------------------
+async function doRecord() {
+  setStatus("running recorded generation…");
+  try {
+    RECORD = await api("/api/record", promptParams());
+    CUR_STEP = RECORD.steps.length - 1;
+    CUR_NODE = "softmax";
+    renderRecordMeta();
+    renderSteps();
+    buildDiagram();
+    selectStep(CUR_STEP);
+    document.getElementById("main").classList.add("record-open");
+    $("btn-dl").disabled = false;
+    setStatus("record ready — click blocks in the diagram to inspect them");
+  } catch (e) {
+    setStatus("error: " + e.message);
+  }
+}
+
+function downloadRecord() {
+  if (!RECORD) return;
+  const blob = new Blob([JSON.stringify(RECORD, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "inference_record.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function cur() {
+  return RECORD.steps[CUR_STEP];
+}
+
+function fwd() {
+  return cur().forward;
+}
+
+function renderRecordMeta() {
+  const g = RECORD.generated;
+  $("rec-meta").textContent =
+    `prompt: ${RECORD.prompt.text} (${RECORD.prompt.tokens.join(",")}) → generated: "${g.text}" [${g.tokens.join(",")}] — ${RECORD.steps.length} step(s), each a full forward over the growing sequence`;
+}
+
+function renderSteps() {
+  const el = $("rec-steps");
+  el.innerHTML = "";
+  RECORD.steps.forEach((s, i) => {
+    const b = document.createElement("span");
+    b.className = "step" + (i === CUR_STEP ? " active" : "");
+    b.innerHTML = `s${i}: ${esc(MODEL.vocab?.[s.token] ?? s.token)} <small>p(top)</small>`;
+    b.title = `token ${s.token}`;
+    b.onclick = () => selectStep(i);
+    el.appendChild(b);
+  });
+}
+
+function selectStep(i) {
+  CUR_STEP = i;
+  document.querySelectorAll(".step").forEach((el, j) => el.classList.toggle("active", j === i));
+  renderInspector();
+}
+
+function togglePlay() {
+  if (PLAY_TIMER) {
+    clearInterval(PLAY_TIMER);
+    PLAY_TIMER = null;
+    $("btn-play").textContent = "▶ play";
+    return;
+  }
+  $("btn-play").textContent = "⏸ pause";
+  let i = CUR_STEP;
+  PLAY_TIMER = setInterval(() => {
+    i = (i + 1) % RECORD.steps.length;
+    selectStep(i);
+  }, 1400);
+}
+
+// ---------------------------------------------------------------------------
+// Architecture diagram (SVG, one node per inspectable quantity)
+// ---------------------------------------------------------------------------
+function buildDiagram() {
+  const c = MODEL.config;
+  const holder = $("diagram-holder");
+  holder.innerHTML = "";
+  const NS = "http://www.w3.org/2000/svg";
+  const blockH = 150, gap = 26, w = 430, nodeW = 150, nodeH = 40;
+  const headY = 60;
+  const totalH = headY + c.n_layers * (blockH + gap) + 130;
+  const svg = document.createElementNS(NS, "svg");
+  svg.id = "diagram";
+  svg.setAttribute("viewBox", `0 0 ${w} ${totalH}`);
+  svg.style.height = "auto";
+
+  const nodes = []; // {id, x, y, w, h, label, sub}
+  function addNode(id, x, y, label, sub) {
+    const g = document.createElementNS(NS, "g");
+    g.setAttribute("class", "node");
+    g.dataset.id = id;
+    const r = document.createElementNS(NS, "rect");
+    r.setAttribute("x", x); r.setAttribute("y", y); r.setAttribute("width", nodeW); r.setAttribute("height", nodeH);
+    g.appendChild(r);
+    const t = document.createElementNS(NS, "text");
+    t.setAttribute("x", x + nodeW / 2); t.setAttribute("y", y + (sub ? 17 : 25));
+    t.setAttribute("text-anchor", "middle");
+    t.textContent = label;
+    g.appendChild(t);
+    if (sub) {
+      const s = document.createElementNS(NS, "text");
+      s.setAttribute("class", "sub");
+      s.setAttribute("x", x + nodeW / 2); s.setAttribute("y", y + 32);
+      s.setAttribute("text-anchor", "middle");
+      s.textContent = sub;
+      g.appendChild(s);
+    }
+    g.onclick = () => selectNode(id);
+    svg.appendChild(g);
+    nodes.push({ id, g });
+  }
+  function line(x1, y1, x2, y2) {
+    const l = document.createElementNS(NS, "line");
+    l.setAttribute("x1", x1); l.setAttribute("y1", y1); l.setAttribute("x2", x2); l.setAttribute("y2", y2);
+    svg.appendChild(l);
+  }
+  const cx = w / 2 - nodeW / 2;
+  const leftX = 30, rightX = w - 30 - nodeW, midX = cx;
+
+  addNode("emb", cx, 8, "embedding", "(S,D) lookup");
+  let y = headY;
+  const blockTop = [];
+  for (let i = 0; i < c.n_layers; i++) {
+    blockTop.push(y);
+    addNode(`b${i}.ln1`, leftX, y, `LN 1`, "RMSNorm");
+    addNode(`b${i}.attn`, midX, y, "attention", c.n_heads + " heads");
+    addNode(`b${i}.h`, rightX, y, "h = x + attn", "residual");
+    addNode(`b${i}.ln2`, leftX, y + 55, "LN 2", "RMSNorm");
+    addNode(`b${i}.ffn`, midX, y + 55, MODEL.has_moe ? "MoE FFN" : "FFN", MODEL.has_moe ? "top-k experts" : "SwiGLU");
+    addNode(`b${i}.out`, rightX, y + 55, "out = h + ffn", "residual");
+    line(midX + nodeW, y + nodeH / 2, rightX, y + nodeH / 2);
+    line(rightX + nodeW / 2, y + nodeH, rightX + nodeW / 2, y + 55);
+    line(leftX + nodeW, y + 55 + nodeH / 2, midX, y + 55 + nodeH / 2);
+    line(midX + nodeW, y + 55 + nodeH / 2, rightX, y + 55 + nodeH / 2);
+    if (i < c.n_layers - 1) {
+      // carry the block output to the next block's input (right→left)
+      line(rightX + nodeW / 2, y + 55 + nodeH, rightX + nodeW / 2, y + blockH);
+      line(rightX + nodeW / 2, y + blockH, leftX + nodeW / 2, y + blockH);
+      line(leftX + nodeW / 2, y + blockH, leftX + nodeW / 2, y + blockH + gap - 4);
+    }
+    y += blockH + gap;
+  }
+  // embedding into first block ln1
+  line(cx + nodeW / 2, 8 + nodeH, cx + nodeW / 2, headY - 26);
+  line(cx + nodeW / 2, headY - 26, leftX + nodeW / 2, headY - 26);
+  line(leftX + nodeW / 2, headY - 26, leftX + nodeW / 2, blockTop[0]);
+  // last block out -> final norm -> lm head -> softmax (left column)
+  addNode("fnorm", leftX, y + 10, "final norm", "RMSNorm");
+  addNode("lmhead", midX, y + 10, "lm_head", "@ W (S,V)");
+  addNode("softmax", rightX, y + 10, "softmax + argmax", "next token");
+  line(rightX + nodeW / 2, y - gap + 55 + nodeH, rightX + nodeW / 2, y - gap);
+  line(rightX + nodeW / 2, y - gap, leftX + nodeW / 2, y - gap);
+  line(leftX + nodeW / 2, y - gap, leftX + nodeW / 2, y + 10);
+  line(leftX + nodeW, y + 10 + nodeH / 2, midX, y + 10 + nodeH / 2);
+  line(midX + nodeW, y + 10 + nodeH / 2, rightX, y + 10 + nodeH / 2);
+
+  holder.appendChild(svg);
+  selectNode(CUR_NODE);
+}
+
+function selectNode(id) {
+  CUR_NODE = id;
+  document.querySelectorAll("#diagram .node").forEach((n) => n.classList.toggle("active", n.dataset.id === id));
+  renderInspector();
+}
+
+// ---------------------------------------------------------------------------
+// Inspector: per-node tensors + math
+// ---------------------------------------------------------------------------
+function drop(el) {
+  el.innerHTML = "";
+  return el;
+}
+
+function renderInspector() {
+  const body = drop($("ins-body"));
+  if (!RECORD) return;
+  const c = MODEL.config;
+  const vocab = MODEL.vocab || [];
+  const f = fwd();
+  const D = f.embedding[0][0].length; // embed dim
+  const seqS = f.embedding[0].length; // S (batch = 1)
+
+  const id = CUR_NODE;
+  const parts = []; // [title, builder]
+  const title = $("ins-title");
+
+  const push = (fn) => parts.push(fn);
+
+  // ---- embedding ---------------------------------------------------------
+  if (id === "emb") {
+    title.textContent = "Embedding lookup";
+    const emb = f.embedding[0]; // (S, D)
+    push(() => {
+      body.appendChild(formula("x_{\\text{emb}}[s, d] = E[\\text{token}_s, d]", "Each token id indexes a row of the (V, D) table E — no arithmetic, just a gather. Shape: (S, D)."));
+      body.appendChild(matLabel(`token ids: ${cur().input_tokens.join(", ")} → "${cur().input_tokens.map((t) => vocab[t] ?? t).join("")}"`));
+      body.appendChild(heatGrid(emb, { title: "embedding", cell: 14 }));
+      body.appendChild(matLabel(`(S=${seqS}, D=${D}) — each row is the token's D-dim vector`));
+    });
+  }
+
+  // ---- layernorms (ln1/ln2/final norm) -----------------------------------
+  const normRe = /^b(\d+)\.(ln1|ln2)$/;
+  const mNorm = normRe.exec(id);
+  if (mNorm || id === "fnorm") {
+    const blockRec = mNorm ? f.blocks[+mNorm[1]] : null;
+    const rec = mNorm ? blockRec[mNorm[2]] : f.final_norm;
+    const name = mNorm ? `block ${mNorm[1]} ${mNorm[2] === "ln1" ? "input" : "post-attention"} norm` : "final norm";
+    title.textContent = "RMSNorm — " + name;
+    push(() => {
+      const rms = rec.rms[0].map((v) => v[0]);
+      body.appendChild(formula(
+        "\\hat{x}_d = \\dfrac{x_d}{\\sqrt{\\tfrac{1}{D}\\textstyle\\sum_{d} x_d^2 + \\varepsilon}}, \\qquad y_d = \\gamma_d \\cdot \\hat{x}_d",
+        `rms (per row, sqrt(mean(x²)+eps)) for this step: [${rms.map((v) => v.toFixed(3)).join(", ")}]`
+      ));
+      body.appendChild(matLabel("γ (gamma) — the per-channel learned scale, (D,)"));
+      body.appendChild(barChart(rec.gamma, rec.gamma.map((_, i) => i)));
+      body.appendChild(matLabel(`output y = γ·x/rms, (S=${seqS}, D=${D})`));
+      body.appendChild(heatGrid(rec.out, { cell: 14, title: "y" }));
+    });
+  }
+
+  // ---- attention -----------------------------------------------------------
+  const mAttn = /^b(\d+)\.attn$/.exec(id);
+  if (mAttn) {
+    title.textContent = `block ${mAttn[1]} — multi-head attention`;
+    const a = f.blocks[+mAttn[1]].attn;
+    const H = c.n_heads, hd = c.embed_dim / H, S = seqS;
+    push(() => {
+      body.appendChild(formula(
+        "q = x W_q,\\; k = x W_k,\\; v = x W_v \\quad\\rightarrow\\quad s_{ij} = \\dfrac{q_i \\cdot k_j}{\\sqrt{d}} \\;\\text{(causal mask: } j > i \\Rightarrow -\\infty)",
+        `Q/K/V projections: (S, H·d) = (S, ${H * hd}) each; raw scores (H, S, S) below`
+      ));
+      body.appendChild(formula(
+        "A = \\text{softmax}(s),\\qquad \\text{ctx} = A \\, v",
+        "attention weights A (rows sum to 1) multiply V; heads merge back to (S, D)"
+      ));
+      body.appendChild(matLabel("RoPE — per-pair frequency θ = 10000^{−2i/d} and angle = pos·θ (shown for head 0, row 0)"));
+      body.appendChild(matLabel(`freqs: ${a.rope.freqs.map((v) => v.toFixed(4)).join(", ")}`));
+      body.appendChild(matLabel(`angles[pos0]: ${a.rope.angles[0][0].map((v) => v.toFixed(4)).join(", ")}`));
+
+      const headSel = document.createElement("div");
+      for (let h = 0; h < H; h++) {
+        const b = document.createElement("button");
+        b.textContent = "head " + h;
+        b.className = h === HEAD ? "on" : "";
+        b.onclick = () => { HEAD = h; renderInspector(); };
+        headSel.appendChild(b);
+      }
+      body.appendChild(headSel);
+
+      const q = a.q[0][HEAD], k = a.k[0][HEAD], v = a.v[0][HEAD], sc = a.scores[0][HEAD], sm = a.scores_masked[0][HEAD], aw = a.attn_weights[0][HEAD];
+      body.appendChild(matLabel(`q (S=${S}, d=${hd}) — post-RoPE`));
+      body.appendChild(heatGrid(q, { cell: 14, title: "q" }));
+      body.appendChild(matLabel(`k (S=${S}, d=${hd}) — post-RoPE`));
+      body.appendChild(heatGrid(k, { cell: 14, title: "k" }));
+      body.appendChild(matLabel("raw scores s = q·kᵀ/√d (pre-mask)"));
+      body.appendChild(heatGrid(sc, { cell: 12, title: "s" }));
+      body.appendChild(matLabel("scores after causal mask (future = −∞ shown as −1e4)"));
+      body.appendChild(heatGrid(sm, { cell: 12, title: "s̄" }));
+      body.appendChild(matLabel("attention weights A = softmax(s̄) — rows sum to 1"));
+      body.appendChild(heatGrid(aw, { cell: 12, title: "A" }));
+      body.appendChild(matLabel("context = A·v"));
+      body.appendChild(heatGrid(a.ctx[0], { cell: 14, title: "ctx" }));
+    });
+  }
+
+  // ---- residual / block output ---------------------------------------------
+  const mRes = /^b(\d+)\.(h|out)$/.exec(id);
+  if (mRes) {
+    const b = +mRes[1];
+    title.textContent = `block ${b} — ${mRes[2] === "h" ? "residual after attention" : "block output"}`;
+    const val = f.blocks[b][mRes[2]];
+    push(() => {
+      body.appendChild(formula(mRes[2] === "h" ? "h = x + \\text{attn}(x)" : "\\text{out} = h + \\text{ffn}(h)",
+        mRes[2] === "h" ? "The residual stream: block input + attention output. The skip connection is why depth is stable." : "Block output = residual after attention + FFN output; this becomes the next block's input."));
+      body.appendChild(matLabel(`(S=${seqS}, D=${D})`));
+      body.appendChild(heatGrid(val, { cell: 14, title: mRes[2] }));
+    });
+  }
+
+  // ---- FFN / MoE -------------------------------------------------------------
+  const mFfn = /^b(\d+)\.ffn$/.exec(id);
+  if (mFfn) {
+    const b = +mFfn[1];
+    const fr = f.blocks[b];
+    const isMoe = fr.moe;
+    title.textContent = `block ${b} — ` + (isMoe ? "mixture of experts (SwiGLU experts + router)" : "SwiGLU feed-forward");
+    push(() => {
+      if (!isMoe) {
+        const m = fr.ffn;
+        body.appendChild(formula(
+          "\\text{gate} = \\text{SiLU}(x W_g),\\; \\text{up} = x W_u,\\qquad \\text{out} = (\\text{gate} \\odot \\text{up}) \\, W_d",
+          `SiLU(z) = z·σ(z); intermediate width FF = ${m.ff_dim} (4·D)`
+        ));
+        body.appendChild(matLabel("gate = SiLU(x·Wg), (S, FF)"));
+        body.appendChild(heatGrid(m.gate, { cell: 11, title: "gate" }));
+        body.appendChild(matLabel("gated = gate ⊙ up"));
+        body.appendChild(heatGrid(m.gated, { cell: 11, title: "gated" }));
+        body.appendChild(matLabel("out (S, D)"));
+        body.appendChild(heatGrid(m.out, { cell: 14, title: "out" }));
+        return;
+      }
+      const m = fr.moe;
+      const E = m.n_experts;
+      body.appendChild(formula(
+        "p = \\text{softmax}(x W_{\\text{gate}}),\\qquad \\hat{p} = \\dfrac{\\text{top-k mask}(p)}{\\sum \\text{top-k mask}(p)},\\qquad \\text{out} = \\sum_{j \\in \\text{top-k}} \\hat{p}_j \\, E_j(x)",
+        `Router picks the top-${m.top_k} of ${E} experts; the selection probability is renormalized and used as the mixing weight. Every expert runs on x (dense eval), only the selected ones contribute.`
+      ));
+      body.appendChild(matLabel(`router scores (S, E) — stable-softmaxed`));
+      body.appendChild(heatGrid(m.scores, { cell: 16, title: "scores", labels: m.scores[0].map((_, j) => "E" + j) }));
+      body.appendChild(matLabel(`top-k picks (S, ${m.top_k}) — which expert each position uses`));
+      body.appendChild(heatGrid(m.topk_idx, { cell: 16, title: "topk" }));
+      body.appendChild(matLabel("weights — renormalized routing probabilities (S, E)"));
+      body.appendChild(heatGrid(m.weights, { cell: 16, title: "w" }));
+      m.expert_outs.forEach((eo, j) => {
+        body.appendChild(matLabel(`expert ${j} output (S, D)`));
+        body.appendChild(heatGrid(eo, { cell: 11, title: `E${j}` }));
+      });
+      body.appendChild(matLabel("out = Σ ŵⱼ·Eⱼ(x)  (S, D)"));
+      body.appendChild(heatGrid(m.out, { cell: 14, title: "out" }));
+    });
+  }
+
+  // ---- lm_head / softmax ------------------------------------------------------
+  if (id === "lmhead" || id === "softmax") {
+    const s = cur();
+    const logits = f.logits[0]; // (S, V)
+    const soft = f.softmax[0];
+    title.textContent = id === "lmhead" ? "lm_head — projection to vocabulary" : "softmax — next-token distribution";
+    push(() => {
+      if (id === "lmhead") {
+        body.appendChild(formula("z_s = (\\text{normed}_s) \\, W_{\\text{lm}}", "Each position's normalized vector is projected to all V vocab logits (S, V)."));
+      } else {
+        body.appendChild(formula("p_i = \\dfrac{e^{z_i}}{\\sum_j e^{z_j}}, \\qquad \\hat{t} = \\arg\\max_i p_i", "Greedy = argmax; sampling = draw from p (optionally with temperature / top-k)."));
+        body.appendChild(matLabel(`this step picked token ${s.token} ("${vocab[s.token] ?? s.token}")`));
+      }
+      body.appendChild(matLabel(`logits / probabilities for the last position (V = ${c.vocab_size} vocab chars)`));
+      const last = id === "lmhead" ? logits[logits.length - 1] : soft[soft.length - 1];
+      body.appendChild(heatGrid([last], { cell: 18, title: "z/p", labels: vocab }));
+      body.appendChild(matLabel("top-10 at the last position"));
+      body.appendChild(barChart(s.top_tokens.map((t) => t[1]), s.top_tokens.map((t) => `${vocab[t[0]] ?? t[0]} (${t[0]})`)));
+    });
+  }
+
+  parts.forEach((fn) => {
+    const b = drop(body);
+    fn();
+    body.querySelectorAll(".formula").forEach(renderTex);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Wire up
+// ---------------------------------------------------------------------------
+$("btn-gen").onclick = doGenerate;
+$("btn-rec").onclick = doRecord;
+$("btn-dl").onclick = downloadRecord;
+$("btn-play").onclick = togglePlay;
+
+init().catch((e) => setStatus("model load error: " + e.message));
+</script>
+</body>
+</html>
