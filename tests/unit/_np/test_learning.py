@@ -101,6 +101,7 @@ class TestInstrumentedForward:
                 "causal_mask",
                 "attn_weights",
                 "ctx",
+                "attn_out",
                 "scale",
                 "rope",
             ]:

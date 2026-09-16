@@ -372,7 +372,7 @@ EDUCATIONAL:
 | Decision | Choice |
 |----------|--------|
 | Server | stdlib `http.server` only — zero new dependencies (KISS) |
-| Entry point | `impl/_np/cli.py --learning [--port 8000] [--model resource/models/learning_demo]`; lazy import — flag off = zero impact |
+| Entry point | `impl/_np/cli.py --learning [--port 8080] [--model resource/models/learning_demo]` (or `scripts/run_learning_mode.sh`); lazy import — flag off = zero impact |
 | NumPy track changes | none — the **instrumented forward** (`impl/_np/learning.py`) is an overlay that recomputes component math from public parameters; `impl/_np` components stay untouched and readable |
 | Model loading | server-side checkpoint dir via `--model` (no page upload); any repo checkpoint works |
 | Demo model | char vocab V=20 (top-19 TinyStories letters + space), D=8, H=4, L=3, E=3 MoE, ctx=32, trained on TinyStories (reproducible via `scripts/train_demo_model.py`), saved to `resource/models/learning_demo/` + `vocab.json` sidecar |

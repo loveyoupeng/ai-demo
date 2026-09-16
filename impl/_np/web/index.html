@@ -20,8 +20,8 @@
   .badges { display: flex; flex-wrap: wrap; gap: 6px; }
   .badge { background: var(--panel2); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: .78rem; color: var(--dim); }
   .badge b { color: var(--fg); font-weight: 600; }
-  main { display: grid; grid-template-columns: 1fr; gap: 14px; padding: 14px 18px; max-width: 1500px; margin: 0 auto; }
-  @media (min-width: 1100px) { main.record-open { grid-template-columns: 520px 1fr; } }
+  main { display: grid; grid-template-columns: 1fr; gap: 14px; padding: 14px 18px; max-width: 1600px; margin: 0 auto; }
+  @media (min-width: 1100px) { main.record-open { grid-template-columns: 460px 1fr; } }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
   label { font-size: .8rem; color: var(--dim); display: block; margin: 8px 0 3px; }
   input[type=text], input[type=number], select { background: var(--panel2); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; width: 100%; font: inherit; }
@@ -38,20 +38,28 @@
   .chip.gen { border-color: var(--accent2); color: var(--accent2); }
   .big-text { font-size: 1.5rem; font-family: ui-monospace, monospace; letter-spacing: .15em; margin: 6px 0; word-break: break-all; }
   .topbars { margin-top: 10px; }
-  .bar-row { display: grid; grid-template-columns: 70px 1fr 60px; gap: 8px; align-items: center; font-size: .85rem; margin: 3px 0; }
+  .bar-row { display: grid; grid-template-columns: 90px 1fr 70px; gap: 8px; align-items: center; font-size: .85rem; margin: 3px 0; }
   .bar { height: 14px; background: var(--panel2); border-radius: 4px; overflow: hidden; }
   .bar > i { display: block; height: 100%; background: var(--accent); }
   .bar-row .p { text-align: right; color: var(--dim); font-family: ui-monospace, monospace; }
-  #diagram { width: 100%; }
+  #diagram { width: 100%; height: auto; display: block; }
   #diagram .node { cursor: pointer; }
-  #diagram .node rect { fill: var(--panel2); stroke: var(--line); stroke-width: 1.5; rx: 8; transition: stroke .15s; }
-  #diagram .node:hover rect { stroke: var(--accent); }
-  #diagram .node.active rect { stroke: var(--accent); stroke-width: 2.5; fill: #1c2c42; }
-  #diagram .node text { fill: var(--fg); font-size: 12px; font-family: system-ui, sans-serif; pointer-events: none; }
-  #diagram .node .sub { fill: var(--dim); font-size: 10px; }
-  #diagram line { stroke: var(--line); stroke-width: 1.5; }
+  #diagram .node rect.box { fill: var(--panel2); stroke: var(--line); stroke-width: 1.5; transition: stroke .15s; }
+  #diagram .node:hover rect.box { stroke: var(--accent); }
+  #diagram .node.active rect.box { stroke: var(--accent); stroke-width: 2.5; fill: #1c2c42; }
+  #diagram .mod { fill: #14171d; stroke: var(--line); stroke-width: 1; }
+  #diagram text { fill: var(--fg); font-family: system-ui, sans-serif; pointer-events: none; }
+  #diagram .t-title { font-size: 13px; font-weight: 600; }
+  #diagram .t-sub { fill: var(--dim); font-size: 10px; }
+  #diagram .t-cell { fill: var(--dim); font-size: 10.5px; }
+  #diagram .cell rect { fill: #232833; stroke: #303748; stroke-width: 1; }
+  #diagram .cell:hover rect { stroke: var(--accent); }
+  #diagram .cell.active rect { stroke: var(--accent); stroke-width: 2; fill: #1c2c42; }
+  #diagram .cell.active text { fill: var(--fg); }
+  #diagram .edge { stroke: #3a4252; stroke-width: 1.6; fill: none; }
+  #diagram .edge.dashed { stroke-dasharray: 5 4; }
+  #diagram .blklabel { fill: var(--dim); font-size: 11px; letter-spacing: .08em; }
   #inspector { min-height: 300px; }
-  #inspector .matwrap { overflow-x: auto; }
   .heat { display: grid; gap: 1px; margin: 6px 0; width: max-content; }
   .heat i { width: 16px; height: 16px; border-radius: 3px; background: var(--panel2); }
   .heat i.tiny { width: 11px; height: 11px; }
@@ -116,12 +124,12 @@
     <div class="steps" id="rec-steps"></div>
     <div class="row" style="margin-top:6px">
       <div><button id="btn-play" class="secondary">▶ play</button></div>
-      <div class="note">Click any block in the diagram to inspect its exact numbers.</div>
+      <div class="note">Click any module or its inner stages to inspect the exact numbers.</div>
     </div>
     <div id="diagram-holder" style="margin-top:10px"></div>
     <section style="margin-top:12px" id="inspector">
       <h2 id="ins-title">Inspector</h2>
-      <div id="ins-body"><p class="note">Pick a node in the diagram (or a step) to see its tensors and math.</p></div>
+      <div id="ins-body"><p class="note">Pick a module in the diagram (or a step) to see its tensors and math.</p></div>
     </section>
   </section>
 </main>
@@ -182,10 +190,9 @@ function tokenizePreview(text) {
 }
 
 // ---------------------------------------------------------------------------
-// Heatmaps / bars (pure divs — matrices here are tiny)
+// Heatmaps / bars / formulas
 // ---------------------------------------------------------------------------
 function heatCSS(v, min, max) {
-  // diverging: negative → hot (red), positive → cool (blue)
   const t = max > min ? (v - min) / (max - min) : 0.5;
   const r = Math.round(23 + 200 * (1 - t));
   const g = Math.round(27 + 90 * t);
@@ -194,7 +201,7 @@ function heatCSS(v, min, max) {
 }
 
 function heatGrid(matrix, { cell = 16, title = "", labels = null, rows = null } = {}) {
-  if (matrix.length === 1 && Array.isArray(matrix[0]) && Array.isArray(matrix[0][0]) && matrix[0].length > 1) matrix = matrix[0]; // record arrays are (1, …) — drop the batch dim
+  if (matrix.length === 1 && Array.isArray(matrix[0]) && Array.isArray(matrix[0][0]) && matrix[0].length > 1) matrix = matrix[0]; // (1,…) → drop batch
   const rowsArr = rows || matrix.length;
   const cols = matrix[0]?.length || 0;
   let min = Infinity, max = -Infinity;
@@ -208,17 +215,17 @@ function heatGrid(matrix, { cell = 16, title = "", labels = null, rows = null } 
       const c = document.createElement("i");
       if (cell <= 12) c.className = "tiny";
       const v = matrix[i][j];
-      c.style.background = heatCSS(v, min, max);
-      c.title = `${title} [${i}][${j}] = ${v.toFixed(4)}` + (labels && labels[j] !== undefined ? ` (${labels[j]})` : "");
+      const num = typeof v === "number" ? v : 0;
+      c.style.background = heatCSS(num, min, max);
+      c.title = `${title} [${i}][${j}] = ${num}` + (labels && labels[j] !== undefined ? ` (${labels[j]})` : "");
       el.appendChild(c);
     }
   }
-  el.insertAdjacentHTML("beforeend", "");
   return el;
 }
 
 function barChart(values, labels, { maxW = 200 } = {}) {
-  const max = Math.max(...values, 1e-9);
+  const max = Math.max(...values.map((v) => Math.abs(v)), 1e-9);
   const wrap = document.createElement("div");
   wrap.className = "topbars";
   values.forEach((v, i) => {
@@ -244,7 +251,6 @@ function formula(tex, note) {
   const k = document.createElement("span");
   el.appendChild(k);
   el.dataset.tex = tex;
-  renderTex(el);
   if (note) {
     const n = document.createElement("div");
     n.className = "note";
@@ -262,7 +268,7 @@ function renderTex(el) {
 }
 
 // ---------------------------------------------------------------------------
-// Bootstrap: model info + badges
+// Bootstrap
 // ---------------------------------------------------------------------------
 async function init() {
   MODEL = await api("/api/model");
@@ -283,17 +289,17 @@ async function init() {
 }
 
 // ---------------------------------------------------------------------------
-// Quick generation (/api/inference)
+// Quick generation
 // ---------------------------------------------------------------------------
 async function doGenerate() {
   setStatus("generating…");
   try {
     const r = await api("/api/inference", promptParams());
-    if (r.prompt) $("prompt").value = r.prompt.text; // normalize (lowercased/in-vocab)
+    if (r.prompt) $("prompt").value = r.prompt.text;
     tokenizePreview(r.prompt.text);
     $("gen-text").textContent = r.generated.text;
     $("gen-chips").innerHTML = r.generated.tokens
-      .map((t, i) => `<span class="chip gen" title="token ${t}">${esc(MODEL.vocab?.[t] ?? t)} <small>${t}</small></span>`)
+      .map((t) => `<span class="chip gen" title="token ${t}">${esc(MODEL.vocab?.[t] ?? t)} <small>${t}</small></span>`)
       .join("");
     const top = r.last_step.top_tokens;
     $("gen-top").innerHTML = `<div class="matlabel">last position — top ${top.length} tokens</div>`;
@@ -305,7 +311,7 @@ async function doGenerate() {
 }
 
 // ---------------------------------------------------------------------------
-// Full record (/api/record) + viewer
+// Full record + viewer
 // ---------------------------------------------------------------------------
 async function doRecord() {
   setStatus("running recorded generation…");
@@ -319,7 +325,7 @@ async function doRecord() {
     selectStep(CUR_STEP);
     document.getElementById("main").classList.add("record-open");
     $("btn-dl").disabled = false;
-    setStatus("record ready — click blocks in the diagram to inspect them");
+    setStatus("record ready — click modules or inner stages to inspect them");
   } catch (e) {
     setStatus("error: " + e.message);
   }
@@ -335,13 +341,9 @@ function downloadRecord() {
   URL.revokeObjectURL(a.href);
 }
 
-function cur() {
-  return RECORD.steps[CUR_STEP];
-}
-
-function fwd() {
-  return cur().forward;
-}
+function fwd() { return RECORD.steps[CUR_STEP].forward; }
+function seqLen() { return fwd().embedding[0].length; }
+function dim() { return fwd().embedding[0][0].length; }
 
 function renderRecordMeta() {
   const g = RECORD.generated;
@@ -355,7 +357,7 @@ function renderSteps() {
   RECORD.steps.forEach((s, i) => {
     const b = document.createElement("span");
     b.className = "step" + (i === CUR_STEP ? " active" : "");
-    b.innerHTML = `s${i}: ${esc(MODEL.vocab?.[s.token] ?? s.token)} <small>p(top)</small>`;
+    b.innerHTML = `s${i}: ${esc(MODEL.vocab?.[s.token] ?? s.token)}`;
     b.title = `token ${s.token}`;
     b.onclick = () => selectStep(i);
     el.appendChild(b);
@@ -384,90 +386,160 @@ function togglePlay() {
 }
 
 // ---------------------------------------------------------------------------
-// Architecture diagram (SVG, one node per inspectable quantity)
+// Architecture diagram — module boxes with inner-stage sub-nodes, arrows
 // ---------------------------------------------------------------------------
+const NS = "http://www.w3.org/2000/svg";
+// layout constants (viewBox units)
+const LW = 740, ML = 14;
+const CX_L = ML, CW_L = 158;                       // left column (norms)
+const CX_C = 196, CW_C = 340;                      // center column (modules)
+const CX_R = 560, CW_R = 166;                      // right column (residuals)
+const ROW_H = 104, ROW_GAP = 16, BLOCK_H = ROW_H * 2 + ROW_GAP;
+const HEAD_H = 78, BLOCK_GAP = 44;
+
+function svgEl(tag, attrs) {
+  const el = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
+  return el;
+}
+
 function buildDiagram() {
   const c = MODEL.config;
   const holder = $("diagram-holder");
   holder.innerHTML = "";
-  const NS = "http://www.w3.org/2000/svg";
-  const blockH = 150, gap = 26, w = 430, nodeW = 150, nodeH = 40;
-  const headY = 60;
-  const totalH = headY + c.n_layers * (blockH + gap) + 130;
-  const svg = document.createElementNS(NS, "svg");
-  svg.id = "diagram";
-  svg.setAttribute("viewBox", `0 0 ${w} ${totalH}`);
-  svg.style.height = "auto";
+  const footY = HEAD_H + c.n_layers * (BLOCK_H + BLOCK_GAP);
+  const totalH = footY + 150;
+  const svg = svgEl("svg", { id: "diagram", viewBox: `0 0 ${LW} ${totalH}` });
 
-  const nodes = []; // {id, x, y, w, h, label, sub}
-  function addNode(id, x, y, label, sub) {
-    const g = document.createElementNS(NS, "g");
-    g.setAttribute("class", "node");
+  // arrow head
+  const defs = svgEl("defs");
+  const marker = svgEl("marker", { id: "arrow", viewBox: "0 0 10 10", refX: "8.5", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" });
+  marker.appendChild(svgEl("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "#4a5468" }));
+  defs.appendChild(marker);
+  svg.appendChild(defs);
+
+  // edge: polyline with arrow at the end
+  function edge(pts, dashed) {
+    const p = svgEl("polyline", { points: pts.map(([x, y]) => `${x},${y}`).join(" "), class: "edge" + (dashed ? " dashed" : "") });
+    p.setAttribute("marker-end", "url(#arrow)");
+    svg.appendChild(p);
+  }
+
+  // simple node (no inner stages)
+  function node(id, x, y, w, h, title, sub) {
+    const g = svgEl("g", { class: "node" });
     g.dataset.id = id;
-    const r = document.createElementNS(NS, "rect");
-    r.setAttribute("x", x); r.setAttribute("y", y); r.setAttribute("width", nodeW); r.setAttribute("height", nodeH);
+    const r = svgEl("rect", { class: "box", x, y, width: w, height: h, rx: 10 });
     g.appendChild(r);
-    const t = document.createElementNS(NS, "text");
-    t.setAttribute("x", x + nodeW / 2); t.setAttribute("y", y + (sub ? 17 : 25));
-    t.setAttribute("text-anchor", "middle");
-    t.textContent = label;
+    const t = svgEl("text", { class: "t-title", x: x + w / 2, y: sub ? y + h / 2 - 2 : y + h / 2 + 5, "text-anchor": "middle" });
+    t.textContent = title;
     g.appendChild(t);
     if (sub) {
-      const s = document.createElementNS(NS, "text");
-      s.setAttribute("class", "sub");
-      s.setAttribute("x", x + nodeW / 2); s.setAttribute("y", y + 32);
-      s.setAttribute("text-anchor", "middle");
+      const s = svgEl("text", { class: "t-sub", x: x + w / 2, y: y + h / 2 + 16, "text-anchor": "middle" });
       s.textContent = sub;
       g.appendChild(s);
     }
-    g.onclick = () => selectNode(id);
+    g.addEventListener("click", () => selectNode(id));
     svg.appendChild(g);
-    nodes.push({ id, g });
   }
-  function line(x1, y1, x2, y2) {
-    const l = document.createElementNS(NS, "line");
-    l.setAttribute("x1", x1); l.setAttribute("y1", y1); l.setAttribute("x2", x2); l.setAttribute("y2", y2);
-    svg.appendChild(l);
-  }
-  const cx = w / 2 - nodeW / 2;
-  const leftX = 30, rightX = w - 30 - nodeW, midX = cx;
 
-  addNode("emb", cx, 8, "embedding", "(S,D) lookup");
-  let y = headY;
-  const blockTop = [];
-  for (let i = 0; i < c.n_layers; i++) {
-    blockTop.push(y);
-    addNode(`b${i}.ln1`, leftX, y, `LN 1`, "RMSNorm");
-    addNode(`b${i}.attn`, midX, y, "attention", c.n_heads + " heads");
-    addNode(`b${i}.h`, rightX, y, "h = x + attn", "residual");
-    addNode(`b${i}.ln2`, leftX, y + 55, "LN 2", "RMSNorm");
-    addNode(`b${i}.ffn`, midX, y + 55, MODEL.has_moe ? "MoE FFN" : "FFN", MODEL.has_moe ? "top-k experts" : "SwiGLU");
-    addNode(`b${i}.out`, rightX, y + 55, "out = h + ffn", "residual");
-    line(midX + nodeW, y + nodeH / 2, rightX, y + nodeH / 2);
-    line(rightX + nodeW / 2, y + nodeH, rightX + nodeW / 2, y + 55);
-    line(leftX + nodeW, y + 55 + nodeH / 2, midX, y + 55 + nodeH / 2);
-    line(midX + nodeW, y + 55 + nodeH / 2, rightX, y + 55 + nodeH / 2);
-    if (i < c.n_layers - 1) {
-      // carry the block output to the next block's input (right→left)
-      line(rightX + nodeW / 2, y + 55 + nodeH, rightX + nodeW / 2, y + blockH);
-      line(rightX + nodeW / 2, y + blockH, leftX + nodeW / 2, y + blockH);
-      line(leftX + nodeW / 2, y + blockH, leftX + nodeW / 2, y + blockH + gap - 4);
-    }
-    y += blockH + gap;
+  // module box with inner-stage sub-nodes (each sub-node clickable)
+  function module(id, x, y, w, h, title, cells) {
+    const g = svgEl("g", { class: "node" });
+    g.dataset.id = id;
+    g.appendChild(svgEl("rect", { class: "mod", x, y, width: w, height: h, rx: 10 }));
+    const t = svgEl("text", { class: "t-title", x: x + 10, y: y + 18 });
+    t.textContent = title;
+    g.appendChild(t);
+    g.addEventListener("click", () => selectNode(id));
+    svg.appendChild(g);
+    // cells: rows of [label, subId]
+    const nRows = cells.length;
+    const top = y + 28;
+    const cellH = Math.min(30, (h - 36) / nRows - 4);
+    cells.forEach((row, ri) => {
+      const cy = top + ri * (cellH + 4);
+      const gap = 6, pad = 8;
+      const cw = (w - 2 * pad - (row.length - 1) * gap) / row.length;
+      row.forEach(([label, subId], ci) => {
+        const cx = x + pad + ci * (cw + gap);
+        const cg = svgEl("g", { class: "cell node" });
+        cg.dataset.id = subId;
+        cg.appendChild(svgEl("rect", { class: "box", x: cx, y: cy, width: cw, height: cellH, rx: 5 }));
+        const ct = svgEl("text", { class: "t-cell", x: cx + cw / 2, y: cy + cellH / 2 + 3.5, "text-anchor": "middle" });
+        ct.textContent = label;
+        cg.appendChild(ct);
+        cg.addEventListener("click", (ev) => { ev.stopPropagation(); selectNode(subId); });
+        svg.appendChild(cg);
+        // intra-module flow arrow between consecutive cells
+        if (ci < row.length - 1) {
+          const a = svgEl("line", { x1: cx + cw + 1, y1: cy + cellH / 2, x2: cx + cw + gap - 1.5, y2: cy + cellH / 2, class: "edge", "marker-end": "url(#arrow)" });
+          svg.appendChild(a);
+        }
+      });
+    });
   }
-  // embedding into first block ln1
-  line(cx + nodeW / 2, 8 + nodeH, cx + nodeW / 2, headY - 26);
-  line(cx + nodeW / 2, headY - 26, leftX + nodeW / 2, headY - 26);
-  line(leftX + nodeW / 2, headY - 26, leftX + nodeW / 2, blockTop[0]);
-  // last block out -> final norm -> lm head -> softmax (left column)
-  addNode("fnorm", leftX, y + 10, "final norm", "RMSNorm");
-  addNode("lmhead", midX, y + 10, "lm_head", "@ W (S,V)");
-  addNode("softmax", rightX, y + 10, "softmax + argmax", "next token");
-  line(rightX + nodeW / 2, y - gap + 55 + nodeH, rightX + nodeW / 2, y - gap);
-  line(rightX + nodeW / 2, y - gap, leftX + nodeW / 2, y - gap);
-  line(leftX + nodeW / 2, y - gap, leftX + nodeW / 2, y + 10);
-  line(leftX + nodeW, y + 10 + nodeH / 2, midX, y + 10 + nodeH / 2);
-  line(midX + nodeW, y + 10 + nodeH / 2, rightX, y + 10 + nodeH / 2);
+
+  // ---- header: embedding + positions ------------------------------------
+  const embX = 220, embW = 210, posX = 460, posW = 180, headY = 8;
+  node("emb", embX, headY, embW, 56, "token embedding", "ids → vectors (S, D)");
+  node("pos", posX, headY, posW, 56, "positions · RoPE", "0…S-1 → rotary angles");
+
+  // ---- blocks -------------------------------------------------------------
+  const blockTops = [];
+  for (let i = 0; i < c.n_layers; i++) {
+    const by = HEAD_H + i * (BLOCK_H + BLOCK_GAP);
+    blockTops.push(by);
+    const lbl = svgEl("text", { class: "blklabel", x: ML, y: by - 8 });
+    lbl.textContent = `block ${i}`;
+    svg.appendChild(lbl);
+    const r1 = by, r2 = by + ROW_H + ROW_GAP;
+
+    // row 1: ln1 → attention → h
+    module(`b${i}.ln1`, CX_L, r1, CW_L, ROW_H, "LN 1 · RMSNorm", [[["rms", `b${i}.ln1`], ["×γ", `b${i}.ln1`]]]);
+    module(`b${i}.attn`, CX_C, r1, CW_C, ROW_H, "attention", [
+      [["Q=xWq", `b${i}.attn.q`], ["K=xWk", `b${i}.attn.k`], ["V=xWv", `b${i}.attn.v`], ["RoPE", `b${i}.attn.rope`]],
+      [["QKᵀ/√d", `b${i}.attn.scores`], ["causal mask", `b${i}.attn.mask`], ["softmax", `b${i}.attn.softmax`], ["A·V → Wo", `b${i}.attn.o`]],
+    ]);
+    node(`b${i}.h`, CX_R, r1, CW_R, ROW_H, "h = x + attn", "residual");
+
+    // row 2: ln2 → ffn/moe → out
+    module(`b${i}.ln2`, CX_L, r2, CW_L, ROW_H, "LN 2 · RMSNorm", [[["rms", `b${i}.ln2`], ["×γ", `b${i}.ln2`]]]);
+    if (MODEL.has_moe) {
+      module(`b${i}.ffn`, CX_C, r2, CW_C, ROW_H, "MoE feed-forward", [
+        [["router", `b${i}.ffn.router`], ["top-k", `b${i}.ffn.topk`], ["renorm Σw=1", `b${i}.ffn.weights`], [`experts ×${c.n_experts}`, `b${i}.ffn.experts`], ["Σ wⱼ·Eⱼ(x)", `b${i}.ffn.sum`]]
+      ]);
+    } else {
+      module(`b${i}.ffn`, CX_C, r2, CW_C, ROW_H, "FFN · SwiGLU", [
+        [["gate=SiLU(XWg)", `b${i}.ffn.gate`], ["up=XWu", `b${i}.ffn.up`], ["gate⊙up", `b${i}.ffn.mul`], ["·Wd", `b${i}.ffn.down`]]
+      ]);
+    }
+    node(`b${i}.out`, CX_R, r2, CW_R, ROW_H, "out = h + ffn", "block output");
+
+    // edges
+    const mid1 = r1 + ROW_H / 2, mid2 = r2 + ROW_H / 2;
+    edge([[CX_L + CW_L, mid1], [CX_C - 3, mid1]]);
+    edge([[CX_C + CW_C, mid1], [CX_R - 3, mid1]]);
+    edge([[CX_L + CW_L, mid2], [CX_C - 3, mid2]]);
+    edge([[CX_C + CW_C, mid2], [CX_R - 3, mid2]]);
+    // h (bottom) → down → left → LN2 top
+    edge([[CX_R + CW_R / 2, r1 + ROW_H], [CX_R + CW_R / 2, r1 + ROW_H + ROW_GAP / 2], [CX_L + CW_L / 2, r1 + ROW_H + ROW_GAP / 2], [CX_L + CW_L / 2, r2 - 3]]);
+    // block output → next block LN1 (or footer)
+    const nextTop = i + 1 < c.n_layers ? HEAD_H + (i + 1) * (BLOCK_H + BLOCK_GAP) : footY + 18;
+    edge([[CX_R + CW_R / 2, r2 + ROW_H], [CX_R + CW_R / 2, r2 + ROW_H + BLOCK_GAP / 2], [CX_L + CW_L / 2, r2 + ROW_H + BLOCK_GAP / 2], [CX_L + CW_L / 2, nextTop - 3]]);
+  }
+
+  // header → block 0
+  edge([[embX + embW / 2, headY + 56], [embX + embW / 2, HEAD_H - 14], [CX_L + CW_L / 2, HEAD_H - 14], [CX_L + CW_L / 2, blockTops[0] - 3]]);
+  edge([[posX + posW / 2, headY + 56], [posX + posW / 2, HEAD_H - 14 + 24], [CX_C + CW_C / 2, HEAD_H - 14 + 24], [CX_C + CW_C / 2, blockTops[0] - 3]], true);
+
+  // ---- footer: final norm → lm_head → softmax -----------------------------
+  const fy = footY;
+  node("fnorm", CX_L, fy + 18, CW_L, 62, "final norm", "RMSNorm");
+  node("lmhead", CX_C, fy + 18, CW_C, 62, "lm_head", "normed @ W  →  (S, V) logits");
+  node("softmax", CX_R, fy + 18, CW_R, 62, "softmax + argmax", "next token");
+  edge([[CX_L + CW_L, fy + 49], [CX_C - 3, fy + 49]]);
+  edge([[CX_C + CW_C, fy + 49], [CX_R - 3, fy + 49]]);
 
   holder.appendChild(svg);
   selectNode(CUR_NODE);
@@ -480,189 +552,327 @@ function selectNode(id) {
 }
 
 // ---------------------------------------------------------------------------
-// Inspector: per-node tensors + math
+// Inspector — one view per node id
 // ---------------------------------------------------------------------------
-function drop(el) {
-  el.innerHTML = "";
-  return el;
+function drop(el) { el.innerHTML = ""; return el; }
+
+function normView(title, rec) {
+  const rms = rec.rms[0].map((v) => v[0]);
+  return (body) => {
+    body.appendChild(formula(
+      "\\hat{x}_d = \\dfrac{x_d}{\\sqrt{\\tfrac{1}{D}\\textstyle\\sum_{d} x_d^2 + \\varepsilon}}, \\qquad y_d = \\gamma_d \\cdot \\hat{x}_d",
+      `rms (per row, sqrt(mean(x²)+eps)): [${rms.map((v) => v.toFixed(3)).join(", ")}]`
+    ));
+    body.appendChild(matLabel("γ — the per-channel learned scale, (D,)"));
+    body.appendChild(matLabel(`output y = γ·x/rms, (S=${seqLen()}, D=${dim()})`));
+    body.appendChild(heatGrid(rec.out, { cell: 14, title: "y" }));
+  };
+}
+
+function attnSubView(sub, bIdx) {
+  const a = fwd().blocks[bIdx].attn;
+  const H = MODEL.config.n_heads, hd = MODEL.config.embed_dim / H;
+  const headSel = (body) => {
+    const headSelEl = document.createElement("div");
+    headSelEl.className = "sel-head";
+    for (let h = 0; h < H; h++) {
+      const b = document.createElement("button");
+      b.textContent = "head " + h;
+      b.className = h === HEAD ? "on" : "";
+      b.onclick = () => { HEAD = h; renderInspector(); };
+      headSelEl.appendChild(b);
+    }
+    body.appendChild(headSelEl);
+  };
+  if (sub === "attn") {
+    return (body) => {
+      body.appendChild(formula(
+        "q = x W_q,\\; k = x W_k,\\; v = x W_v \\;\\Rightarrow\\; s_{ij} = \\dfrac{q_i \\cdot k_j}{\\sqrt{d}} \\;\\text{(causal: } j>i \\Rightarrow -\\infty)",
+        "click an inner stage (Q, K, V, RoPE, QKᵀ/√d, mask, softmax, A·V) for its numbers"
+      ));
+      body.appendChild(formula("A = \\text{softmax}(s),\\qquad \\text{ctx} = A\\,v,\\qquad \\text{out} = \\text{ctx}\\,W_o", "per-head: (S, d) each"));
+      headSel(body);
+      const q = a.q[0][HEAD], k = a.k[0][HEAD], sm = a.scores_masked[0][HEAD], aw = a.attn_weights[0][HEAD];
+      body.appendChild(matLabel(`q (S, d=${hd}) post-RoPE`));
+      body.appendChild(heatGrid(q, { cell: 14, title: "q" }));
+      body.appendChild(matLabel(`k (S, d=${hd}) post-RoPE`));
+      body.appendChild(heatGrid(k, { cell: 14, title: "k" }));
+      body.appendChild(matLabel("scores after causal mask"));
+      body.appendChild(heatGrid(sm, { cell: 12, title: "s̄" }));
+      body.appendChild(matLabel("attention weights A — rows sum to 1"));
+      body.appendChild(heatGrid(aw, { cell: 12, title: "A" }));
+      body.appendChild(matLabel("ctx = A·v, (S, H·d)"));
+      body.appendChild(heatGrid(a.ctx[0], { cell: 14, title: "ctx" }));
+    };
+  }
+  if (sub === "q" || sub === "k" || sub === "v") {
+    return (body) => {
+      const name = sub.toUpperCase();
+      body.appendChild(formula(`${name} = x W_${name[0] === "V" ? "v" : name[0].toLowerCase()}`, `the ${name} projection of LN2's output — (S, ${H * hd})`));
+      body.appendChild(matLabel(`${name}_pre (S, ${H * hd}) — before head split / RoPE`));
+      body.appendChild(heatGrid(a[sub + "_pre"][0], { cell: 12, title: name + "_pre" }));
+      if (sub !== "v") {
+        headSel(body);
+        body.appendChild(matLabel(`${name} post-RoPE, head ${HEAD} (S, ${hd})`));
+        body.appendChild(heatGrid(a[sub][0][HEAD], { cell: 14, title: name }));
+      }
+    };
+  }
+  if (sub === "rope") {
+    return (body) => {
+      body.appendChild(formula(
+        "\\theta_{\\text{pair}} = 10000^{-2i/d},\\qquad \\text{angle} = \\text{pos} \\cdot \\theta, \\qquad (x_0, x_1) \\mapsto (x_0\\cos\\theta - x_1\\sin\\theta,\\; x_0\\sin\\theta + x_1\\cos\\theta)",
+        "the position enters the model ONLY through these rotations of q and k (no learned position embedding)"
+      ));
+      body.appendChild(matLabel(`per-pair freqs (d/2 = ${hd / 2}): ${a.rope.freqs.map((v) => v.toFixed(4)).join(", ")}`));
+      body.appendChild(matLabel("angles[pos 0] and cos/sin of the first pair"));
+      body.appendChild(heatGrid(a.rope.cos[0], { cell: 14, title: "cos" }));
+      body.appendChild(heatGrid(a.rope.sin[0], { cell: 14, title: "sin" }));
+      headSel(body);
+      body.appendChild(matLabel(`q post-RoPE, head ${HEAD}`));
+      body.appendChild(heatGrid(a.q[0][HEAD], { cell: 14, title: "q" }));
+    };
+  }
+  if (sub === "scores") {
+    return (body) => {
+      body.appendChild(formula("s_{ij} = \\dfrac{q_i \\cdot k_j}{\\sqrt{d}}", "before the causal mask — the upper triangle is not masked yet"));
+      headSel(body);
+      body.appendChild(matLabel(`raw scores, head ${HEAD} (S, S)`));
+      body.appendChild(heatGrid(a.scores[0][HEAD], { cell: 12, title: "s" }));
+      body.appendChild(matLabel("after causal mask (j>i → −∞)"));
+      body.appendChild(heatGrid(a.scores_masked[0][HEAD], { cell: 12, title: "s̄" }));
+    };
+  }
+  if (sub === "mask") {
+    return (body) => {
+      body.appendChild(formula("\\text{mask}_{ij} = [j > i]", "causality: a position can only attend to itself and the past"));
+      body.appendChild(matLabel("causal mask (1 = masked)"));
+      body.appendChild(heatGrid(a.causal_mask, { cell: 12, title: "mask" }));
+      headSel(body);
+      body.appendChild(matLabel("masked scores"));
+      body.appendChild(heatGrid(a.scores_masked[0][HEAD], { cell: 12, title: "s̄" }));
+    };
+  }
+  if (sub === "softmax") {
+    return (body) => {
+      body.appendChild(formula("A_{ij} = \\dfrac{e^{s_{ij}}}{\\sum_{j'\\le i} e^{s_{ij'}}}", "rows sum to 1 over the causal prefix"));
+      headSel(body);
+      body.appendChild(matLabel(`attention weights, head ${HEAD} (S, S)`));
+      body.appendChild(heatGrid(a.attn_weights[0][HEAD], { cell: 12, title: "A" }));
+    };
+  }
+  if (sub === "o") {
+    return (body) => {
+      body.appendChild(formula("\\text{ctx} = A\\,v \\in \\mathbb{R}^{S \\times H d}, \\qquad \\text{out} = \\text{ctx}\\,W_o \\in \\mathbb{R}^{S \\times D}", "head outputs are concatenated and projected back to the model width"));
+      body.appendChild(matLabel("ctx (S, H·d) — heads merged"));
+      body.appendChild(heatGrid(a.ctx[0], { cell: 12, title: "ctx" }));
+      if (a.attn_out) {
+        body.appendChild(matLabel("out = ctx·Wo (S, D) — goes into the residual"));
+        body.appendChild(heatGrid(a.attn_out[0], { cell: 14, title: "out" }));
+      }
+    };
+  }
+  return null;
+}
+
+function ffnSubView(sub, bIdx) {
+  const fr = fwd().blocks[bIdx];
+  const m = fr.moe || fr.ffn;
+  if (!fr.moe) {
+    if (sub === "ffn") {
+      return (body) => {
+        body.appendChild(formula("\\text{gate} = \\text{SiLU}(x W_g),\\; \\text{up} = x W_u,\\; \\text{out} = (\\text{gate}\\odot\\text{up})W_d", `SiLU(z)=z·σ(z); FF width = ${m.ff_dim} (4·D)`));
+        body.appendChild(matLabel("gate = SiLU(x·Wg), (S, FF)"));
+        body.appendChild(heatGrid(m.gate[0], { cell: 11, title: "gate" }));
+        body.appendChild(matLabel("gated = gate ⊙ up"));
+        body.appendChild(heatGrid(m.gated[0], { cell: 11, title: "gated" }));
+        body.appendChild(matLabel("out (S, D)"));
+        body.appendChild(heatGrid(m.out[0], { cell: 14, title: "out" }));
+      };
+    }
+    if (sub === "gate") {
+      return (body) => {
+        body.appendChild(formula("\\text{pre} = x W_g, \\qquad \\text{gate} = \\text{SiLU}(\text{pre}) = \\text{pre}\\cdot\\sigma(\text{pre})", `intermediate width FF = ${m.ff_dim}`));
+        body.appendChild(matLabel("pre_gate (S, FF)"));
+        body.appendChild(heatGrid(m.pre_gate[0], { cell: 11, title: "pre" }));
+        body.appendChild(matLabel("gate (S, FF)"));
+        body.appendChild(heatGrid(m.gate[0], { cell: 11, title: "gate" }));
+      };
+    }
+    if (sub === "up") {
+      return (body) => {
+        body.appendChild(formula("\\text{up} = x W_u", "the un-gated projection, same width as the gate"));
+        body.appendChild(matLabel("up (S, FF)"));
+        body.appendChild(heatGrid(m.up[0], { cell: 11, title: "up" }));
+      };
+    }
+    if (sub === "mul") {
+      return (body) => {
+        body.appendChild(formula("\\text{gated} = \\text{gate} \\odot \\text{up}", "element-wise: the SiLU gate modulates the up-projection"));
+        body.appendChild(matLabel("gated (S, FF)"));
+        body.appendChild(heatGrid(m.gated[0], { cell: 11, title: "gated" }));
+      };
+    }
+    if (sub === "down") {
+      return (body) => {
+        body.appendChild(formula("\\text{out} = \\text{gated}\\, W_d", "projects back from FF to D"));
+        body.appendChild(matLabel("out (S, D)"));
+        body.appendChild(heatGrid(m.out[0], { cell: 14, title: "out" }));
+      };
+    }
+    return null;
+  }
+  // MoE
+  if (sub === "ffn") {
+    return (body) => {
+      body.appendChild(formula(
+        "p = \\text{softmax}(x W_{\\text{gate}}),\\; \\hat{p} = \\dfrac{\\text{top-k}(p)}{\\sum \\text{top-k}(p)},\\; \\text{out} = \\sum_{j\\in\\text{top-k}} \\hat{p}_j E_j(x)",
+        `router picks top-${m.top_k} of ${m.n_experts} experts; selected probabilities are renormalized into mixing weights`
+      ));
+      body.appendChild(matLabel("router scores (S, E)"));
+      body.appendChild(heatGrid(m.scores[0], { cell: 16, title: "scores", labels: m.scores[0].map((_, j) => "E" + j) }));
+      body.appendChild(matLabel("top-k picks (S, k)"));
+      body.appendChild(heatGrid(m.topk_idx[0], { cell: 16, title: "topk" }));
+      body.appendChild(matLabel("weights (S, E)"));
+      body.appendChild(heatGrid(m.weights[0], { cell: 16, title: "w" }));
+      m.expert_outs.forEach((eo, j) => {
+        body.appendChild(matLabel(`expert ${j} output (S, D)`));
+        body.appendChild(heatGrid(eo[0], { cell: 11, title: "E" + j }));
+      });
+      body.appendChild(matLabel("out (S, D)"));
+      body.appendChild(heatGrid(m.out[0], { cell: 14, title: "out" }));
+    };
+  }
+  if (sub === "router") {
+    return (body) => {
+      body.appendChild(formula("s = x W_{\\text{gate}} \\in \\mathbb{R}^{E}, \\qquad p = \\text{softmax}(s)", "one router matrix scores every expert for every position"));
+      body.appendChild(matLabel("scores (S, E) — stable-softmaxed"));
+      body.appendChild(heatGrid(m.scores[0], { cell: 16, title: "s", labels: m.scores[0].map((_, j) => "E" + j) }));
+      body.appendChild(matLabel("probs (S, E) before top-k mask"));
+      body.appendChild(barChart(m.weights[0][0], m.weights[0][0].map((_, j) => "E" + j)));
+    };
+  }
+  if (sub === "topk") {
+    return (body) => {
+      body.appendChild(formula("\\text{topk} = \\arg\\text{top-}\\kappa(p)", `each position keeps its ${m.top_k} highest-probability expert(s)`));
+      body.appendChild(matLabel("selected experts (S, k)"));
+      body.appendChild(heatGrid(m.topk_idx[0], { cell: 18, title: "topk", labels: m.scores[0].map((_, j) => "E" + j) }));
+    };
+  }
+  if (sub === "weights") {
+    return (body) => {
+      body.appendChild(formula("\\hat{p}_j = \\dfrac{p_j \\cdot \\mathbb{1}[j\\in\\text{topk}]}{\\sum_{j'} p_{j'} \\mathbb{1}[j'\\in\\text{topk}]} \\;\\Rightarrow\\; \\sum_j \\hat{p}_j = 1", "zero for non-selected experts, renormalized over the selected ones"));
+      body.appendChild(matLabel("weights (S, E)"));
+      body.appendChild(heatGrid(m.weights[0], { cell: 16, title: "w", labels: m.weights[0].map((_, j) => "E" + j) }));
+    };
+  }
+  if (sub === "experts") {
+    return (body) => {
+      body.appendChild(formula("E_j(x): each expert is a full SwiGLU FFN", "every expert evaluates x; only the selected ones contribute (dense evaluation)"));
+      m.expert_outs.forEach((eo, j) => {
+        body.appendChild(matLabel(`expert ${j} output (S, D)`));
+        body.appendChild(heatGrid(eo[0], { cell: 11, title: "E" + j }));
+      });
+    };
+  }
+  if (sub === "sum") {
+    return (body) => {
+      body.appendChild(formula("\\text{out} = \\sum_j \\hat{p}_j \\, E_j(x)", "weighted sum of the selected experts' outputs"));
+      body.appendChild(matLabel("out (S, D)"));
+      body.appendChild(heatGrid(m.out[0], { cell: 14, title: "out" }));
+    };
+  }
+  return null;
 }
 
 function renderInspector() {
   const body = drop($("ins-body"));
   if (!RECORD) return;
-  const c = MODEL.config;
-  const vocab = MODEL.vocab || [];
-  const f = fwd();
-  const D = f.embedding[0][0].length; // embed dim
-  const seqS = f.embedding[0].length; // S (batch = 1)
-
-  const id = CUR_NODE;
-  const parts = []; // [title, builder]
   const title = $("ins-title");
+  const id = CUR_NODE;
+  const f = fwd();
+  const seqS = seqLen();
+  const D = dim();
+  const vocab = MODEL.vocab || [];
+  let view = null;
 
-  const push = (fn) => parts.push(fn);
-
-  // ---- embedding ---------------------------------------------------------
   if (id === "emb") {
-    title.textContent = "Embedding lookup";
-    const emb = f.embedding[0]; // (S, D)
-    push(() => {
-      body.appendChild(formula("x_{\\text{emb}}[s, d] = E[\\text{token}_s, d]", "Each token id indexes a row of the (V, D) table E — no arithmetic, just a gather. Shape: (S, D)."));
-      body.appendChild(matLabel(`token ids: ${cur().input_tokens.join(", ")} → "${cur().input_tokens.map((t) => vocab[t] ?? t).join("")}"`));
-      body.appendChild(heatGrid(emb, { title: "embedding", cell: 14 }));
-      body.appendChild(matLabel(`(S=${seqS}, D=${D}) — each row is the token's D-dim vector`));
-    });
-  }
-
-  // ---- layernorms (ln1/ln2/final norm) -----------------------------------
-  const normRe = /^b(\d+)\.(ln1|ln2)$/;
-  const mNorm = normRe.exec(id);
-  if (mNorm || id === "fnorm") {
-    const blockRec = mNorm ? f.blocks[+mNorm[1]] : null;
-    const rec = mNorm ? blockRec[mNorm[2]] : f.final_norm;
-    const name = mNorm ? `block ${mNorm[1]} ${mNorm[2] === "ln1" ? "input" : "post-attention"} norm` : "final norm";
-    title.textContent = "RMSNorm — " + name;
-    push(() => {
-      const rms = rec.rms[0].map((v) => v[0]);
-      body.appendChild(formula(
-        "\\hat{x}_d = \\dfrac{x_d}{\\sqrt{\\tfrac{1}{D}\\textstyle\\sum_{d} x_d^2 + \\varepsilon}}, \\qquad y_d = \\gamma_d \\cdot \\hat{x}_d",
-        `rms (per row, sqrt(mean(x²)+eps)) for this step: [${rms.map((v) => v.toFixed(3)).join(", ")}]`
-      ));
-      body.appendChild(matLabel("γ (gamma) — the per-channel learned scale, (D,)"));
-      body.appendChild(barChart(rec.gamma, rec.gamma.map((_, i) => i)));
-      body.appendChild(matLabel(`output y = γ·x/rms, (S=${seqS}, D=${D})`));
-      body.appendChild(heatGrid(rec.out, { cell: 14, title: "y" }));
-    });
-  }
-
-  // ---- attention -----------------------------------------------------------
-  const mAttn = /^b(\d+)\.attn$/.exec(id);
-  if (mAttn) {
-    title.textContent = `block ${mAttn[1]} — multi-head attention`;
-    const a = f.blocks[+mAttn[1]].attn;
-    const H = c.n_heads, hd = c.embed_dim / H, S = seqS;
-    push(() => {
-      body.appendChild(formula(
-        "q = x W_q,\\; k = x W_k,\\; v = x W_v \\quad\\rightarrow\\quad s_{ij} = \\dfrac{q_i \\cdot k_j}{\\sqrt{d}} \\;\\text{(causal mask: } j > i \\Rightarrow -\\infty)",
-        `Q/K/V projections: (S, H·d) = (S, ${H * hd}) each; raw scores (H, S, S) below`
-      ));
-      body.appendChild(formula(
-        "A = \\text{softmax}(s),\\qquad \\text{ctx} = A \\, v",
-        "attention weights A (rows sum to 1) multiply V; heads merge back to (S, D)"
-      ));
-      body.appendChild(matLabel("RoPE — per-pair frequency θ = 10000^{−2i/d} and angle = pos·θ (shown for head 0, row 0)"));
-      body.appendChild(matLabel(`freqs: ${a.rope.freqs.map((v) => v.toFixed(4)).join(", ")}`));
-      body.appendChild(matLabel(`angles[pos0]: ${a.rope.angles[0][0].map((v) => v.toFixed(4)).join(", ")}`));
-
-      const headSel = document.createElement("div");
-      for (let h = 0; h < H; h++) {
-        const b = document.createElement("button");
-        b.textContent = "head " + h;
-        b.className = h === HEAD ? "on" : "";
-        b.onclick = () => { HEAD = h; renderInspector(); };
-        headSel.appendChild(b);
-      }
-      body.appendChild(headSel);
-
-      const q = a.q[0][HEAD], k = a.k[0][HEAD], v = a.v[0][HEAD], sc = a.scores[0][HEAD], sm = a.scores_masked[0][HEAD], aw = a.attn_weights[0][HEAD];
-      body.appendChild(matLabel(`q (S=${S}, d=${hd}) — post-RoPE`));
-      body.appendChild(heatGrid(q, { cell: 14, title: "q" }));
-      body.appendChild(matLabel(`k (S=${S}, d=${hd}) — post-RoPE`));
-      body.appendChild(heatGrid(k, { cell: 14, title: "k" }));
-      body.appendChild(matLabel("raw scores s = q·kᵀ/√d (pre-mask)"));
-      body.appendChild(heatGrid(sc, { cell: 12, title: "s" }));
-      body.appendChild(matLabel("scores after causal mask (future = −∞ shown as −1e4)"));
-      body.appendChild(heatGrid(sm, { cell: 12, title: "s̄" }));
-      body.appendChild(matLabel("attention weights A = softmax(s̄) — rows sum to 1"));
-      body.appendChild(heatGrid(aw, { cell: 12, title: "A" }));
-      body.appendChild(matLabel("context = A·v"));
-      body.appendChild(heatGrid(a.ctx[0], { cell: 14, title: "ctx" }));
-    });
-  }
-
-  // ---- residual / block output ---------------------------------------------
-  const mRes = /^b(\d+)\.(h|out)$/.exec(id);
-  if (mRes) {
-    const b = +mRes[1];
-    title.textContent = `block ${b} — ${mRes[2] === "h" ? "residual after attention" : "block output"}`;
-    const val = f.blocks[b][mRes[2]];
-    push(() => {
-      body.appendChild(formula(mRes[2] === "h" ? "h = x + \\text{attn}(x)" : "\\text{out} = h + \\text{ffn}(h)",
-        mRes[2] === "h" ? "The residual stream: block input + attention output. The skip connection is why depth is stable." : "Block output = residual after attention + FFN output; this becomes the next block's input."));
+    title.textContent = "Token embedding";
+    view = (body) => {
+      const s = RECORD.steps[CUR_STEP];
+      body.appendChild(formula("x_{\\text{emb}}[s, d] = E[\\text{token}_s, d]", "a pure table lookup — (V, D) row gather, no arithmetic"));
+      body.appendChild(matLabel(`tokens: ${s.input_tokens.join(", ")} → "${s.input_tokens.map((t) => vocab[t] ?? t).join("")}"`));
+      body.appendChild(heatGrid(f.embedding[0], { cell: 14, title: "emb" }));
       body.appendChild(matLabel(`(S=${seqS}, D=${D})`));
-      body.appendChild(heatGrid(val, { cell: 14, title: mRes[2] }));
-    });
-  }
-
-  // ---- FFN / MoE -------------------------------------------------------------
-  const mFfn = /^b(\d+)\.ffn$/.exec(id);
-  if (mFfn) {
-    const b = +mFfn[1];
-    const fr = f.blocks[b];
-    const isMoe = fr.moe;
-    title.textContent = `block ${b} — ` + (isMoe ? "mixture of experts (SwiGLU experts + router)" : "SwiGLU feed-forward");
-    push(() => {
-      if (!isMoe) {
-        const m = fr.ffn;
-        body.appendChild(formula(
-          "\\text{gate} = \\text{SiLU}(x W_g),\\; \\text{up} = x W_u,\\qquad \\text{out} = (\\text{gate} \\odot \\text{up}) \\, W_d",
-          `SiLU(z) = z·σ(z); intermediate width FF = ${m.ff_dim} (4·D)`
-        ));
-        body.appendChild(matLabel("gate = SiLU(x·Wg), (S, FF)"));
-        body.appendChild(heatGrid(m.gate, { cell: 11, title: "gate" }));
-        body.appendChild(matLabel("gated = gate ⊙ up"));
-        body.appendChild(heatGrid(m.gated, { cell: 11, title: "gated" }));
-        body.appendChild(matLabel("out (S, D)"));
-        body.appendChild(heatGrid(m.out, { cell: 14, title: "out" }));
-        return;
-      }
-      const m = fr.moe;
-      const E = m.n_experts;
-      body.appendChild(formula(
-        "p = \\text{softmax}(x W_{\\text{gate}}),\\qquad \\hat{p} = \\dfrac{\\text{top-k mask}(p)}{\\sum \\text{top-k mask}(p)},\\qquad \\text{out} = \\sum_{j \\in \\text{top-k}} \\hat{p}_j \\, E_j(x)",
-        `Router picks the top-${m.top_k} of ${E} experts; the selection probability is renormalized and used as the mixing weight. Every expert runs on x (dense eval), only the selected ones contribute.`
-      ));
-      body.appendChild(matLabel(`router scores (S, E) — stable-softmaxed`));
-      body.appendChild(heatGrid(m.scores, { cell: 16, title: "scores", labels: m.scores[0].map((_, j) => "E" + j) }));
-      body.appendChild(matLabel(`top-k picks (S, ${m.top_k}) — which expert each position uses`));
-      body.appendChild(heatGrid(m.topk_idx, { cell: 16, title: "topk" }));
-      body.appendChild(matLabel("weights — renormalized routing probabilities (S, E)"));
-      body.appendChild(heatGrid(m.weights, { cell: 16, title: "w" }));
-      m.expert_outs.forEach((eo, j) => {
-        body.appendChild(matLabel(`expert ${j} output (S, D)`));
-        body.appendChild(heatGrid(eo, { cell: 11, title: `E${j}` }));
-      });
-      body.appendChild(matLabel("out = Σ ŵⱼ·Eⱼ(x)  (S, D)"));
-      body.appendChild(heatGrid(m.out, { cell: 14, title: "out" }));
-    });
-  }
-
-  // ---- lm_head / softmax ------------------------------------------------------
-  if (id === "lmhead" || id === "softmax") {
-    const s = cur();
-    const logits = f.logits[0]; // (S, V)
-    const soft = f.softmax[0];
-    title.textContent = id === "lmhead" ? "lm_head — projection to vocabulary" : "softmax — next-token distribution";
-    push(() => {
+    };
+  } else if (id === "pos") {
+    title.textContent = "Positions → RoPE (no learned position embedding)";
+    const a = f.blocks[0].attn;
+    view = (body) => {
+      body.appendChild(formula("\\text{angle} = \\text{pos} \\cdot 10000^{-2i/d}", "positions are 0…S-1; they enter the model only as rotary angles applied to q and k inside attention"));
+      body.appendChild(matLabel(`positions: ${f.positions.join(", ")}`));
+      body.appendChild(matLabel("cos / sin angles (S, pairs) — block 0, head 0"));
+      body.appendChild(heatGrid(a.rope.cos[0], { cell: 12, title: "cos" }));
+      body.appendChild(heatGrid(a.rope.sin[0], { cell: 12, title: "sin" }));
+    };
+  } else if (id === "fnorm") {
+    title.textContent = "Final norm — RMSNorm before lm_head";
+    view = normView(id, f.final_norm);
+  } else if (id === "lmhead" || id === "softmax") {
+    const s = RECORD.steps[CUR_STEP];
+    if (id === "lmhead") title.textContent = "lm_head — projection to vocabulary";
+    else title.textContent = "softmax — next-token distribution";
+    view = (body) => {
       if (id === "lmhead") {
-        body.appendChild(formula("z_s = (\\text{normed}_s) \\, W_{\\text{lm}}", "Each position's normalized vector is projected to all V vocab logits (S, V)."));
+        body.appendChild(formula("z_s = \\text{normed}_s \\, W_{\\text{lm}}", "every position's vector is projected to all V vocab logits — (S, V)"));
       } else {
-        body.appendChild(formula("p_i = \\dfrac{e^{z_i}}{\\sum_j e^{z_j}}, \\qquad \\hat{t} = \\arg\\max_i p_i", "Greedy = argmax; sampling = draw from p (optionally with temperature / top-k)."));
+        body.appendChild(formula("p_i = \\dfrac{e^{z_i}}{\\sum_j e^{z_j}}, \\qquad \\hat{t} = \\arg\\max_i p_i", "greedy = argmax; sampling draws from p (with temperature / top-k)"));
         body.appendChild(matLabel(`this step picked token ${s.token} ("${vocab[s.token] ?? s.token}")`));
       }
-      body.appendChild(matLabel(`logits / probabilities for the last position (V = ${c.vocab_size} vocab chars)`));
-      const last = id === "lmhead" ? logits[logits.length - 1] : soft[soft.length - 1];
-      body.appendChild(heatGrid([last], { cell: 18, title: "z/p", labels: vocab }));
+      const last = id === "lmhead" ? f.logits[0][seqS - 1] : f.softmax[0][seqS - 1];
+      body.appendChild(matLabel(`logits / probabilities of the last position (V = ${MODEL.config.vocab_size})`));
+      body.appendChild(heatGrid([last], { cell: 18, title: id === "lmhead" ? "z" : "p", labels: vocab }));
       body.appendChild(matLabel("top-10 at the last position"));
       body.appendChild(barChart(s.top_tokens.map((t) => t[1]), s.top_tokens.map((t) => `${vocab[t[0]] ?? t[0]} (${t[0]})`)));
-    });
+    };
+  } else {
+    const mBlock = /^b(\d+)\./ .exec(id);
+    if (mBlock) {
+      const b = +mBlock[1];
+      const rest = id.slice((mBlock[0]).length);
+      const mSub = rest.match(/^(ln1|ln2|attn|ffn|h|out)(?:\.(.+))?$/);
+      if (mSub) {
+        const what = mSub[1], sub = mSub[2];
+        if (what === "ln1" || what === "ln2") {
+          title.textContent = `block ${b} — ${what === "ln1" ? "input" : "post-attention"} norm (RMSNorm)`;
+          view = normView(id, f.blocks[b][what]);
+        } else if (what === "attn") {
+          title.textContent = sub ? `block ${b} — attention / ${sub}` : `block ${b} — attention`;
+          view = attnSubView(sub || "attn", b);
+        } else if (what === "ffn") {
+          title.textContent = sub ? `block ${b} — feed-forward / ${sub}` : `block ${b} — feed-forward`;
+          view = ffnSubView(sub || "ffn", b);
+        } else {
+          const isH = what === "h";
+          title.textContent = `block ${b} — ${isH ? "residual after attention" : "block output"}`;
+          const val = f.blocks[b][what];
+          view = (body) => {
+            body.appendChild(formula(isH ? "h = x + \\text{attn}(x)" : "\\text{out} = h + \\text{ffn}(h)",
+              isH ? "residual stream after attention — the skip connection that makes depth stable" : "block output — becomes the next block's input"));
+            body.appendChild(matLabel(`(S=${seqS}, D=${D})`));
+            body.appendChild(heatGrid(val[0], { cell: 14, title: what }));
+          };
+        }
+      }
+    }
   }
 
-  parts.forEach((fn) => {
-    const b = drop(body);
-    fn();
-    body.querySelectorAll(".formula").forEach(renderTex);
-  });
+  if (!view) {
+    body.innerHTML = '<p class="note">Pick a module in the diagram to see its tensors and math.</p>';
+    return;
+  }
+  view(body);
+  body.querySelectorAll(".formula").forEach(renderTex);
 }
 
 // ---------------------------------------------------------------------------

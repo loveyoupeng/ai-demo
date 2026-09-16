@@ -36,7 +36,7 @@ def main() -> None:
         action="store_true",
         help="Learning mode: host a webpage for interactive inference, architecture/math visualization, and inference records",
     )
-    parser.add_argument("--port", type=int, default=8000, help="Port for --learning (default 8000)")
+    parser.add_argument("--port", type=int, default=8080, help="Port for --learning (default 8080)")
     parser.add_argument(
         "--model",
         type=str,

@@ -77,6 +77,7 @@ class AttnRecord(TypedDict):
     scale: float
     rope: RopeRecord
     scores: list
+    attn_out: list
     causal_mask: list
     scores_masked: list
     attn_weights: list
@@ -108,8 +109,6 @@ class MoERecord(TypedDict):
 
 
 class BlockRecord(TypedDict, total=False):
-    """One block's capture; exactly one of ``ffn`` / ``moe`` is present."""
-
     ln1: NormRecord
     attn: AttnRecord
     h: list
@@ -223,10 +222,11 @@ def _attn_record(
         "scale": float(scale),  # sqrt(hd) — divide scores by this
         "rope": _rope_record(state["q_rope_in"].transpose(0, 2, 1, 3), positions, model_attn.rope_dim),
         "scores": arr(np.nan_to_num(scores, neginf=-1e4)),  # (B, H, S, S)
-        "causal_mask": arr(mask.astype(np.float64)),  # (S, S)
         "scores_masked": arr(np.nan_to_num(scores_masked, neginf=-1e4)),  # (B, H, S, S)
+        "causal_mask": arr(mask.astype(np.float64)),  # (S, S)
         "attn_weights": arr(state["attn"]),  # (B, H, S, S) — softmax output
         "ctx": arr(state["ctx"]),  # (B, S, H·hd)
+        "attn_out": arr(attn_out),  # (B, S, D) — ctx @ Wo
     }
 
 
