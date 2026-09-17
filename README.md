@@ -73,6 +73,22 @@ uv run python -m impl._torch.cli \
 uv run python -m scripts.train --backend numpy|torch|triton|cuda
 ```
 
+### Real-data checkpoints (TinyStories)
+
+The 4-backend "real" checkpoints (`resource/models/{backend}_real/`) train all four
+backends on the TinyStories dataset (GPT-2 BPE, vocab 50,257) from an identical
+weight start, then save one checkpoint per backend. They total ~150 MB (the
+50,257-wide embedding + lm_head dominate — the transformer itself is only ~1 MB),
+so they are **git-ignored**, not committed. Recreate any time:
+
+```bash
+# Full reproduction (all 4 backends, ~150 MB, ~1-2 min on the GPU)
+uv run python -m scripts.train_real_tinystories
+
+# Quick small check (2 backends, 5 steps, throwaway suffix)
+uv run python -m scripts.train_real_tinystories --backends numpy,torch --num_batches 5 --suffix tmp
+```
+
 ### Equivalence verification
 
 ```bash

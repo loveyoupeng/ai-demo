@@ -15,4 +15,7 @@ tests/unit/_cuda/.cache/
 # Virtual environments
 .venv
 resource/
+# 4-backend TinyStories checkpoints (~150 MB total) — NOT committed.
+# Recreate with:  uv run python -m scripts.train_real_tinystories
+resource/models/*_real/
 tmp/

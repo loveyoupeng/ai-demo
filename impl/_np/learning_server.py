@@ -231,9 +231,13 @@ def make_handler(model: NumPyModel, vocab: list[str] | None, web_dir: Path = WEB
 
 
 def start_server(
-    model: NumPyModel, vocab: list[str] | None, host: str = "127.0.0.1", port: int = 8080
+    model: NumPyModel, vocab: list[str] | None, host: str = "0.0.0.0", port: int = 8080
 ) -> ThreadingHTTPServer:
-    """Create (and start serving on a thread) the learning-mode HTTP server."""
+    """Create the learning-mode HTTP server (bound and listening, not yet serving).
+
+    The caller owns the serving loop: ``server.serve_forever()`` (CLI) or a
+    daemon thread (tests).
+    """
     handler = make_handler(model, vocab)
     server = ThreadingHTTPServer((host, port), handler)
     logger.info("learning mode: serving on http://%s:%d", host, port)

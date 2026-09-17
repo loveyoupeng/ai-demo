@@ -26,6 +26,7 @@ from impl._np.attention import MultiHeadAttention
 from impl._np.ffn import SwiGLUFFN, silu
 from impl._np.model import NumPyModel
 from impl._np.moe import MixtureOfExperts
+from impl._np.rope import RoPE
 
 # ---------------------------------------------------------------------------
 # Tensor → JSON helpers
@@ -82,6 +83,8 @@ class AttnRecord(TypedDict):
     scores_masked: list
     attn_weights: list
     ctx: list
+    k_cache: list
+    v_cache: list
 
 
 class FFNRecord(TypedDict):
@@ -135,6 +138,8 @@ class StepRecord(TypedDict):
     """One generated token: its input, full forward record, and the pick."""
 
     step: int
+    kind: str
+    position: int
     input_tokens: list
     forward: ForwardRecord
     top_tokens: list
@@ -227,6 +232,96 @@ def _attn_record(
         "attn_weights": arr(state["attn"]),  # (B, H, S, S) — softmax output
         "ctx": arr(state["ctx"]),  # (B, S, H·hd)
         "attn_out": arr(attn_out),  # (B, S, D) — ctx @ Wo
+        # The KV cache state AFTER this step: in prefill the whole prompt's
+        # K/V are stored (GQA-expanded to H heads so the page can browse heads).
+        "k_cache": arr(k),  # (B, H, S, hd)
+        "v_cache": arr(state["v"]),  # (B, H, S, hd)
+    }
+
+
+def _init_kv_cache(attn: MultiHeadAttention, k_pre: np.ndarray, v_pre: np.ndarray, positions: np.ndarray) -> dict:
+    """Build a block's KV cache from a prefill pass.
+
+    k_pre/v_pre are the pre-RoPE, un-split projections (B, S, G·hd). The
+    cache stores K/V *per group* (GQA keeps it small); RoPE is applied to K
+    with the prefill positions so later decode steps only rotate the NEW
+    token and can attend to these cached rows unchanged.
+    """
+    B, S, _ = k_pre.shape
+    G, hd = attn.n_groups, attn.head_dim
+    k_heads = k_pre.reshape(B, S, G, hd).transpose(0, 2, 1, 3)  # (B, G, S, hd) pre-RoPE
+    v_heads = v_pre.reshape(B, S, G, hd).transpose(0, 2, 1, 3)  # (B, G, S, hd)
+    k_heads = (
+        RoPE().forward(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=attn.rope_dim).transpose(0, 2, 1, 3)
+    )  # (B, G, S, hd) post-RoPE
+    return {"k": k_heads, "v": v_heads}  # each (B, G, S, hd)
+
+
+def _attn_step_record(
+    attn: MultiHeadAttention, x: np.ndarray, position: int, cache: dict
+) -> tuple[np.ndarray, AttnRecord]:
+    """Run ONE decode step through the block's real ``forward_step`` (which
+    appends the new K/V to ``cache``) and capture the record the page shows.
+
+    The intermediates are recomputed with the same math as ``forward_step``
+    (same parameters, same operations) — the cache is already appended, so
+    the displayed scores/weights are exactly what produced the output.
+    Nothing is masked in decode: every cached row is in the past of the new
+    token, so the causal mask is all zeros and the row spans positions
+    1..t (the whole cache).
+    """
+    out = attn.forward_step(x, position, cache)  # (B, 1, D); cache mutated
+    B = x.shape[0]
+    H, G, hd = attn.n_heads, attn.n_groups, attn.head_dim
+    positions = np.array([position], dtype=np.int32)  # (1,)
+
+    q_pre = x @ attn.q_proj  # (B, 1, H·hd)
+    k_pre = x @ attn.k_proj  # (B, 1, G·hd)
+    v_pre = x @ attn.v_proj  # (B, 1, G·hd)
+    q_rope_in = q_pre.reshape(B, 1, H, hd).transpose(0, 2, 1, 3)  # (B, H, 1, hd) pre-RoPE
+    k_rope_in = k_pre.reshape(B, 1, G, hd).transpose(0, 2, 1, 3)  # (B, G, 1, hd) pre-RoPE
+    v = v_pre.reshape(B, 1, G, hd).transpose(0, 2, 1, 3)  # (B, G, 1, hd)
+    q = (
+        RoPE().forward(q_rope_in.transpose(0, 2, 1, 3), positions, rope_dim=attn.rope_dim).transpose(0, 2, 1, 3)
+    )  # (B, H, 1, hd)
+    k = (
+        RoPE().forward(k_rope_in.transpose(0, 2, 1, 3), positions, rope_dim=attn.rope_dim).transpose(0, 2, 1, 3)
+    )  # (B, G, 1, hd)
+    if G != H:  # GQA: broadcast each group to its query heads (display parity with _attn_record)
+        k = np.repeat(k, H // G, axis=1)  # (B, H, 1, hd)
+        v = np.repeat(v, H // G, axis=1)  # (B, H, 1, hd)
+
+    # The cache AFTER the append (GQA-expanded) is what the new query attended to.
+    k_r = np.repeat(cache["k"], H // G, axis=1) if G != H else cache["k"]  # (B, H, t, hd)
+    v_r = np.repeat(cache["v"], H // G, axis=1) if G != H else cache["v"]  # (B, H, t, hd)
+    t = k_r.shape[2]
+
+    scale = float(np.sqrt(hd))
+    scores = (q @ k_r.transpose(0, 1, 3, 2)) / scale  # (B, H, 1, t)
+    mask = np.zeros((1, t), dtype=bool)  # (1, t) — nothing masked in decode
+    z = scores - np.max(scores, axis=-1, keepdims=True)
+    attn_w = np.exp(z) / np.sum(np.exp(z), axis=-1, keepdims=True)  # (B, H, 1, t)
+    ctx = (attn_w @ v_r).transpose(0, 2, 1, 3).reshape(B, 1, H * hd)  # (B, 1, H·hd)
+
+    return out, {
+        "q_pre": arr(q_pre),  # (B, 1, H·hd)
+        "k_pre": arr(k_pre),  # (B, 1, G·hd)
+        "v_pre": arr(v_pre),  # (B, 1, G·hd)
+        "q_rope_in": arr(q_rope_in.transpose(0, 2, 1, 3)),  # (B, 1, H, hd) pre-RoPE
+        "k_rope_in": arr(k_rope_in.transpose(0, 2, 1, 3)),  # (B, 1, G, hd) pre-RoPE
+        "q": arr(q),  # (B, H, 1, hd) post-RoPE
+        "k": arr(k),  # (B, H, 1, hd) post-RoPE (GQA-expanded)
+        "v": arr(v),  # (B, H, 1, hd)
+        "scale": scale,  # sqrt(hd)
+        "rope": _rope_record(q_rope_in.transpose(0, 2, 1, 3), positions, attn.rope_dim),
+        "scores": arr(np.nan_to_num(scores, neginf=-1e4)),  # (B, H, 1, t) over the WHOLE cache
+        "scores_masked": arr(np.nan_to_num(scores, neginf=-1e4)),  # (B, H, 1, t) — mask is all zeros
+        "causal_mask": arr(mask.astype(np.float64)),  # (1, t) — all 0 in decode
+        "attn_weights": arr(attn_w),  # (B, H, 1, t)
+        "ctx": arr(ctx),  # (B, 1, H·hd)
+        "attn_out": arr(out),  # (B, 1, D)
+        "k_cache": arr(k_r),  # (B, H, t, hd) — the full cache after this append
+        "v_cache": arr(v_r),  # (B, H, t, hd)
     }
 
 
@@ -361,18 +456,28 @@ def generate_with_records(
     top_k: int | None = None,
     seed: int = 42,
 ) -> GenerationRecord:
-    """Generate ``n_tokens`` tokens, capturing an inference record per step.
+    """Generate ``n_tokens`` with a real KV cache, recording every step.
 
-    Each step is a FULL forward over the current sequence (no KV cache) —
-    the page shows every position, so the record is the whole matrix, not a
-    single-row slice. ``temp is None`` → greedy (argmax); otherwise sample
-    with temperature scaling and optional top-k filtering (seeded).
+    Step 0 is **prefill**: one full forward over the prompt (the same
+    ``instrumented_forward`` as before), after which each block's KV cache
+    is initialized with the prompt's RoPE'd K/V. Steps 1..n are
+    **autoregressive decode**: each step embeds ONLY the new token and runs
+    the blocks' real ``forward_step``, which appends the new K/V row to the
+    cache and attends the single new query to the whole cache — no
+    recomputation of past positions, and no causal mask needed (every cached
+    row is in the past). The generated tokens are identical to the naive
+    full-recompute loop (same math, same parameters), but each decode step's
+    record shows the single new row plus the full cache it attended to.
+
+    ``temp is None`` → greedy (argmax); otherwise sample with temperature
+    scaling and optional top-k filtering (seeded).
 
     Returns:
       {
         "config": {...}, "vocab": [...],
         "prompt": {"tokens": [...], "text": "..."},
-        "steps": [ {"step": i, "input_tokens": [...], "forward": {...},
+        "steps": [ {"step": i, "kind": "prefill"|"decode", "position": int,
+                     "input_tokens": [...], "forward": {...},
                      "top_tokens": [[id, prob]...], "token": id, "text": str}, ... ],
         "generated": {"tokens": [...], "text": "..."},
       }
@@ -381,27 +486,104 @@ def generate_with_records(
     ctx = model.config.context_length
     seq = list(prompt_ids)
     steps: list[StepRecord] = []
-    for i in range(n_tokens):
-        x = np.array([seq[-ctx:]], dtype=np.int32)
-        rec = instrumented_forward(model, x)
-        p_last = np.asarray(rec["softmax"], dtype=np.float64)[0][-1]  # (V,) at the last position
+
+    def _pick(p_last: np.ndarray) -> int:
+        """Greedy argmax, or seeded temperature/top-k sampling."""
         if temp is None:
-            tok = int(np.argmax(p_last))
-        else:
-            z = np.log(p_last + 1e-30) / temp
-            if top_k is not None:
-                kth = np.partition(z, -top_k)[-1]
-                z = np.where(z < kth, -np.inf, z)
-            z = z - z.max()
-            pk = np.exp(z)
-            pk /= pk.sum()
-            tok = int(rng.choice(len(pk), p=pk))
+            return int(np.argmax(p_last))
+        z = np.log(p_last + 1e-30) / temp
+        if top_k is not None:
+            kth = np.partition(z, -top_k)[-1]
+            z = np.where(z < kth, -np.inf, z)
+        z = z - z.max()
+        pk = np.exp(z)
+        pk /= pk.sum()
+        return int(rng.choice(len(pk), p=pk))
+
+    # ---- Step 0: prefill the prompt (full forward, initializes the caches)
+    x = np.array([seq[-ctx:]], dtype=np.int32)
+    rec = instrumented_forward(model, x)
+    tok = _pick(np.asarray(rec["softmax"], dtype=np.float64)[0][-1])
+    steps.append(
+        {
+            "step": 0,
+            "kind": "prefill",
+            "position": int(x.shape[1] - 1),  # last prompt position produced the token
+            "input_tokens": list(seq[-ctx:]),
+            "forward": rec,
+            "top_tokens": rec["top_tokens"],
+            "token": tok,
+            "text": vocab[tok],
+        }
+    )
+    seq.append(tok)
+    p0 = list(x[0])
+    positions0 = np.arange(len(p0), dtype=np.int32) + (len(seq) - 1 - len(p0))  # absolute
+    caches: list[dict] = []
+    for i, block in enumerate(model.stack.layers):
+        r = rec["blocks"][i]["attn"]
+        caches.append(_init_kv_cache(block.self_attn, np.array(r["k_pre"]), np.array(r["v_pre"]), positions0))
+
+    # ---- Steps 1..n: autoregressive decode, one new token per step
+    for i in range(1, n_tokens):
+        t = len(seq) - 1  # absolute position of the new token
+        x1 = np.array([seq[-1:]], dtype=np.int32)  # (1, 1)
+        emb = model.embedding.forward(x1)  # (1, 1, D)
+        stream = emb
+        blocks: list[BlockRecord] = []
+        for j, block in enumerate(model.stack.layers):
+            ln1 = block.input_layernorm
+            ln1_out = ln1.forward(stream)  # (1, 1, D)
+            attn_out, attn_rec = _attn_step_record(block.self_attn, ln1_out, t, caches[j])  # (1, 1, D)
+            h = stream + attn_out  # (1, 1, D)
+            ln2 = block.post_attention_layernorm
+            ln2_out = ln2.forward(h)  # (1, 1, D)
+            mlp = block.mlp
+            ff_out = mlp.forward(ln2_out)  # (1, 1, D)
+            out = h + ff_out  # (1, 1, D)
+            block_rec: BlockRecord = {
+                "ln1": _rmsnorm_record(ln1.gamma, stream, ln1.eps, ln1_out),
+                "attn": attn_rec,
+                "h": arr(h),
+                "ln2": _rmsnorm_record(ln2.gamma, h, ln2.eps, ln2_out),
+                "out": arr(out),
+            }
+            if isinstance(mlp, MixtureOfExperts):
+                block_rec["moe"] = _moe_record(mlp, ln2_out, ff_out)
+            else:
+                block_rec["ffn"] = _ffn_record(mlp, ln2_out, ff_out)
+            blocks.append(block_rec)
+            stream = out
+
+        normed = model.final_norm.forward(stream)  # (1, 1, D)
+        logits = normed @ model.lm_head_weight  # (1, 1, V)
+        z = logits.astype(np.float64) - np.max(logits, axis=-1, keepdims=True)
+        p = np.exp(z)
+        p /= np.sum(p, axis=-1, keepdims=True)  # (1, 1, V)
+        V = p.shape[-1]
+        top_n = min(10, V)
+        top_idx = np.argsort(p[0, 0])[::-1][:top_n]  # top-10 (single position)
+        top_tokens = [[int(k), float(p[0, 0, k])] for k in top_idx]
+
+        rec: ForwardRecord = {
+            "input_ids": x1.tolist(),
+            "embedding": arr(emb),
+            "positions": [t],
+            "blocks": blocks,
+            "final_norm": _rmsnorm_record(model.final_norm.gamma, stream, model.final_norm.eps, normed),
+            "logits": arr(logits),
+            "softmax": arr(p),
+            "top_tokens": top_tokens,
+        }
+        tok = _pick(p[0, 0])
         steps.append(
             {
                 "step": i,
-                "input_tokens": list(seq[-ctx:]),
+                "kind": "decode",
+                "position": t,
+                "input_tokens": [int(seq[-1])],  # only the new token is computed
                 "forward": rec,
-                "top_tokens": rec["top_tokens"],
+                "top_tokens": top_tokens,
                 "token": tok,
                 "text": vocab[tok],
             }

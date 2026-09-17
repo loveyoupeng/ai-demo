@@ -38,6 +38,12 @@ def main() -> None:
     )
     parser.add_argument("--port", type=int, default=8080, help="Port for --learning (default 8080)")
     parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Interface to bind for --learning (default 0.0.0.0 = all interfaces, allows local-network access)",
+    )
+    parser.add_argument(
         "--model",
         type=str,
         default="resource/models/learning_demo",
@@ -49,8 +55,8 @@ def main() -> None:
         from impl._np import learning_server
 
         lm, vocab, _cfg = learning_server.load_learning_model(args.model)
-        server = learning_server.start_server(lm, vocab, port=args.port)
-        print(f"Learning mode: http://127.0.0.1:{args.port}  (model: {args.model})")
+        server = learning_server.start_server(lm, vocab, host=args.host, port=args.port)
+        print(f"Learning mode: listening on {args.host}:{args.port}  (model: {args.model})")
         try:
             server.serve_forever()
         except KeyboardInterrupt:

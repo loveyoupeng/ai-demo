@@ -101,7 +101,8 @@ class TestInstrumentedForward:
                 "causal_mask",
                 "attn_weights",
                 "ctx",
-                "attn_out",
+                "k_cache",
+                "v_cache",
                 "scale",
                 "rope",
             ]:
@@ -193,16 +194,57 @@ class TestGenerateWithRecords:
         assert a["steps"][0]["input_tokens"] == tail
 
     @pytest.mark.timeout(30)
-    def test_step_records_grow_with_sequence(self):
-        """Each step is a full forward over the growing sequence — step i's
-        input is the prompt plus the i previously generated tokens."""
+    def test_prefill_then_cached_decode_steps(self):
+        """Step 0 prefills the prompt; each decode step processes only the new
+        token, and its K/V cache grows by exactly one row per step."""
         model = tiny_model()
         prompt = [1, 2, 3]
         rec = generate_with_records(model, [chr(97 + i) for i in range(8)], prompt, 4, seed=42)
         gen = rec["generated"]["tokens"]
-        for i, step in enumerate(rec["steps"]):
-            assert step["input_tokens"] == (prompt + gen[:i])[-model.config.context_length :]
+        s0 = rec["steps"][0]
+        assert s0["kind"] == "prefill"
+        assert s0["input_tokens"] == prompt
+        assert s0["forward"]["positions"] == [0, 1, 2]
+        # prefill record already holds the initialized cache: one row per prompt token
+        k0 = s0["forward"]["blocks"][0]["attn"]["k_cache"][0]
+        assert len(k0) == model.config.n_heads and len(k0[0]) == len(prompt)
+        for i, step in enumerate(rec["steps"][1:], start=1):
+            assert step["kind"] == "decode"
+            assert step["input_tokens"] == [gen[i - 1]]  # only the new token is computed
+            assert step["forward"]["positions"] == [len(prompt) + i - 1]
+            kc = step["forward"]["blocks"][0]["attn"]["k_cache"][0][0]
+            assert len(kc) == len(prompt) + i  # cache grew by one row per step
         assert rec["prompt"]["tokens"] == prompt
+
+    @pytest.mark.timeout(30)
+    def test_cached_generation_matches_naive_full_recompute(self):
+        """The KV-cached path generates the same tokens (and near-identical
+        final logits) as the naive loop that re-forwards the whole sequence."""
+        import numpy as np
+
+        from impl._np.learning import instrumented_forward
+
+        model = tiny_model()
+        vocab = [chr(97 + i) for i in range(8)]
+        prompt = [1, 3, 5, 2]
+        rec = generate_with_records(model, vocab, prompt, 6)  # greedy
+        # naive reference: full forward every step, argmax
+        seq = list(prompt)
+        naive = []
+        for _ in range(6):
+            x = np.array([seq[-model.config.context_length :]], dtype=np.int32)
+            f = instrumented_forward(model, x)
+            p = np.asarray(f["softmax"], dtype=np.float64)[0][-1]
+            t = int(np.argmax(p))
+            naive.append(t)
+            seq.append(t)
+        assert rec["generated"]["tokens"] == naive
+        # the last recorded step's logits vs a full forward at the SAME
+        # position (its input sequence is the prefix ending at that token)
+        last_pos = rec["steps"][-1]["position"]
+        prefix = (prompt + rec["generated"]["tokens"])[: last_pos + 1]
+        whole = model.forward(np.array([prefix], dtype=np.int32))[0, last_pos]
+        assert np.allclose(np.array(rec["steps"][-1]["forward"]["logits"][0][0]), whole, rtol=1e-8, atol=1e-8)
 
 
 @pytest.mark.timeout(30)
