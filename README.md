@@ -5,13 +5,16 @@ equivalent backends**: NumPy (pure manual math, the teaching reference),
 PyTorch (the production idiom), Triton (GPU kernels over a PyTorch model),
 and CUDA (bare-metal NVRTC kernels). All four tracks share the same
 architecture, the same key scheme, and the same config — a model trained on
-one track loads and runs on any other.
+one track loads and runs on any other. A NumPy-only **learning mode** adds an
+interactive web page that visualizes the architecture, shows every
+intermediate tensor of an inference, and exports full inference records.
 
 See [CONTEXT.md](CONTEXT.md) for the domain glossary,
 [docs/specs/architecture-fixes.md](docs/specs/architecture-fixes.md) for the
-architecture spec and progress, and
+architecture spec and progress,
 [docs/seam_triton_to_torch.md](docs/seam_triton_to_torch.md) for the
-documented Triton→PyTorch shared seam.
+documented Triton→PyTorch shared seam, and [AGENTS.md](AGENTS.md) for
+repository guidelines and development rules.
 
 ## Features
 
@@ -29,19 +32,31 @@ documented Triton→PyTorch shared seam.
   an alternative with a parity-budget test.
 - **Analytic backward** (NumPy): every operator has a closed-form
   `backward(dout, x) -> (dinput, dparams)`; `check_model_gradients` verifies
-  it against finite differences (float64, ~1e-10).
+  it against finite differences (float64, ~1e-10, MoE top-k kink-aware).
 - **Cross-backend parity**: three-tier tolerance policy (see AGENTS.md rule
   2); 42 cross-backend tests cover dense/GQA/MoE parity, GPU parity, and a
-  3-way equivalence demo.
+  3-way equivalence demo; `scripts.verify_equivalence` runs 6 end-to-end
+  scenarios.
 - **Checkpoint interchange**: one flat-dict key scheme
-  (`shared.constants.Keys`) + a parameter registry
-  (`shared/registry.py`) that validates shape and key-set on load.
+  (`shared.constants.Keys`, HF-Llama naming) + a parameter registry
+  (`shared/registry.py`) that validates shape and key-set on load
+  (stale checkpoints fail fast).
+- **Learning mode** (NumPy track): `impl._np.cli --learning` hosts a web
+  page (stdlib HTTP server, no dependencies) with prompt + generation, an
+  architecture view with per-block numbers, and downloadable JSON inference
+  records of every intermediate tensor. The instrumented forward is a pure
+  overlay — bit-identical to `NumPyModel.forward`, `impl/_np` untouched.
+- **Real-data training**: TinyStories (GPT-2 BPE, vocab 50,257) dataset
+  pipeline in `shared/dataset.py`, plus a char-level tokenizer for the tiny
+  demo model; unified train/infer scripts for all four backends.
 
 ## Installation
 
 ```bash
 uv sync
 ```
+
+Python 3.10; torch is pinned to `2.13.0+cu132` via a custom uv index.
 
 ## Usage
 
@@ -65,12 +80,34 @@ uv run python -m impl._torch.cli \
     --prompt "Once upon a" --max_new_tokens 50 \
     --temperature 0.9 --top_k 20 \
     --embed_dim 64 --n_layers 4 --n_heads 8
+
+# Unified script (any backend, any checkpoint)
+uv run python -m scripts.infer --model resource/models/torch_real/ --backend torch --prompt "hello"
+```
+
+### Learning mode (NumPy web page)
+
+```bash
+# Serves http://127.0.0.1:8080; auto-trains the demo model first run (~100 s)
+bash scripts/run_learning_mode.sh
+
+# Equivalent direct invocation (port/model overridable)
+uv run python -m impl._np.cli --learning --port 8080 --model resource/models/learning_demo
+
+# Rebuild the demo model (tiny char-level MoE: D=8, H=4, L=3, E=3, V=20)
+uv run python -m scripts.train_demo_model
+uv run python -m scripts.train_demo_model --backend cuda   # GPU backends too
 ```
 
 ### Training
 
 ```bash
+# Unified training (all backends)
 uv run python -m scripts.train --backend numpy|torch|triton|cuda
+
+# Options: --synthetic (no dataset), --n_layers, --embed_dim, --n_experts,
+# --save_dir, --config resource/models/config.json, ...
+uv run python -m scripts.train --backend torch --synthetic --epochs 3
 ```
 
 ### Real-data checkpoints (TinyStories)
@@ -89,16 +126,24 @@ uv run python -m scripts.train_real_tinystories
 uv run python -m scripts.train_real_tinystories --backends numpy,torch --num_batches 5 --suffix tmp
 ```
 
+The TinyStories dataset itself lives in `resource/` (also git-ignored):
+`uv run python -m scripts.download_tinystories` fetches it.
+
 ### Equivalence verification
 
 ```bash
+# 6 scenarios: dense_np_torch, gqa_np_torch, moe_np_torch, gqa_torch_triton, cuda_shared_weights, all_four_backends
 uv run python -m scripts.verify_equivalence
+
+# Quick mode / single scenario
+uv run python -m scripts.verify_equivalence --fast
+uv run python -m scripts.verify_equivalence --scenario gqa
 ```
 
 ### Testing
 
 ```bash
-# All CPU unit tests (NumPy + PyTorch)
+# All CPU unit tests (NumPy + PyTorch + shared/root)
 uv run pytest tests/unit/ -q --timeout=120 \
     --ignore=tests/unit/_cuda --ignore=tests/unit/_triton
 
@@ -112,38 +157,54 @@ done
 
 # Cross-backend parity tests (GPU)
 uv run pytest tests/cross_backend/ -q --timeout=120
+
+# Non-GPU tests anywhere
+uv run pytest tests/ -q -m "not gpu"
 ```
 
 ### Project structure
 
-```
+```text
 impl/
-├── _np/         # NumPy track (math reference; analytic backward)
+├── _np/         # NumPy track (math reference; analytic backward; learning mode + web/)
 ├── _torch/      # PyTorch track (production idiom; autograd + SDPA)
-├── _triton/     # Triton track (kernels over a PyTorch model)
+├── _triton/     # Triton track (kernels over a PyTorch model; flash_attn.py)
 ├── _cuda/       # CUDA track (NVRTC kernels)
 shared/
 ├── config.py    # TransformerConfig (single source of truth)
 ├── constants.py # Keys scheme + Attn/LayerNorm/Mlp constants
 ├── registry.py  # ParameterRegistry (checkpoint format owner)
+├── checkpoint.py# save/load (config.json + model.npz)
+├── init.py      # canonical cross-backend weight initialization
+├── tokenizer.py # GPT-2 BPE + char-level tokenizers
+├── dataset.py   # TinyStories pipeline
+├── config_utils.py  # CLI > env > config file > defaults
+└── utils/logger_setup.py
 docs/
 ├── specs/architecture-fixes.md   # Spec + progress
 ├── seam_triton_to_torch.md       # Documented shared seam
-└── docstring_style.md            # numpydoc + shape convention
+├── docstring_style.md            # numpydoc + shape convention
+├── adr/0001-gated-residual-abandonment.md
+└── design.md
 scripts/
-├── train.py             # Training loop (all backends)
-├── infer.py             # Inference (all backends)
-├── verify_equivalence.py # 6-scenario parity check
+├── train.py               # Training loop (all backends)
+├── infer.py               # Inference (all backends)
+├── verify_equivalence.py  # 6-scenario parity check
+├── train_real_tinystories.py
+├── train_demo_model.py    # learning-mode demo model
+├── download_tinystories.py
+└── run_learning_mode.sh   # learning-mode web page wrapper
 tests/
-├── unit/           # Per-track unit tests
-└── cross_backend/  # Parity tests (dense/GQA/MoE, GPU, 3-way)
+├── unit/           # Per-track unit tests + shared/root tests
+└── cross_backend/  # Parity tests (dense/GQA/MoE, GPU, 3-way; 42 tests)
+resource/           # git-ignored: TinyStories data + model checkpoints
 ```
 
 ## Development
 
 ```bash
 uv run ruff format . && uv run ruff check .
-uv run pyright .
+uv run pyright .   # pyright config strictly includes shared/
 uv run pytest tests/ -v
 ```
 
