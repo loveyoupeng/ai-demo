@@ -51,7 +51,7 @@ DEFAULT_N_HEADS = 4
 DEFAULT_N_LAYERS = 3
 DEFAULT_N_EXPERTS = 3
 DEFAULT_VOCAB_SIZE = 20  # 19 letters + space
-DEFAULT_CONTEXT = 32
+DEFAULT_CONTEXT = 128
 DEFAULT_OUT = "resource/models/learning_demo"
 
 # Backends that train on a torch device (cuda:0 by default); numpy is always CPU.
