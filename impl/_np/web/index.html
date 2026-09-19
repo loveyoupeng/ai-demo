@@ -263,12 +263,6 @@ function rows2d(a) {
   while (Array.isArray(a[0]) && Array.isArray(a[0][0]) && a.length === 1) a = a[0];
   return a;
 }
-function flatVec(a) {
-  const out = [];
-  const rec = (x) => { if (typeof x === "number") out.push(x); else for (const v of x) rec(v); };
-  rec(a);
-  return out;
-}
 
 function heatCSS(v, min, max) {
   const t = max > min ? (v - min) / (max - min) : 0.5;
@@ -423,17 +417,6 @@ function tokenChips(tokens, offset, cls) {
   }).join("");
 }
 
-function renderGenTokenMap(tokens) {
-  const p = $("prompt").value.trim() ? RECORD : null;
-  if (!p) return;
-  const map = $("gen-tokmap");
-  map.style.display = "";
-  $("gen-tokmap-chips").innerHTML =
-    tokenChips(p.prompt.tokens, 0, "") +
-    `<span class="note">→</span>` +
-    tokenChips(p.generated.tokens, p.prompt.tokens.length, "gen");
-}
-
 // ---------------------------------------------------------------------------
 // Quick generation
 // ---------------------------------------------------------------------------
@@ -510,15 +493,8 @@ function downloadRecord() {
 }
 
 function fwd() { return RECORD.steps[CUR_STEP].forward; }
-function seqLen() { return fwd().embedding[0].length; }
 function dim() { return fwd().embedding[0][0].length; }
 function vocab() { return MODEL.vocab || []; }
-
-// token character at row r ("" if unknown)
-function tokChar(r) {
-  const t = toks[r];
-  return t === undefined ? "" : (vocab()[t] ?? `#${t}`);
-}
 
 function renderRecordMeta() {
   const p = RECORD.prompt, g = RECORD.generated;
@@ -606,11 +582,12 @@ function buildDiagram() {
   const footY = HEAD_H + c.n_layers * (BLOCK_H + BLOCK_GAP);
   const totalH = footY + 150;
   SVG = svgEl("svg", { id: "diagram", viewBox: `0 0 ${LW} ${totalH}` });
-  // flow adjacency, built from the exact structure drawn below:
-  // emb → per block: ln1 → attn (module) → [attn cells in drawn order] → h → ln2 → ffn (module) → [ffn cells] → out
-  // → fnorm → lmhead → softmax. Module-level nodes connect module→module; a module's
-  // inner cells chain module → cell1 → … → cellN → next module node. K/V cache is a
-  // dashed side channel: no flow highlighting, never dimmed.
+  // flow adjacency — the TRUE data-flow graph (a DAG, not just the drawn
+  // order): inside attention, q/k/v are parallel projections of the same
+  // input, RoPE rotates only q and k (v bypasses it and re-joins at A·V);
+  // inside the dense FFN, gate/up are parallel and meet at the product.
+  // Side channels (pos, K/V cache) are dashed: pos has one successor
+  // (block 0 attention); the cache is never highlighted, never dimmed.
   FLOW = {};
   FLOW_ON = false;
   const flowChain = (base, cells, inId, outId) => {
@@ -619,15 +596,32 @@ function buildDiagram() {
     });
   };
   FLOW.emb = { pred: [], succ: ["b0.ln1"] };
+  FLOW.pos = { pred: [], succ: ["b0.attn"] }; // the position-signal source (dashed edge into block 0's attention)
   for (let i = 0; i < c.n_layers; i++) {
     const prev = i === 0 ? "emb" : `b${i - 1}.out`;
+    const a = (s) => `b${i}.attn.${s}`;
     FLOW[`b${i}.ln1`] = { pred: [prev], succ: [`b${i}.attn`] };
     FLOW[`b${i}.attn`] = { pred: [`b${i}.ln1`], succ: [`b${i}.h`] };
-    flowChain(`b${i}.attn`, ["q", "k", "v", "rope", "scores", "mask", "softmax", "o"], `b${i}.attn`, `b${i}.h`);
+    FLOW[a("q")] = { pred: [`b${i}.attn`], succ: [a("rope")] };
+    FLOW[a("k")] = { pred: [`b${i}.attn`], succ: [a("rope")] };
+    FLOW[a("v")] = { pred: [`b${i}.attn`], succ: [a("o")] };
+    FLOW[a("rope")] = { pred: [a("q"), a("k")], succ: [a("scores")] };
+    FLOW[a("scores")] = { pred: [a("rope")], succ: [a("mask")] };
+    FLOW[a("mask")] = { pred: [a("scores")], succ: [a("softmax")] };
+    FLOW[a("softmax")] = { pred: [a("mask")], succ: [a("o")] };
+    FLOW[a("o")] = { pred: [a("softmax"), a("v")], succ: [`b${i}.h`] };
     FLOW[`b${i}.h`] = { pred: [`b${i}.attn`], succ: [`b${i}.ln2`] };
     FLOW[`b${i}.ln2`] = { pred: [`b${i}.h`], succ: [`b${i}.ffn`] };
     FLOW[`b${i}.ffn`] = { pred: [`b${i}.ln2`], succ: [`b${i}.out`] };
-    flowChain(`b${i}.ffn`, MODEL.has_moe ? ["router", "topk", "weights", "experts", "sum"] : ["gate", "up", "mul", "down"], `b${i}.ffn`, `b${i}.out`);
+    if (MODEL.has_moe) {
+      flowChain(`b${i}.ffn`, ["router", "topk", "weights", "experts", "sum"], `b${i}.ffn`, `b${i}.out`);
+    } else {
+      const f = (s) => `b${i}.ffn.${s}`;
+      FLOW[f("gate")] = { pred: [`b${i}.ffn`], succ: [f("mul")] };
+      FLOW[f("up")] = { pred: [`b${i}.ffn`], succ: [f("mul")] };
+      FLOW[f("mul")] = { pred: [f("gate"), f("up")], succ: [f("down")] };
+      FLOW[f("down")] = { pred: [f("mul")], succ: [`b${i}.out`] };
+    }
     FLOW[`b${i}.out`] = { pred: [`b${i}.ffn`], succ: [i + 1 < c.n_layers ? `b${i + 1}.ln1` : "fnorm"] };
     FLOW[`b${i}.cache`] = { pred: [], succ: [] };
   }
@@ -674,7 +668,7 @@ function buildDiagram() {
   }
 
   // module box: rows of [label, subId, isNonLinear?]
-  function module(id, x, y, w, h, title, cells) {
+  function module(id, x, y, w, h, title, cells, rowArrows) {
     const g = svgEl("g", { class: "node" });
     g.dataset.id = id;
     g.appendChild(svgEl("rect", { class: "mod", x, y, width: w, height: h, rx: 10 }));
@@ -700,9 +694,12 @@ function buildDiagram() {
         cg.appendChild(ct);
         cg.addEventListener("click", (ev) => { ev.stopPropagation(); selectNode(subId); });
         SVG.appendChild(cg);
-        if (ci < row.length - 1) {
-          SVG.appendChild(svgEl("line", { x1: cx + cw + 1, y1: cy + cellH / 2, x2: cx + cw + gap - 1.5, y2: cy + cellH / 2, class: "edge", "marker-end": "url(#arrow)", "data-from": row[ci][1], "data-to": row[ci + 1][1] }));
-        }
+      });
+      // arrows: default = every consecutive pair; rowArrows[ri] overrides per row
+      // (e.g. [] = no arrows on rows of parallel branches)
+      const pairs = rowArrows && rowArrows[ri] ? rowArrows[ri] : row.slice(0, -1).map((_, ci) => [ci, ci + 1]);
+      pairs.forEach(([c1, c2]) => {
+        SVG.appendChild(svgEl("line", { x1: x + pad + c1 * (cw + gap) + cw + 1, y1: cy + cellH / 2, x2: x + pad + c2 * (cw + gap) - 1.5, y2: cy + cellH / 2, class: "edge", "marker-end": "url(#arrow)", "data-from": row[c1][1], "data-to": row[c2][1] }));
       });
     });
   }
@@ -725,10 +722,12 @@ function buildDiagram() {
 
     // row 1: ln1 → attention → h
     module(`b${i}.ln1`, CX_L, r1, CW_L, ROW_H, "LN 1 · RMSNorm", [[["rms", `b${i}.ln1`], ["×γ", `b${i}.ln1`]]]);
+    // row 0 cells are parallel branches (q/k/v from the same input; RoPE only
+    // rotates q and k), so draw no arrows there; row 1 is a true chain.
     module(`b${i}.attn`, CX_C, r1, CW_C, ROW_H, "attention", [
       [["Q=xWq", `b${i}.attn.q`], ["K=xWk", `b${i}.attn.k`], ["V=xWv", `b${i}.attn.v`], ["RoPE", `b${i}.attn.rope`]],
       [["QKᵀ/√d", `b${i}.attn.scores`], ["mask", `b${i}.attn.mask`, true], ["softmax", `b${i}.attn.softmax`, true], ["A·V → Wo", `b${i}.attn.o`]],
-    ]);
+    ], [[], null]);
     node(`b${i}.h`, CX_R, r1, CW_R, ROW_H, "h = x + attn", "residual sum");
 
     // row 2: ln2 → ffn/moe → out
@@ -738,9 +737,10 @@ function buildDiagram() {
         [["router", `b${i}.ffn.router`], ["top-k", `b${i}.ffn.topk`, true], ["renorm", `b${i}.ffn.weights`, true], [`experts ×${c.n_experts}`, `b${i}.ffn.experts`], ["Σ wⱼ·Eⱼ(x)", `b${i}.ffn.sum`]],
       ]);
     } else {
+      // gate and up are parallel branches that meet at gate⊙up: only mul→down is a chain arrow.
       module(`b${i}.ffn`, CX_C, r2, CW_C, ROW_H, "FFN · SwiGLU", [
         [["gate=SiLU", `b${i}.ffn.gate`, true], ["up=XWu", `b${i}.ffn.up`], ["gate⊙up", `b${i}.ffn.mul`], ["·Wd", `b${i}.ffn.down`]],
-      ]);
+      ], [[2, 3]]);
     }
     node(`b${i}.out`, CX_R, r2, CW_R, ROW_H, "out = h + ffn", "block output");
 
