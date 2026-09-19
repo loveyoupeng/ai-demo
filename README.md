@@ -5,11 +5,13 @@ equivalent backends**: NumPy (pure manual math, the teaching reference),
 PyTorch (the production idiom), Triton (GPU kernels over a PyTorch model),
 and CUDA (bare-metal NVRTC kernels). All four tracks share the same
 architecture, the same key scheme, and the same config — a model trained on
-one track loads and runs on any other. A NumPy-only **learning mode** adds an
-interactive web page that visualizes the architecture, shows every
-intermediate tensor of an inference, and exports full inference records.
+one track loads and runs on any other. A **learning mode** (NumPy or PyTorch
+backend) adds an interactive web page that visualizes the architecture, shows
+every intermediate tensor of an inference, and exports full inference records.
 
 See [CONTEXT.md](CONTEXT.md) for the domain glossary,
+[docs/theory/transformer-walkthrough.md](docs/theory/transformer-walkthrough.md)
+for a stage-by-stage tour of the forward pass (equations + code pointers),
 [docs/specs/architecture-fixes.md](docs/specs/architecture-fixes.md) for the
 architecture spec and progress,
 [docs/seam_triton_to_torch.md](docs/seam_triton_to_torch.md) for the
@@ -41,11 +43,13 @@ repository guidelines and development rules.
   (`shared.constants.Keys`, HF-Llama naming) + a parameter registry
   (`shared/registry.py`) that validates shape and key-set on load
   (stale checkpoints fail fast).
-- **Learning mode** (NumPy track): `impl._np.cli --learning` hosts a web
-  page (stdlib HTTP server, no dependencies) with prompt + generation, an
-  architecture view with per-block numbers, and downloadable JSON inference
-  records of every intermediate tensor. The instrumented forward is a pure
-  overlay — bit-identical to `NumPyModel.forward`, `impl/_np` untouched.
+- **Learning mode** (NumPy or PyTorch backend): `impl._np.cli --learning
+  [--backend numpy|torch]` hosts a web page (stdlib HTTP server, no
+  dependencies) with prompt + generation, an architecture diagram with
+  flow navigation (click a node to light up its predecessors/successors) and
+  per-block numbers, and downloadable JSON inference records of every
+  intermediate tensor. Both record adapters emit the same JSON shapes, so
+  the page consumes either backend interchangeably.
 - **Real-data training**: TinyStories (GPT-2 BPE, vocab 50,257) dataset
   pipeline in `shared/dataset.py`, plus a char-level tokenizer for the tiny
   demo model; unified train/infer scripts for all four backends.
@@ -85,14 +89,16 @@ uv run python -m impl._torch.cli \
 uv run python -m scripts.infer --model resource/models/torch_real/ --backend torch --prompt "hello"
 ```
 
-### Learning mode (NumPy web page)
+### Learning mode (web page)
 
 ```bash
 # Serves http://127.0.0.1:8080; auto-trains the demo model first run (~100 s)
 bash scripts/run_learning_mode.sh
 
-# Equivalent direct invocation (port/model overridable)
+# Equivalent direct invocation (port/model/backend overridable; backend
+# selects which track materializes the model: numpy [default] or torch)
 uv run python -m impl._np.cli --learning --port 8080 --model resource/models/learning_demo
+uv run python -m impl._np.cli --learning --backend torch
 
 # Rebuild the demo model (tiny char-level MoE: D=8, H=4, L=3, E=3, V=20)
 uv run python -m scripts.train_demo_model

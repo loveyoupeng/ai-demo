@@ -70,12 +70,25 @@ class SwiGLUFFN:
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         """SwiGLU forward. x: (..., D) → out: (..., D)."""
-        gate = x @ self.gate_proj  # (..., FF)
-        # SiLU: x / (1 + exp(-x)) — a smooth, unbounded gate
-        gate = silu(gate)  # (..., FF)
+        out, _state = self._forward_state(x)
+        return out
+
+    def _forward_state(self, x: np.ndarray) -> tuple[np.ndarray, dict]:
+        """SwiGLU forward + the intermediates the record and the backward need.
+
+        Returns (out, state) where state holds:
+            pre_gate : (..., FF) raw gate logits (x @ W_gate)
+            gate     : (..., FF) gate after SiLU
+            up       : (..., FF) up projection (x @ W_up)
+            gated    : (..., FF) gate * up
+        """
+        pre_gate = x @ self.gate_proj  # (..., FF)
+        gate = silu(pre_gate)  # (..., FF)
         up = x @ self.up_proj  # (..., FF)
-        gated = gate * up  # (..., FF) element-wise gating
-        return gated @ self.down_proj  # (..., D)
+        gated = gate * up  # (..., FF)
+        out = gated @ self.down_proj  # (..., D)
+        state = {"pre_gate": pre_gate, "gate": gate, "up": up, "gated": gated}
+        return out, state
 
     def backward(self, dout: np.ndarray, x: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """Analytic backward.

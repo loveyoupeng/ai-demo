@@ -57,6 +57,18 @@ class RoPE:
 
     def forward(self, x: np.ndarray, positions: np.ndarray, rope_dim: int = 0) -> np.ndarray:
         """Apply RoPE to q or k. x: (..., H, D), positions: (S,) or (B, S)."""
+        rotated, _state = self._forward_state(x, positions, rope_dim)
+        return rotated
+
+    def _forward_state(self, x: np.ndarray, positions: np.ndarray, rope_dim: int = 0) -> tuple[np.ndarray, dict]:
+        """Apply RoPE and return the rotation state (the intermediates of forward).
+
+        Returns (rotated, state) where state holds:
+            freqs : (D//2,)      — one theta per pair
+            angles: (B, S, D//2) — pos * theta per pair
+            cos   : (B, S, D//2)
+            sin   : (B, S, D//2)
+        """
         d = x.shape[-1]
 
         # Split the rotated prefix from the pass-through suffix.
@@ -97,8 +109,9 @@ class RoPE:
         rotated = np.stack([y_even, y_odd], axis=-1).reshape(x_rot.shape)  # (B, S, H, d_rot)
 
         if x_pass is not None:
-            return np.concatenate([rotated, x_pass], axis=-1)  # (B, S, H, D)
-        return rotated
+            rotated = np.concatenate([rotated, x_pass], axis=-1)  # (B, S, H, D)
+        state = {"freqs": freqs, "angles": angles, "cos": cos, "sin": sin}
+        return rotated, state
 
     def backward(self, dout: np.ndarray, x: np.ndarray, positions: np.ndarray, rope_dim: int = 0) -> np.ndarray:
         """Analytic backward (inverse rotations).

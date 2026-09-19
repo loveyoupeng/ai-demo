@@ -67,6 +67,19 @@ class MixtureOfExperts:
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         """MoE forward. x: (B, S, D) → out: (B, S, D)."""
+        out, _state = self._forward_state(x)
+        return out
+
+    def _forward_state(self, x: np.ndarray) -> tuple[np.ndarray, dict]:
+        """MoE forward + the router state the record and the backward need.
+
+        Returns (out, state) where state holds:
+            scores      : (B, S, E) stable-softmax input (after the max subtract)
+            probs       : (B, S, E) after the top-k mask (raw softmax if top_k == E)
+            topk_idx    : (B, S, k) the selected expert per token
+            weights     : (B, S, E) renormalized routing weights
+            expert_outs : E × (B, S, D) all expert outputs (intentionally full)
+        """
         E = self.n_experts
 
         # Router scores and softmax over all experts: (B, S, E)
@@ -75,20 +88,33 @@ class MixtureOfExperts:
         exp_scores = np.exp(scores)
         probs = exp_scores / np.sum(exp_scores, axis=-1, keepdims=True)  # (B, S, E)
 
-        # (Tie-safe: the threshold is the k-th largest value.)
+        # Top-k selection (tie-safe: the threshold is the k-th largest value.)
         if self.top_k < E:
             order = np.argsort(probs, axis=-1)[:, :, ::-1]  # (B, S, E) descending
+            topk_idx = order[:, :, : self.top_k]  # (B, S, k)
             kth_idx = order[:, :, self.top_k - 1 : self.top_k]  # (B, S, 1)
             threshold = np.take_along_axis(probs, kth_idx, axis=-1)  # (B, S, 1)
             probs = np.where(probs >= threshold, probs, 0.0)  # (B, S, E)
-            probs = probs / np.maximum(np.sum(probs, axis=-1, keepdims=True), 1e-8)  # renormalize
+            weights = probs / np.maximum(np.sum(probs, axis=-1, keepdims=True), 1e-8)  # (B, S, E)
+        else:
+            topk_idx = np.argsort(probs, axis=-1)[:, :, ::-1][:, :, : self.top_k]  # (B, S, k)
+            weights = probs  # (B, S, E)
 
         # Weighted sum of expert outputs (all experts computed; zeros masked).
+        # PROD: production gathers tokens per expert and runs only the selected top-k.
+        expert_outs = [expert.forward(x) for expert in self.experts]  # E × (B, S, D)
         out = np.zeros_like(x)  # (B, S, D)
-        for expert_idx, expert in enumerate(self.experts):
-            w = probs[:, :, expert_idx : expert_idx + 1]  # (B, S, 1)
-            out = out + w * expert.forward(x)  # (B, S, D)
-        return out
+        for expert_idx, e_out in enumerate(expert_outs):
+            w = weights[:, :, expert_idx : expert_idx + 1]  # (B, S, 1)
+            out = out + w * e_out  # (B, S, D)
+        state = {
+            "scores": scores,
+            "probs": probs,
+            "topk_idx": topk_idx,
+            "weights": weights,
+            "expert_outs": expert_outs,
+        }
+        return out, state
 
     def backward(self, dout: np.ndarray, x: np.ndarray) -> tuple[np.ndarray, dict]:
         """Analytic backward.

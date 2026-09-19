@@ -1,12 +1,12 @@
 """Learning mode HTTP server — stdlib ``http.server`` only, zero dependencies.
 
 Serves the learning page (static files from ``impl/_np/web/``) plus a small
-JSON API on top of a loaded ``NumPyModel``:
+JSON API on top of a loaded model — either the NumPy track (``NumPyModel``)
+or the PyTorch track (``TorchModel``; the page consumes both backends'
+records interchangeably because the record shapes are identical):
 
 - ``GET  /``            → the page (and other static assets)
-- ``GET  /api/model``   → model config + vocab (for the page to render)
-- ``POST /api/inference`` → quick generation (tokens + last-step logits/top)
-- ``POST /api/record``  → full inference record (every intermediate, JSON)
+- ``GET  /api/model``   → model config + vocab + backend (for the page)
 
 Request body for both POSTs:
     {"text": "the she", "n_tokens": 20, "temperature": 0.8|null,
@@ -23,6 +23,7 @@ import json
 import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
@@ -31,14 +32,27 @@ from impl._np.model import NumPyModel
 from shared.checkpoint import load_checkpoint
 from shared.config import TransformerConfig
 
+if TYPE_CHECKING:
+    from impl._torch.layers import TorchModel
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_DIR = "resource/models/learning_demo"
 WEB_DIR = Path(__file__).parent / "web"
 
 
-def load_learning_model(model_dir: str) -> tuple[NumPyModel, list[str] | None, TransformerConfig]:
-    """Load a checkpoint (+ optional ``vocab.json`` sidecar) into the NumPy model.
+Backend = Literal["numpy", "torch"]
+
+
+def load_learning_model(
+    model_dir: str, backend: Backend = "numpy"
+) -> tuple[NumPyModel | TorchModel, list[str] | None, TransformerConfig]:
+    """Load a checkpoint (+ optional ``vocab.json`` sidecar) into the requested backend.
+
+    ``backend`` selects which track materializes the weights:
+      - ``"numpy"`` (default) → ``NumPyModel`` (float32, the NumPy track).
+      - ``"torch"`` → ``TorchModel`` (float64 via ``.double()`` so the record
+        adapter's float64 math matches the NumPy track's records).
 
     The vocab sidecar is what makes text I/O possible: without it the model
     still loads and can run on raw token IDs, but the page's text box has
@@ -47,8 +61,18 @@ def load_learning_model(model_dir: str) -> tuple[NumPyModel, list[str] | None, T
     params, cfg = load_checkpoint(model_dir)
     if cfg is None:
         raise ValueError(f"checkpoint {model_dir} failed registry validation")
-    model = NumPyModel(cfg)
-    model.load_from_numpy_dict({k: v.copy() for k, v in params.items()})
+    if backend == "numpy":
+        model: NumPyModel | TorchModel = NumPyModel(cfg)
+        model.load_from_numpy_dict({k: v.copy() for k, v in params.items()})
+    elif backend == "torch":
+        from impl._torch.layers import TorchModel as _TorchModel
+
+        torch_model = _TorchModel(cfg).double()
+        torch_model.load_from_numpy_dict({k: v.copy() for k, v in params.items()})
+        torch_model.eval()
+        model = torch_model
+    else:
+        raise ValueError(f"backend must be 'numpy' or 'torch', got {backend!r}")
     vocab: list[str] | None = None
     vocab_path = Path(model_dir) / "vocab.json"
     if vocab_path.exists():
@@ -72,10 +96,32 @@ def tokenize_text(text: str, vocab: list[str]) -> tuple[list[int], int]:
     return ids, skipped
 
 
+def _sample(logits: np.ndarray, temp: float | None, top_k: int | None, rng: np.random.Generator) -> int:
+    """Pick the next token from a raw logits vector.
+
+    Greedy (argmax) when ``temp is None``; otherwise temperature-scaled
+    softmax with optional top-k filtering, drawn from the caller's seeded
+    RNG. This is the server's single sampling formula — the same for both
+    backends, so a given (seed, temp, top_k) picks identically.
+    """
+    z = logits.astype(np.float64)
+    if temp is None:
+        return int(np.argmax(z))
+    z = z / temp
+    if top_k is not None:
+        kth = np.partition(z, -top_k)[-1]
+        z = np.where(z < kth, -np.inf, z)
+    z = z - z.max()
+    p = np.exp(z)
+    p /= p.sum()
+    return int(rng.choice(len(p), p=p))
+
+
 class _LearningHandler(BaseHTTPRequestHandler):
     """Static file + JSON API handler with the model bound at construction."""
 
-    model: NumPyModel
+    model: NumPyModel | TorchModel
+    backend: str
     vocab: list[str] | None
     web_dir: Path
 
@@ -130,11 +176,15 @@ class _LearningHandler(BaseHTTPRequestHandler):
 
     def _model_info(self) -> dict:
         cfg = self.model.config
-        n_params = int(sum(v.size for v in self.model.get_all_parameters().values()))
+        if isinstance(self.model, NumPyModel):
+            n_params = int(sum(v.size for v in self.model.get_all_parameters().values()))
+        else:
+            n_params = int(sum(p.numel() for p in self.model.parameters()))
         return {
             "config": cfg.to_dict(),
             "vocab": self.vocab,
             "has_vocab": self.vocab is not None,
+            "backend": self.backend,
             "n_params": n_params,
             "has_moe": cfg.has_moe(),
         }
@@ -158,30 +208,62 @@ class _LearningHandler(BaseHTTPRequestHandler):
         return ids, t, k, seed, skipped
 
     def _api_inference(self, body: dict) -> dict:
+        """Quick generation through the track's own generator path.
+
+        NumPy track: one O(S) ``forward_prefill`` + O(1) per-token
+        ``forward_step`` calls against the full-history KV cache. The prompt
+        is prefilled at its absolute position and every generated token
+        attends to the ENTIRE history — the old inline loop re-windowed to
+        the last ``context_length`` characters and recomputed from scratch
+        every step (identical results while len(seq) <= context_length;
+        beyond that the cache keeps the full history instead of dropping
+        the oldest tokens).
+
+        PyTorch track: the track's production decode — a full-window forward
+        per step (the torch track has no per-token step; its flash-attention
+        production path makes the recompute cheap in practice).
+
+        Response shape (unchanged):
+            {"prompt": {...}, "skipped_chars": n, "generated": {...},
+             "last_step": {"logits": [...], "top_tokens": [[id, p], ...]}}
+        ``last_step`` is the distribution over the token that would come
+        AFTER the generated ones (one extra decode position).
+        """
         ids, t, k, seed, skipped = self._decode_params(body)
         n = int(body.get("n_tokens", 20))
-        model, vocab = self.model, self.vocab
+        vocab = self.vocab
         assert vocab is not None
+        model = self.model
+        ctx = model.config.context_length
         rng = np.random.default_rng(seed)
         seq = list(ids)
-        for _ in range(n):
-            logits = model.forward(np.array([seq[-model.config.context_length :]], dtype=np.int32))[0, -1]
-            z = logits.astype(np.float64)
-            if t is None:
-                tok = int(np.argmax(z))
-            else:
-                z = z / t
-                if k is not None:
-                    kth = np.partition(z, -k)[-1]
-                    z = np.where(z < kth, -np.inf, z)
-                z = z - z.max()
-                p = np.exp(z)
-                p /= p.sum()
-                tok = int(rng.choice(len(p), p=p))
-            seq.append(tok)
-        last = model.forward(np.array([seq[-model.config.context_length :]], dtype=np.int32))
-        z = last[0, -1].astype(np.float64)
-        z = z - z.max()
+        if isinstance(model, NumPyModel):
+            logits, cache = model.forward_prefill(
+                np.array([seq[-ctx:]], dtype=np.int32), position_offset=max(0, len(seq) - ctx)
+            )
+            logits = logits[0, -1].astype(np.float64)
+            for _ in range(n):
+                tok = _sample(logits, t, k, rng)
+                seq.append(tok)
+                logits = model.forward_step(np.array([[tok]], dtype=np.int32), len(seq) - 1, cache)
+                logits = logits[0, 0].astype(np.float64)
+            last = model.forward_step(np.array([seq[-1:]], dtype=np.int32), len(seq) - 1, cache)
+            last = last[0, 0].astype(np.float64)
+        else:
+            import torch
+
+            def _window_logits(window: list[int]) -> np.ndarray:
+                with torch.no_grad():
+                    out = model(torch.tensor([window], dtype=torch.int64))
+                return out[0, -1].double().detach().cpu().numpy().astype(np.float64)
+
+            logits = _window_logits(seq[-ctx:])
+            for _ in range(n):
+                tok = _sample(logits, t, k, rng)
+                seq.append(tok)
+                logits = _window_logits(seq[-ctx:])
+            last = _window_logits(seq[-ctx:])
+        z = last - last.max()
         p = np.exp(z)
         p /= p.sum()
         top = np.argsort(p)[::-1][:10]
@@ -190,15 +272,27 @@ class _LearningHandler(BaseHTTPRequestHandler):
             "skipped_chars": skipped,
             "generated": {"tokens": seq[len(ids) :], "text": "".join(vocab[i] for i in seq[len(ids) :])},
             "last_step": {
-                "logits": [round(float(v), 6) for v in last[0, -1]],
+                "logits": [round(float(v), 6) for v in last],
                 "top_tokens": [[int(i), float(p[i])] for i in top],
             },
         }
 
     def _api_record(self, body: dict) -> dict[str, object]:
+        """Full inference record via the track's own record adapter.
+
+        Both backends produce the identical JSON shape (the record TypedDicts
+        are shared), so the page consumes either interchangeably.
+        """
         ids, t, k, seed, skipped = self._decode_params(body)
         n = int(body.get("n_tokens", 20))
-        record = generate_with_records(self.model, self.vocab or [], list(ids), n, temp=t, top_k=k, seed=seed)
+        if isinstance(self.model, NumPyModel):
+            record = generate_with_records(self.model, self.vocab or [], list(ids), n, temp=t, top_k=k, seed=seed)
+        else:
+            from impl._torch import learning as torch_learning
+
+            record = torch_learning.generate_with_records(
+                self.model, self.vocab or [], list(ids), n, temp=t, top_k=k, seed=seed
+            )
         record_out: dict[str, object] = dict(record)
         record_out["skipped_chars"] = skipped
         return record_out
@@ -225,20 +319,28 @@ class _LearningHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-def make_handler(model: NumPyModel, vocab: list[str] | None, web_dir: Path = WEB_DIR) -> type[BaseHTTPRequestHandler]:
-    """Bind the model + vocab + web dir into a handler class (closure over state)."""
-    return type("LearningHandler", (_LearningHandler,), {"model": model, "vocab": vocab, "web_dir": web_dir})
+def make_handler(
+    model: NumPyModel | TorchModel, vocab: list[str] | None, backend: str = "numpy", web_dir: Path = WEB_DIR
+) -> type[BaseHTTPRequestHandler]:
+    """Bind the model + backend + vocab + web dir into a handler class (closure over state)."""
+    return type(
+        "LearningHandler", (_LearningHandler,), {"model": model, "backend": backend, "vocab": vocab, "web_dir": web_dir}
+    )
 
 
 def start_server(
-    model: NumPyModel, vocab: list[str] | None, host: str = "0.0.0.0", port: int = 8080
+    model: NumPyModel | TorchModel,
+    vocab: list[str] | None,
+    host: str = "0.0.0.0",
+    port: int = 8080,
+    backend: str = "numpy",
 ) -> ThreadingHTTPServer:
     """Create the learning-mode HTTP server (bound and listening, not yet serving).
 
     The caller owns the serving loop: ``server.serve_forever()`` (CLI) or a
     daemon thread (tests).
     """
-    handler = make_handler(model, vocab)
+    handler = make_handler(model, vocab, backend=backend)
     server = ThreadingHTTPServer((host, port), handler)
     logger.info("learning mode: serving on http://%s:%d", host, port)
     return server

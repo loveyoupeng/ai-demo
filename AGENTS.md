@@ -12,7 +12,7 @@ track loads and runs on any other. Code is deliberately heavy on math
 documentation: formulas cite references and every matrix operation carries a
 shape comment.
 
-See [task_plan.md](task_plan.md) for phase status and [CONTEXT.md](CONTEXT.md)
+See [docs/task_plan.md](docs/task_plan.md) for phase status and [CONTEXT.md](CONTEXT.md)
 for the domain glossary.
 
 ## Architecture & Data Flow
@@ -48,28 +48,33 @@ differences (float64, ~1e-10, MoE top-k flip-aware).
   list. Load validates key-set + shapes (stale checkpoints fail fast).
 - `shared/checkpoint.py` does disk I/O: `config.json` + flat `model.npz`.
 
-**Learning mode (NumPy track only):** `impl/_np/learning.py` is a pure
-overlay — an instrumented forward that is bit-identical to
-`NumPyModel.forward` but captures every intermediate, plus JSON
-"step records" / inference records. `impl/_np/learning_server.py` serves the
-web page (`impl/_np/web/`) and a small JSON API (`/api/model`,
-`/api/inference`, `/api/record`) via stdlib `http.server`. The default demo
-model is a tiny char-level MoE LM (`D=8, H=4, L=3, E=3, V=20`).
+**Learning mode (NumPy + PyTorch tracks):** `impl/_np/learning.py` and
+`impl/_torch/learning.py` are the two record adapters. The NumPy one consumes
+the track's own `_forward_state` hooks (bit-identical to the forward); the
+PyTorch one runs the track's real forward and recomputes the attention
+intermediates with explicit ops (a documented display path, since the fused
+SDPA call exposes none). Both serialize into one shared JSON shape ("step
+records" / inference records), so the page consumes either backend
+interchangeably. `impl/_np/learning_server.py` serves the web page
+(`impl/_np/web/`) plus a small JSON API (`/api/model`, `/api/inference`,
+`/api/record`) via stdlib `http.server`, with a `--backend` flag selecting the
+materialized track. The default demo model is a tiny char-level MoE LM
+(`D=8, H=4, L=3, E=3, V=20`).
 
 ## Key Directories
 
 | Path | Purpose |
 | --- | --- |
 | `impl/_np/` | NumPy reference track: per-operator modules, `model.py` (analytic backward), `training.py`, `inference.py`, KV cache (+ TurboQuant), `gradcheck.py`, `cli.py`, learning mode |
-| `impl/_torch/` | PyTorch track: `layers.py` (all nn.Modules), `model.py`, `training.py` (torch.optim), `inference.py`, `kv_cache.py`, `turboquant_kv_cache.py`, `cli.py` |
-| `impl/_triton/` | Triton kernels over a PyTorch model: `attn.py`, `flash_attn.py` (online softmax), `transformer.py`, `model.py`, `cli.py` |
+| `impl/_torch/` | PyTorch track: `layers.py` (all nn.Modules, `TorchModel`), `training.py`, `inference.py`, `kv_cache.py`, `turboquant_kv_cache.py`, `learning.py`, `cli.py` |
+| `impl/_triton/` | Triton kernels over a PyTorch model: `attn.py`, `flash_attn.py` (online softmax), `transformer.py`, `cli.py` |
 | `impl/_cuda/` | NVRTC bare-metal kernels: `compiler.py`, `attention.py`, `layernorm.py`, `rope.py`, `ffn.py`, `moe.py`, `model.py`, `training.py`, `cli.py` |
 | `shared/` | Cross-track backbone: `config.py` (`TransformerConfig`), `constants.py` (Keys), `registry.py`, `checkpoint.py`, `init.py`, `tokenizer.py`, `dataset.py`, `config_utils.py`, `utils/` |
 | `scripts/` | Unified `train.py`/`infer.py` (all backends), `verify_equivalence.py`, `train_real_tinystories.py`, `train_demo_model.py`, `download_tinystories.py`, `run_learning_mode.sh` |
 | `tests/` | `unit/` (root: shared, scripts, registry; plus `_np`, `_torch`, `_triton`, `_cuda`) and `cross_backend/` (42 parity tests) |
-| `docs/` | `specs/architecture-fixes.md` (spec + progress of record), `seam_triton_to_torch.md`, `docstring_style.md`, `adr/`, `design.md` |
+| `docs/` | `specs/architecture-fixes.md` (spec + progress of record), `theory/transformer-walkthrough.md` (forward-pass tour), `seam_triton_to_torch.md`, `docstring_style.md`, `adr/`, `design.md` |
 | `resource/` | **git-ignored**: TinyStories JSON + `models/{numpy,torch,triton,cuda}_real` and `models/learning_demo` checkpoints — recreate via scripts |
-| `task_plan.md`, `CONTEXT.md`, `progress.md`, `findings.md` | Plan/phase status, glossary, notes |
+| `docs/task_plan.md`, `CONTEXT.md` | Plan/phase status, glossary |
 
 ## Development Commands
 
@@ -135,12 +140,18 @@ uv run python -m scripts.download_tinystories
 8. **Logging** — `logger = logging.getLogger(__name__)` per module; dotted
    logger names map 1:1 to file paths (`impl._np.attention` =
    `impl/_np/attention.py`). Educational logs follow
-   `task_plan.md` §H (shape chains, attention entropy, grad stats, top-5
+   `docs/task_plan.md` §H (shape chains, attention entropy, grad stats, top-5
    sampling).
-9. After any change: `ruff format`, `ruff check`, and `pyright` must be
-   clean. If a request is unclear or has materially different approaches,
-   confirm with the user first; do not make technical or business
-   assumptions.
+9. **`# PROD:` notes** — where the teaching implementation deliberately takes
+   the readable path instead of the production one, mark it with a one-line
+   `# PROD: <what production would do> — <why/where>` comment; where the repo
+   contains the production version, point at it (see
+   `docs/docstring_style.md`).
+10. After any change: `ruff format`, `ruff check`, and `pyright` must be
+    clean. If a request is unclear or has materially different approaches,
+    confirm with the user first; do not make technical or business
+    assumptions.
+11. **Subagents** — never run more than 3 subagents in parallel at a time.
 
 ## Important Files
 

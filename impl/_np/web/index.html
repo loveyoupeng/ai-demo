@@ -67,6 +67,11 @@
   #diagram .edge.dashed { stroke-dasharray: 5 4; stroke: #5a6478; }
   #diagram .en { font-size: 10px; fill: var(--accent); font-weight: 700; }
   #diagram .ec { fill: #1c2c42; stroke: #3a4252; stroke-width: 1; }
+  #diagram .node.pre > rect.box, #diagram .node.pre > rect.mod { stroke: var(--accent2); stroke-width: 2; }
+  #diagram .node.post > rect.box, #diagram .node.post > rect.mod { stroke: var(--accent); stroke-width: 2; }
+  #diagram .node.dimmed { opacity: .35; }
+  #diagram .node, #diagram .edge { transition: opacity .15s, stroke .15s; }
+  #diagram .edge.hl { stroke: var(--accent); stroke-width: 2.5; }
   #diagram .blklabel { fill: var(--dim); font-size: 11px; letter-spacing: .08em; }
   #inspector { min-height: 300px; }
   .heatwrap { display: flex; gap: 6px; margin: 6px 0; }
@@ -174,6 +179,7 @@
       <span class="lg"><span class="sw solid"></span><span class="nbadge">n</span><b>solid + number</b> main data flow, in execution order (numbers repeat per block)</span>
       <span class="lg"><span class="sw dashed"></span><b>dashed</b> position signal — RoPE angles fed into attention only</span>
       <span class="lg"><span class="sw dashed"></span><b>K/V cache</b> per-block store of every position's K,V — prefill fills it, decodes read + append one row per token</span>
+      <span class="lg"><span class="sw nl" style="border-color:var(--accent2)"></span><b>green</b> direct predecessor · <span class="sw nl" style="border-color:var(--accent)"></span><b>blue</b> direct successor (click a node; click it again or the background to reset)</span>
       <span class="lg"><span class="sw hilo"></span><b>heat color</b> red = low, blue = high (per-tensor min/max)</span>
     </div>
     <section style="margin-top:12px" id="inspector">
@@ -590,6 +596,8 @@ function svgEl(tag, attrs) {
 }
 
 let SVG = null;
+let FLOW = null;   // id -> { pred: [ids], succ: [ids] }, built in buildDiagram
+let FLOW_ON = false;
 
 function buildDiagram() {
   const c = MODEL.config;
@@ -598,6 +606,34 @@ function buildDiagram() {
   const footY = HEAD_H + c.n_layers * (BLOCK_H + BLOCK_GAP);
   const totalH = footY + 150;
   SVG = svgEl("svg", { id: "diagram", viewBox: `0 0 ${LW} ${totalH}` });
+  // flow adjacency, built from the exact structure drawn below:
+  // emb → per block: ln1 → attn (module) → [attn cells in drawn order] → h → ln2 → ffn (module) → [ffn cells] → out
+  // → fnorm → lmhead → softmax. Module-level nodes connect module→module; a module's
+  // inner cells chain module → cell1 → … → cellN → next module node. K/V cache is a
+  // dashed side channel: no flow highlighting, never dimmed.
+  FLOW = {};
+  FLOW_ON = false;
+  const flowChain = (base, cells, inId, outId) => {
+    cells.forEach((s, j) => {
+      FLOW[`${base}.${s}`] = { pred: [j === 0 ? inId : `${base}.${cells[j - 1]}`], succ: [j === cells.length - 1 ? outId : `${base}.${cells[j + 1]}`] };
+    });
+  };
+  FLOW.emb = { pred: [], succ: ["b0.ln1"] };
+  for (let i = 0; i < c.n_layers; i++) {
+    const prev = i === 0 ? "emb" : `b${i - 1}.out`;
+    FLOW[`b${i}.ln1`] = { pred: [prev], succ: [`b${i}.attn`] };
+    FLOW[`b${i}.attn`] = { pred: [`b${i}.ln1`], succ: [`b${i}.h`] };
+    flowChain(`b${i}.attn`, ["q", "k", "v", "rope", "scores", "mask", "softmax", "o"], `b${i}.attn`, `b${i}.h`);
+    FLOW[`b${i}.h`] = { pred: [`b${i}.attn`], succ: [`b${i}.ln2`] };
+    FLOW[`b${i}.ln2`] = { pred: [`b${i}.h`], succ: [`b${i}.ffn`] };
+    FLOW[`b${i}.ffn`] = { pred: [`b${i}.ln2`], succ: [`b${i}.out`] };
+    flowChain(`b${i}.ffn`, MODEL.has_moe ? ["router", "topk", "weights", "experts", "sum"] : ["gate", "up", "mul", "down"], `b${i}.ffn`, `b${i}.out`);
+    FLOW[`b${i}.out`] = { pred: [`b${i}.ffn`], succ: [i + 1 < c.n_layers ? `b${i + 1}.ln1` : "fnorm"] };
+    FLOW[`b${i}.cache`] = { pred: [], succ: [] };
+  }
+  FLOW.fnorm = { pred: [`b${c.n_layers - 1}.out`], succ: ["lmhead"] };
+  FLOW.lmhead = { pred: ["fnorm"], succ: ["softmax"] };
+  FLOW.softmax = { pred: ["lmhead"], succ: [] };
 
   const defs = svgEl("defs");
   const marker = svgEl("marker", { id: "arrow", viewBox: "0 0 10 10", refX: "8.5", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" });
@@ -605,9 +641,11 @@ function buildDiagram() {
   defs.appendChild(marker);
   SVG.appendChild(defs);
 
-  // numbered flow edge (main data flow) / dashed (position signal)
-  function edge(pts, { dashed = false, num = null, numAt = null } = {}) {
+  // numbered flow edge (main data flow) / dashed (position signal); from/to tag the node ids at each end
+  function edge(pts, { dashed = false, num = null, numAt = null, from = null, to = null } = {}) {
     const p = svgEl("polyline", { points: pts.map(([x, y]) => `${x},${y}`).join(" "), class: "edge" + (dashed ? " dashed" : "") });
+    if (from) p.dataset.from = from;
+    if (to) p.dataset.to = to;
     p.setAttribute("marker-end", "url(#arrow)");
     SVG.appendChild(p);
     if (num !== null) {
@@ -663,7 +701,7 @@ function buildDiagram() {
         cg.addEventListener("click", (ev) => { ev.stopPropagation(); selectNode(subId); });
         SVG.appendChild(cg);
         if (ci < row.length - 1) {
-          SVG.appendChild(svgEl("line", { x1: cx + cw + 1, y1: cy + cellH / 2, x2: cx + cw + gap - 1.5, y2: cy + cellH / 2, class: "edge", "marker-end": "url(#arrow)" }));
+          SVG.appendChild(svgEl("line", { x1: cx + cw + 1, y1: cy + cellH / 2, x2: cx + cw + gap - 1.5, y2: cy + cellH / 2, class: "edge", "marker-end": "url(#arrow)", "data-from": row[ci][1], "data-to": row[ci + 1][1] }));
         }
       });
     });
@@ -707,17 +745,17 @@ function buildDiagram() {
     node(`b${i}.out`, CX_R, r2, CW_R, ROW_H, "out = h + ffn", "block output");
 
     // numbered flow edges (1-7 per block)
-    edge([[CX_L + CW_L, mid1], [CX_C - 3, mid1]], { num: 2, numAt: [CX_C - 30, mid1 - 12] });
-    edge([[CX_C + CW_C, mid1], [CX_R - 3, mid1]], { num: 3, numAt: [CX_R - 24, mid1 - 12] });
-    edge([[CX_L + CW_L, mid2], [CX_C - 3, mid2]], { num: 5, numAt: [CX_C - 30, mid2 - 12] });
-    edge([[CX_C + CW_C, mid2], [CX_R - 3, mid2]], { num: 6, numAt: [CX_R - 24, mid2 - 12] });
+    edge([[CX_L + CW_L, mid1], [CX_C - 3, mid1]], { num: 2, numAt: [CX_C - 30, mid1 - 12], from: `b${i}.ln1`, to: `b${i}.attn` });
+    edge([[CX_C + CW_C, mid1], [CX_R - 3, mid1]], { num: 3, numAt: [CX_R - 24, mid1 - 12], from: `b${i}.attn`, to: `b${i}.h` });
+    edge([[CX_L + CW_L, mid2], [CX_C - 3, mid2]], { num: 5, numAt: [CX_C - 30, mid2 - 12], from: `b${i}.ln2`, to: `b${i}.ffn` });
+    edge([[CX_C + CW_C, mid2], [CX_R - 3, mid2]], { num: 6, numAt: [CX_R - 24, mid2 - 12], from: `b${i}.ffn`, to: `b${i}.out` });
     // h (bottom) → down → left → LN2 top (residual loop)
     edge([[CX_R + CW_R / 2, r1 + ROW_H], [CX_R + CW_R / 2, r1 + ROW_H + ROW_GAP / 2], [CX_L + CW_L / 2, r1 + ROW_H + ROW_GAP / 2], [CX_L + CW_L / 2, r2 - 3]],
-      { num: 4, numAt: [(CX_L + CX_R + CW_R) / 2, r1 + ROW_H + ROW_GAP / 2 - 10] });
+      { num: 4, numAt: [(CX_L + CX_R + CW_R) / 2, r1 + ROW_H + ROW_GAP / 2 - 10], from: `b${i}.h`, to: `b${i}.ln2` });
     // block output → next block LN1 (or final norm)
     const nextTop = i + 1 < c.n_layers ? HEAD_H + (i + 1) * (BLOCK_H + BLOCK_GAP) : footY + 18;
     edge([[CX_R + CW_R / 2, r2 + ROW_H], [CX_R + CW_R / 2, r2 + ROW_H + BLOCK_GAP / 2], [CX_L + CW_L / 2, r2 + ROW_H + BLOCK_GAP / 2], [CX_L + CW_L / 2, nextTop - 3]],
-      { num: 7, numAt: [(CX_L + CX_R + CW_R) / 2, r2 + ROW_H + BLOCK_GAP / 2 + 12] });
+      { num: 7, numAt: [(CX_L + CX_R + CW_R) / 2, r2 + ROW_H + BLOCK_GAP / 2 + 12], from: `b${i}.out`, to: i + 1 < c.n_layers ? `b${i + 1}.ln1` : "fnorm" });
 
     // ---- K/V cache (right column, spans both rows) -------------------------
     // Prefill stores the prompt's K/V here; each decode reads the cache and
@@ -725,9 +763,9 @@ function buildDiagram() {
     const cacheX = 756, cacheW = 144;
     node(`b${i}.cache`, cacheX, r1, cacheW, BLOCK_H, "K/V cache", "stores K,V of every position so far — grows by 1 row per token (no recomputation)");
     // attention → cache: store K,V (dashed side channel, not the main flow)
-    edge([[490, r1 + ROW_H], [490, r1 + ROW_H + ROW_GAP * 0.35], [750, r1 + ROW_H + ROW_GAP * 0.35], [750, r1 + 34], [cacheX - 3, r1 + 34]], { dashed: true });
+    edge([[490, r1 + ROW_H], [490, r1 + ROW_H + ROW_GAP * 0.35], [750, r1 + ROW_H + ROW_GAP * 0.35], [750, r1 + 34], [cacheX - 3, r1 + 34]], { dashed: true, from: `b${i}.attn`, to: `b${i}.cache` });
     // cache → attention: the cached K,V are read for the next-token attention
-    edge([[cacheX - 3, r2 + 74], [750, r2 + 74], [750, r1 + ROW_H + ROW_GAP * 0.8], [450, r1 + ROW_H + ROW_GAP * 0.8], [450, r1 + ROW_H + 3]], { dashed: true });
+    edge([[cacheX - 3, r2 + 74], [750, r2 + 74], [750, r1 + ROW_H + ROW_GAP * 0.8], [450, r1 + ROW_H + ROW_GAP * 0.8], [450, r1 + ROW_H + 3]], { dashed: true, from: `b${i}.cache`, to: `b${i}.attn` });
     const cl = svgEl("text", { class: "t-sub", x: 748, y: r1 + ROW_H + ROW_GAP * 0.35 - 4, "text-anchor": "middle" });
     cl.textContent = "store K,V / read cached K,V";
     SVG.appendChild(cl);
@@ -735,25 +773,49 @@ function buildDiagram() {
 
   // header → block 0 (1: embed → ln1; dashed: positions → attention)
   edge([[embX + embW / 2, headY + 56], [embX + embW / 2, HEAD_H - 14], [CX_L + CW_L / 2, HEAD_H - 14], [CX_L + CW_L / 2, blockTops[0] - 3]],
-    { num: 1, numAt: [embX + embW / 2 - 24, HEAD_H - 14] });
+    { num: 1, numAt: [embX + embW / 2 - 24, HEAD_H - 14], from: "emb", to: "b0.ln1" });
   // positions enter ATTENTION (row 1 right side), not the embedding
   edge([[posX + 8, headY + 56], [posX + 8, 130], [CX_C + CW_C + 8, 130], [CX_C + CW_C - 3, 130]],
-    { dashed: true, numAt: null });
+    { dashed: true, numAt: null, from: "pos", to: "b0.attn" });
 
   // ---- footer: final norm → lm_head → softmax -----------------------------
   const fy = footY;
   node("fnorm", CX_L, fy + 18, CW_L, 62, "final norm", "RMSNorm");
   node("lmhead", CX_C, fy + 18, CW_C, 62, "lm_head", "normed @ W  →  (S, V) logits");
   node("softmax", CX_R, fy + 18, CW_R, 62, "softmax + argmax", "next token (non-linear)", true);
-  edge([[CX_L + CW_L, fy + 49], [CX_C - 3, fy + 49]], { num: 8, numAt: [CX_C - 30, fy + 37] });
-  edge([[CX_C + CW_C, fy + 49], [CX_R - 3, fy + 49]], { num: 9, numAt: [CX_R - 24, fy + 37] });
+  edge([[CX_L + CW_L, fy + 49], [CX_C - 3, fy + 49]], { num: 8, numAt: [CX_C - 30, fy + 37], from: "fnorm", to: "lmhead" });
+  edge([[CX_C + CW_C, fy + 49], [CX_R - 3, fy + 49]], { num: 9, numAt: [CX_R - 24, fy + 37], from: "lmhead", to: "softmax" });
 
   holder.appendChild(SVG);
+  SVG.addEventListener("click", (ev) => { if (!ev.target.closest(".node")) clearFlowHi(); }); // background click resets
   selectNode(CUR_NODE);
 }
 
+function clearFlowHi() {
+  FLOW_ON = false;
+  document.querySelectorAll("#diagram .node").forEach((n) => n.classList.remove("pre", "post", "dimmed"));
+  document.querySelectorAll("#diagram .edge").forEach((e) => e.classList.remove("hl"));
+}
+
 function selectNode(id) {
+  if (id === CUR_NODE && FLOW_ON) { clearFlowHi(); return; } // same node again → reset highlighting
   CUR_NODE = id;
+  clearFlowHi();
+  const f = FLOW && FLOW[id];
+  if (f && (f.pred.length || f.succ.length)) {
+    FLOW_ON = true;
+    document.querySelectorAll("#diagram .node").forEach((n) => {
+      const nid = n.dataset.id;
+      if (nid === id) return;
+      if (nid.endsWith(".cache")) return; // K/V cache side channel is never dimmed
+      if (f.pred.includes(nid)) n.classList.add("pre");
+      else if (f.succ.includes(nid)) n.classList.add("post");
+      else n.classList.add("dimmed");
+    });
+    document.querySelectorAll("#diagram .edge").forEach((e) => {
+      if ((e.dataset.from === id && f.succ.includes(e.dataset.to)) || (e.dataset.to === id && f.pred.includes(e.dataset.from))) e.classList.add("hl");
+    });
+  }
   document.querySelectorAll("#diagram .node").forEach((n) => n.classList.toggle("active", n.dataset.id === id));
   renderInspector();
 }

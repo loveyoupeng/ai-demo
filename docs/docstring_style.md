@@ -73,3 +73,24 @@ online-softmax rescale) and optional on obvious ones (a plain
 - Don't restate the type hints (`x : int  # the integer x`).
 - Don't write "This function does X" when the name already says it.
 - Don't leave a docstring that describes the *old* behavior after a rename.
+
+## Production-optimization notes (`# PROD:`)
+
+Where the teaching implementation deliberately takes the *readable* path
+instead of the *production* one, mark the spot with a single-line comment:
+
+```python
+# PROD: production uses an online-softmax flash kernel that never materializes
+#       the (B, H, S, S) score matrix — see impl/_triton/flash_attn.py
+scores = (q @ k.T) / scale  # (B, H, S, S)
+```
+
+Rules:
+
+- One line (two only if the second points at the in-repo production
+  example). Never a paragraph.
+- State what production would do and *why* the demo doesn't (readability,
+  step-by-step inspection).
+- If the repo contains the production version (flash kernel, KV-cache step
+  path, fused SDPA), point at it by path.
+- Do not mark a spot that is *already* the production choice.

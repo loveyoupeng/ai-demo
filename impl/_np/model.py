@@ -21,7 +21,6 @@ from impl._np.embedding import Embedding
 from impl._np.ffn import SwiGLUFFN
 from impl._np.layernorm import RMSNorm
 from impl._np.moe import MixtureOfExperts
-from impl._np.rope import RoPE
 from impl._np.stack import DecoderStack
 from shared.config import TransformerConfig
 from shared.constants import ATTN_PROJS, FFN_PROJS, Attn, Keys, LayerNorm, Mlp
@@ -156,7 +155,9 @@ class NumPyModel:
                 mlp.up_proj = params[Keys.ffn(i, Mlp.UP_PROJ)].copy()
                 mlp.down_proj = params[Keys.ffn(i, Mlp.DOWN_PROJ)].copy()
 
-    def forward_with_trace(self, input_ids: np.ndarray, positions: np.ndarray | None = None) -> tuple[np.ndarray, dict]:
+    def forward_with_trace(
+        self, input_ids: np.ndarray, positions: np.ndarray | None = None, record: dict | None = None
+    ) -> tuple[np.ndarray, dict]:
         """Forward pass plus the intermediates the analytic backward needs.
 
         Returns (logits, trace) where trace holds:
@@ -164,14 +165,34 @@ class NumPyModel:
             stack_out (B, S, D) pre-final-norm activations
             positions (S,) the RoPE positions used
 
+        record: optional dict for the learning-mode instrumented forward;
+            when given, it is filled with the raw (unserialized)
+            intermediates of this pass: x_in0, stack_out, positions, the
+            per-block state dicts ("blocks"), x_final, and logits — the same
+            values the operators kept for the backward, captured once along
+            the way. The math (and its bit-level result) is identical either
+            way.
+
         ``forward`` is a thin wrapper over this (it drops the trace).
         """
         if positions is None:
             positions = np.arange(input_ids.shape[1], dtype=np.int32)
+        blocks_rec = [{} for _ in self.stack.layers] if record is not None else None
         x_in0 = self.embedding.forward(input_ids)  # (B, S, D)
-        stack_out = self.stack.forward(x_in0, positions)  # (B, S, D)
+        stack_out = self.stack.forward(x_in0, positions, record=blocks_rec)  # (B, S, D)
         x_final = self.final_norm.forward(stack_out)  # (B, S, D)
         logits = x_final @ self.lm_head_weight  # (B, S, V)
+        if record is not None:
+            record.update(
+                {
+                    "x_in0": x_in0,
+                    "stack_out": stack_out,
+                    "positions": positions,
+                    "blocks": blocks_rec,
+                    "x_final": x_final,
+                    "logits": logits,
+                }
+            )
         return logits, {"x_in0": x_in0, "stack_out": stack_out, "positions": positions}
 
     def make_cache(self, batch_size: int, quantize: bool = False) -> list[dict]:
@@ -213,44 +234,64 @@ class NumPyModel:
             for _ in range(self.config.n_layers)
         ]
 
-    def forward_prefill(self, input_ids: np.ndarray, cache: list[dict] | None = None) -> tuple[np.ndarray, list[dict]]:
+    def forward_prefill(
+        self,
+        input_ids: np.ndarray,
+        cache: list[dict] | None = None,
+        position_offset: int = 0,
+        record: dict | None = None,
+    ) -> tuple[np.ndarray, list[dict]]:
         """Run a full-sequence forward and fill the per-layer KV cache.
 
         input_ids: (B, S) int token IDs.
+        cache: optional pre-allocated cache (make_cache); created when None.
+        position_offset: added to the 0-based RoPE positions — so a windowed
+            prompt (longer prompt than the context) prefills at its absolute
+            positions while the decode steps keep using absolute ones.
+        record: optional dict filled with the raw intermediates of this pass
+            (same keys as ``forward_with_trace``'s record) — the
+            learning-mode prefill step.
+
         Returns (logits (B, S, V), cache) where the cache holds the K/V of
-        every position, ready for per-token steps.
+        every position, ready for per-token steps. The cache is backfilled
+        from the attention state the blocks capture during this very forward
+        pass (per-group, RoPE'd K / un-rotated V) — no second pass needed.
         """
         B, S = input_ids.shape
         if cache is None:
             cache = self.make_cache(B)
-        positions = np.arange(S, dtype=np.int32)
+        positions = np.arange(S, dtype=np.int32) + position_offset
+        blocks_rec = [{} for _ in self.stack.layers]
         x = self.embedding.forward(input_ids)  # (B, S, D)
-        # Prefill: run the full stack, then backfill each layer's cache by
-        # re-deriving the per-group K/V at every position (same math the
-        # attention forward computed, without the GQA repeat).
-        stack_out = self.stack.forward(x, positions)  # (B, S, D)
+        stack_out = self.stack.forward(x, positions, record=blocks_rec)  # (B, S, D)
         x_final = self.final_norm.forward(stack_out)  # (B, S, D)
         logits = x_final @ self.lm_head_weight  # (B, S, V)
-        x_in = x
-        for i, block in enumerate(self.stack.layers):
-            attn = block.self_attn
-            ln1_out = block.input_layernorm.forward(x_in)  # (B, S, D)
-            k_pre = ln1_out @ attn.k_proj  # (B, S, G*hd)
-            v_pre = ln1_out @ attn.v_proj  # (B, S, G*hd)
-            G, hd = attn.n_groups, attn.head_dim
-            k_heads = k_pre.reshape(B, S, G, hd).transpose(0, 2, 1, 3)  # (B, G, S, hd)
-            v = v_pre.reshape(B, S, G, hd).transpose(0, 2, 1, 3)  # (B, G, S, hd)
-            k = RoPE().forward(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=attn.rope_dim).transpose(0, 2, 1, 3)
-            cache[i]["k"] = k
-            cache[i]["v"] = v
-            # Thread the block input for the next layer.
-            attn_out = attn.forward(ln1_out, positions)
-            h = x_in + attn_out
-            x_in = h + block.mlp.forward(block.post_attention_layernorm.forward(h))
+        # Backfill each layer's cache from this pass's attention state:
+        # K/V per group (GQA keeps it small), K already RoPE'd, V un-rotated.
+        for i, block_state in enumerate(blocks_rec):
+            attn_state = block_state["attn"]
+            cache[i]["k"] = attn_state["k_group"]  # (B, G, S, hd)
+            cache[i]["v"] = attn_state["v_group"]  # (B, G, S, hd)
+        if record is not None:
+            record.update(
+                {
+                    "x_in0": x,
+                    "stack_out": stack_out,
+                    "positions": positions,
+                    "blocks": blocks_rec,
+                    "x_final": x_final,
+                    "logits": logits,
+                }
+            )
         return logits, cache
 
     def forward_step(
-        self, input_ids: np.ndarray, position: int, cache: list[dict], quantize: bool = False
+        self,
+        input_ids: np.ndarray,
+        position: int,
+        cache: list[dict],
+        quantize: bool = False,
+        record: dict | None = None,
     ) -> np.ndarray:
         """Process ONE token per batch row against the cached K/V.
 
@@ -278,9 +319,22 @@ class NumPyModel:
         (naive) or the dequantized (B, H, t, hd) K/V (TurboQuant).
         """
         x = self.embedding.forward(input_ids)  # (B, 1, D)
-        stack_out = self.stack.forward_step(x, position, cache, quantize=quantize)  # (B, 1, D)
+        blocks_rec = [{} for _ in self.stack.layers] if record is not None else None
+        stack_out = self.stack.forward_step(x, position, cache, quantize=quantize, record=blocks_rec)  # (B, 1, D)
         x_final = self.final_norm.forward(stack_out)  # (B, 1, D)
-        return x_final @ self.lm_head_weight  # (B, 1, V)
+        logits = x_final @ self.lm_head_weight  # (B, 1, V)
+        if record is not None:
+            record.update(
+                {
+                    "x_in0": x,
+                    "stack_out": stack_out,
+                    "positions": np.array([position], dtype=np.int32),
+                    "blocks": blocks_rec,
+                    "x_final": x_final,
+                    "logits": logits,
+                }
+            )
+        return logits
 
     def backward(self, input_ids: np.ndarray, targets: np.ndarray) -> dict[str, np.ndarray]:
         """Analytic gradients of the loss w.r.t. every parameter.

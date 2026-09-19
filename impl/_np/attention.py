@@ -88,14 +88,19 @@ class MultiHeadAttention:
         self.o_proj = xavier_uniform(rng, n_heads * hd, embed_dim)
 
     def _forward_state(self, x: np.ndarray, positions: np.ndarray) -> tuple[np.ndarray, dict]:
-        """Run the forward and return the intermediates the backward needs.
+        """Run the forward and return the intermediates the backward and the
+        learning-mode record need.
 
         Returns (out, state) where state holds:
             q_pre, k_pre, v_pre : (B, S, ·) projections before head permute
-            q, k, v             : (B, H|G, S, hd) after RoPE / GQA repeat
-            attn                : (B, H, S, S) attention weights
+            q_rope_in, k_rope_in: pre-RoPE q/k in head layout
+            q, k, v             : (B, H, S, hd) after RoPE / GQA repeat
+            k_group, v_group    : (B, G, S, hd) per-group K/V (cache-ready)
+            attn                : (B, H, S, S) attention weights (softmax out)
             ctx                 : (B, S, H*hd) merged context (pre Wo)
-            scale               : float, 1/sqrt(hd)
+            scale               : float, sqrt(hd) — the scores divisor
+            rope                : RoPE state (freqs/angles/cos/sin)
+            scores, scores_masked, causal_mask : the score-matrix history
         """
         batch_size, seq_len, _ = x.shape
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
@@ -112,8 +117,11 @@ class MultiHeadAttention:
 
         # RoPE rotates q and k (position information). RoPE's contract shape
         # is (B, S, H, D), so permute, rotate, permute back.
-        q = RoPE().forward(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).transpose(0, 2, 1, 3)
-        k = RoPE().forward(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).transpose(0, 2, 1, 3)
+        q, rope = RoPE()._forward_state(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim)
+        q = q.transpose(0, 2, 1, 3)  # (B, H, S, hd)
+        k = RoPE().forward(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim)
+        k = k.transpose(0, 2, 1, 3)  # (B, G, S, hd)
+        k_group, v_group = k, v  # (B, G, S, hd) per-group: RoPE'd K / un-rotated V
 
         # GQA: broadcast each K/V group to its H // G query heads.
         # Repeat group g H // G times (consecutively): (B, G, S, hd) → (B, H, S, hd)
@@ -123,6 +131,8 @@ class MultiHeadAttention:
 
         # Scaled dot-product attention.
         scale = float(np.sqrt(hd))
+        # PROD: production uses an online-softmax flash kernel that never materializes
+        #       the (B, H, S, S) score matrix — see impl/_triton/flash_attn.py
         scores = (q @ k.transpose(0, 1, 3, 2)) / scale  # (B, H, S, S)
 
         # Causal mask: position i may attend only to positions j <= i.
@@ -130,12 +140,12 @@ class MultiHeadAttention:
         # upper triangle to -inf; the stable softmax below turns those into
         # exactly-zero attention weight.
         causal = np.triu(np.ones((seq_len, seq_len), dtype=bool), k=1)  # (S, S), True where j > i
-        scores = np.where(causal, -np.inf, scores)  # (B, H, S, S)
+        scores_masked = np.where(causal, -np.inf, scores)  # (B, H, S, S)
 
         # Numerically stable softmax over the key axis: subtract the row max
         # before exponentiating so exp() never overflows.
-        scores = scores - np.max(scores, axis=-1, keepdims=True)  # (B, H, S, S)
-        exp_scores = np.exp(scores)  # (B, H, S, S)
+        scores_stable = scores_masked - np.max(scores_masked, axis=-1, keepdims=True)  # (B, H, S, S)
+        exp_scores = np.exp(scores_stable)  # (B, H, S, S)
         attn = exp_scores / np.sum(exp_scores, axis=-1, keepdims=True)  # (B, H, S, S)
 
         # Weighted sum of values: (B, H, S, S) @ (B, H, S, hd) → (B, H, S, hd)
@@ -153,9 +163,15 @@ class MultiHeadAttention:
             "q": q,
             "k": k,
             "v": v,
+            "k_group": k_group,
+            "v_group": v_group,
             "attn": attn,
             "ctx": ctx,
             "scale": scale,
+            "rope": rope,
+            "scores": scores,
+            "scores_masked": scores_masked,
+            "causal_mask": causal,
         }
         return out, state
 
@@ -170,7 +186,9 @@ class MultiHeadAttention:
         out, _state = self._forward_state(x, positions)
         return out
 
-    def forward_step(self, x: np.ndarray, position: int, cache: dict, quantize: bool = False) -> np.ndarray:
+    def forward_step(
+        self, x: np.ndarray, position: int, cache: dict, quantize: bool = False, state: dict | None = None
+    ) -> np.ndarray:
         """Process ONE new token against the cached K/V (per-token inference path).
 
         x: (B, 1, D) the new token's embedding (a single step).
@@ -222,8 +240,10 @@ class MultiHeadAttention:
         k_heads = k_pre.reshape(batch_size, 1, G, hd).transpose(0, 2, 1, 3)  # (B, G, 1, hd)
         v = v_pre.reshape(batch_size, 1, G, hd).transpose(0, 2, 1, 3)  # (B, G, 1, hd)
 
-        q = RoPE().forward(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).transpose(0, 2, 1, 3)
-        k = RoPE().forward(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).transpose(0, 2, 1, 3)
+        q, rope_state = RoPE()._forward_state(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim)
+        q = q.transpose(0, 2, 1, 3)  # (B, H, 1, hd)
+        k, _ = RoPE()._forward_state(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim)
+        k = k.transpose(0, 2, 1, 3)  # (B, G, 1, hd)
 
         if quantize:
             # TurboQuant: 1-bit quantize the new K/V (per head, after GQA
@@ -253,13 +273,47 @@ class MultiHeadAttention:
 
         scale = float(np.sqrt(hd))
         scores = (q @ k_r.transpose(0, 1, 3, 2)) / scale  # (B, H, 1, t+1)
-        scores = scores - np.max(scores, axis=-1, keepdims=True)
-        exp_scores = np.exp(scores)
+        # Nothing is masked in decode: every cached row is in the past of the
+        # new token, so the causal mask is all zeros over the whole cache.
+        scores_stable = scores - np.max(scores, axis=-1, keepdims=True)
+        exp_scores = np.exp(scores_stable)
         attn = exp_scores / np.sum(exp_scores, axis=-1, keepdims=True)  # (B, H, 1, t+1)
 
         ctx = attn @ v_r  # (B, H, 1, hd)
         ctx = ctx.transpose(0, 2, 1, 3).reshape(batch_size, 1, H * hd)  # (B, 1, H*hd)
-        return ctx @ self.o_proj  # (B, 1, D)
+        out = ctx @ self.o_proj  # (B, 1, D)
+
+        # Learning-mode record: the same intermediates the dense path keeps,
+        # taken from THIS step (the cache after the append is what the query
+        # attended to). The dense path's state is filled by _forward_state;
+        # here we fill the parallel keys from the step-local variables.
+        if state is not None:
+            k_exp = np.repeat(k, H // G, axis=1) if G != H else k  # (B, H, 1, hd)
+            v_exp = np.repeat(v, H // G, axis=1) if G != H else v  # (B, H, 1, hd)
+            state.update(
+                {
+                    "q_pre": q_pre,
+                    "k_pre": k_pre,
+                    "v_pre": v_pre,
+                    "q_rope_in": q_heads,
+                    "k_rope_in": k_heads,
+                    "q": q,
+                    "k": k_exp,
+                    "v": v_exp,
+                    "k_group": k,
+                    "v_group": v,
+                    "attn": attn,
+                    "ctx": ctx,
+                    "scale": scale,
+                    "rope": rope_state,
+                    "scores": scores,
+                    "scores_masked": scores,
+                    "causal_mask": np.zeros((1, k_r.shape[2]), dtype=bool),
+                    "k_cache": k_r,
+                    "v_cache": v_r,
+                }
+            )
+        return out
 
     @staticmethod
     def _quantize_turbo(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

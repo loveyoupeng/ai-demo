@@ -27,14 +27,23 @@ class DecoderStack:
         self.config = config
         self.layers = [TransformerBlock(config) for _ in range(config.n_layers)]
 
-    def forward(self, x: np.ndarray, positions: np.ndarray | None = None) -> np.ndarray:
-        """Run all blocks. x: (B, S, D) → out: (B, S, D)."""
+    def forward(
+        self, x: np.ndarray, positions: np.ndarray | None = None, record: list[dict] | None = None
+    ) -> np.ndarray:
+        """Run all blocks. x: (B, S, D) → out: (B, S, D).
+
+        record: optional per-block state dicts (one per layer); when given,
+            each block fills its own dict with the intermediates (see
+            ``TransformerBlock.forward``). The math is identical either way.
+        """
         out = x
-        for _block in self.layers:
-            out = _block.forward(out, positions)
+        for i, _block in enumerate(self.layers):
+            out = _block.forward(out, positions, record=record[i] if record is not None else None)
         return out
 
-    def forward_step(self, x: np.ndarray, position: int, cache: list[dict], quantize: bool = False) -> np.ndarray:
+    def forward_step(
+        self, x: np.ndarray, position: int, cache: list[dict], quantize: bool = False, record: list[dict] | None = None
+    ) -> np.ndarray:
         """Process ONE new token through all blocks (KV-cached path).
 
         x: (B, 1, D) the new token's vector.
@@ -43,12 +52,16 @@ class DecoderStack:
         quantize: if True, append the new K/V to each layer's cache in 1-bit
             TurboQuant form and dequantize the full cached tensor before
             attention; if False, append the full-precision K/V (default).
+        record: optional per-block state dicts (one per layer) filled with the
+            step's intermediates (see ``TransformerBlock.forward_step``).
 
         Returns: (B, 1, D) the stack output for the new token.
         """
         out = x
         for i, block in enumerate(self.layers):
-            out = block.forward_step(out, position, cache[i], quantize=quantize)
+            out = block.forward_step(
+                out, position, cache[i], quantize=quantize, record=record[i] if record is not None else None
+            )
         return out
 
     def backward(

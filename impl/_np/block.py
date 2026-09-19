@@ -68,15 +68,41 @@ class TransformerBlock:
         else:
             self.mlp = SwiGLUFFN(embed_dim=D, ff_dim=config.expert_dim, seed=seed + 2)
 
-    def forward(self, x: np.ndarray, positions: np.ndarray | None = None) -> np.ndarray:
-        """Block forward. x: (B, S, D) → out: (B, S, D)."""
+    def forward(self, x: np.ndarray, positions: np.ndarray | None = None, record: dict | None = None) -> np.ndarray:
+        """Block forward. x: (B, S, D) → out: (B, S, D).
+
+        record: optional dict; when given, it is filled with the block's
+            intermediate state (ln1/ln2 outputs, the attention state, the
+            FFN/MoE state, h, out) — the same state the analytic backward
+            recomputes, captured once by the operators themselves. The
+            math (and its bit-level result) is identical either way.
+        """
+        if positions is None:
+            positions = np.arange(x.shape[1], dtype=np.int32)
         # Stream 1: attention with pre-norm and residual.
-        attn_out = self.self_attn.forward(self.input_layernorm.forward(x), positions)  # (B, S, D)
+        ln1_out = self.input_layernorm.forward(x)  # (B, S, D)
+        attn_out, attn_state = self.self_attn._forward_state(ln1_out, positions)  # (B, S, D)
         h = x + attn_out  # (B, S, D)
 
         # Stream 2: feed-forward (dense or MoE) with pre-norm and residual.
-        ff_out = self.mlp.forward(self.post_attention_layernorm.forward(h))  # (B, S, D)
-        return h + ff_out  # (B, S, D)
+        ln2_out = self.post_attention_layernorm.forward(h)  # (B, S, D)
+        ff_out, ff_state = self.mlp._forward_state(ln2_out)  # (B, S, D)
+        out = h + ff_out  # (B, S, D)
+        if record is not None:
+            record.update(
+                {
+                    "x": x,
+                    "ln1_out": ln1_out,
+                    "attn": attn_state,
+                    "attn_out": attn_out,
+                    "h": h,
+                    "ln2_out": ln2_out,
+                    "ff": ff_state,
+                    "mlp_out": ff_out,
+                    "out": out,
+                }
+            )
+        return out
 
     def backward(self, dout: np.ndarray, x: np.ndarray, positions: np.ndarray | None = None) -> tuple[np.ndarray, dict]:
         """Analytic backward (derivation in the class docstring).
@@ -134,20 +160,42 @@ class TransformerBlock:
                 dparams[f"mlp.{name}"] = mlp_grads[name]
         return dx, dparams
 
-    def forward_step(self, x: np.ndarray, position: int, cache: dict, quantize: bool = False) -> np.ndarray:
+    def forward_step(
+        self, x: np.ndarray, position: int, cache: dict, quantize: bool = False, record: dict | None = None
+    ) -> np.ndarray:
         """Process ONE new token (per-token inference path, KV-cached attention).
 
         x: (B, 1, D) the new token's vector.
-        position: the absolute token index (RoPE).
+        position: the absolute token index (for RoPE; 0-based).
         cache: per-layer attention cache dict (see MultiHeadAttention.forward_step).
             Mutated in place; shape depends on quantize.
         quantize: if True, append the new K/V to the cache in 1-bit TurboQuant
             form and dequantize the full cached tensor before attention; if
             False, append the full-precision K/V (default).
+        record: optional dict filled with the step's intermediates (same keys
+            as ``forward``) — see that method.
 
         Returns: (B, 1, D) the block output for the new token.
         """
-        attn_out = self.self_attn.forward_step(self.input_layernorm.forward(x), position, cache, quantize=quantize)
+        ln1_out = self.input_layernorm.forward(x)  # (B, 1, D)
+        attn_state: dict | None = {} if record is not None else None
+        attn_out = self.self_attn.forward_step(ln1_out, position, cache, quantize=quantize, state=attn_state)
         h = x + attn_out  # (B, 1, D)
-        ff_out = self.mlp.forward(self.post_attention_layernorm.forward(h))  # (B, 1, D)
-        return h + ff_out  # (B, 1, D)
+        ln2_out = self.post_attention_layernorm.forward(h)  # (B, 1, D)
+        ff_out, ff_state = self.mlp._forward_state(ln2_out)  # (B, 1, D)
+        out = h + ff_out  # (B, 1, D)
+        if record is not None:
+            record.update(
+                {
+                    "x": x,
+                    "ln1_out": ln1_out,
+                    "attn": attn_state,
+                    "attn_out": attn_out,
+                    "h": h,
+                    "ln2_out": ln2_out,
+                    "ff": ff_state,
+                    "mlp_out": ff_out,
+                    "out": out,
+                }
+            )
+        return out

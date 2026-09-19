@@ -44,6 +44,13 @@ def main() -> None:
         help="Interface to bind for --learning (default 0.0.0.0 = all interfaces, allows local-network access)",
     )
     parser.add_argument(
+        "--backend",
+        type=str,
+        default="numpy",
+        choices=["numpy", "torch"],
+        help="Track to materialize the learning-mode model (default numpy; torch loads the same checkpoint in PyTorch)",
+    )
+    parser.add_argument(
         "--model",
         type=str,
         default="resource/models/learning_demo",
@@ -54,8 +61,8 @@ def main() -> None:
         # Opt-in learning mode — imported here so the flag-off path never touches it.
         from impl._np import learning_server
 
-        lm, vocab, _cfg = learning_server.load_learning_model(args.model)
-        server = learning_server.start_server(lm, vocab, host=args.host, port=args.port)
+        lm, vocab, _cfg = learning_server.load_learning_model(args.model, backend=args.backend)
+        server = learning_server.start_server(lm, vocab, host=args.host, port=args.port, backend=args.backend)
         print(f"Learning mode: listening on {args.host}:{args.port}  (model: {args.model})")
         try:
             server.serve_forever()
