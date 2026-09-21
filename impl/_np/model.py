@@ -1,5 +1,10 @@
 """The NumPy reference model: decoder-only transformer.
 
+Track intent: **how the math works** — every operator is hand-derived
+(forward + closed-form analytic backward), with formula citations and shape
+comments on each matrix operation. This track is the teaching reference the
+other three tracks mirror.
+
 Forward pass (the standard LLaMA-style layout):
 
     input_ids (B, S)
@@ -105,6 +110,10 @@ class NumPyModel:
                     p[Keys.moe_expert(i, j, Mlp.GATE_PROJ)] = expert.gate_proj
                     p[Keys.moe_expert(i, j, Mlp.UP_PROJ)] = expert.up_proj
                     p[Keys.moe_expert(i, j, Mlp.DOWN_PROJ)] = expert.down_proj
+                for s, shared in enumerate(mlp.shared_experts):
+                    p[Keys.moe_shared_expert(i, s, Mlp.GATE_PROJ)] = shared.gate_proj
+                    p[Keys.moe_shared_expert(i, s, Mlp.UP_PROJ)] = shared.up_proj
+                    p[Keys.moe_shared_expert(i, s, Mlp.DOWN_PROJ)] = shared.down_proj
             else:
                 p[Keys.ffn(i, Mlp.GATE_PROJ)] = mlp.gate_proj
                 p[Keys.ffn(i, Mlp.UP_PROJ)] = mlp.up_proj
@@ -150,6 +159,10 @@ class NumPyModel:
                     expert.gate_proj = params[Keys.moe_expert(i, j, Mlp.GATE_PROJ)].copy()
                     expert.up_proj = params[Keys.moe_expert(i, j, Mlp.UP_PROJ)].copy()
                     expert.down_proj = params[Keys.moe_expert(i, j, Mlp.DOWN_PROJ)].copy()
+                for s, shared in enumerate(mlp.shared_experts):
+                    shared.gate_proj = params[Keys.moe_shared_expert(i, s, Mlp.GATE_PROJ)].copy()
+                    shared.up_proj = params[Keys.moe_shared_expert(i, s, Mlp.UP_PROJ)].copy()
+                    shared.down_proj = params[Keys.moe_shared_expert(i, s, Mlp.DOWN_PROJ)].copy()
             elif isinstance(mlp, SwiGLUFFN):
                 mlp.gate_proj = params[Keys.ffn(i, Mlp.GATE_PROJ)].copy()
                 mlp.up_proj = params[Keys.ffn(i, Mlp.UP_PROJ)].copy()
@@ -393,6 +406,9 @@ class NumPyModel:
                 for j, expert_grads in enumerate(block_grads["mlp.experts"]):
                     for proj in FFN_PROJS:
                         grads[Keys.moe_expert(i, j, proj)] = expert_grads[proj]
+                for s, shared_grads in enumerate(block_grads["mlp.shared_experts"]):
+                    for proj in FFN_PROJS:
+                        grads[Keys.moe_shared_expert(i, s, proj)] = shared_grads[proj]
             else:
                 for proj in FFN_PROJS:
                     grads[Keys.ffn(i, proj)] = block_grads[f"mlp.{proj}"]

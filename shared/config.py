@@ -44,6 +44,9 @@ class TransformerConfig:
     n_experts: int = 1
     top_k: int = 1  # Top-k experts per token (1 <= top_k <= n_experts)
     expert_dim: int = 0  # FFN hidden dimension; 0 = 4 * embed_dim (standard)
+    # n_shared_experts > 0 (MoE only) → DeepSeek-style always-on ungated
+    # experts: out = mean(E_shared(x)) + Σ wⱼ·E_j(x). See docs/adr/0002.
+    n_shared_experts: int = 0
 
     # Inference
     max_length: int = 2048  # Max generation length
@@ -76,6 +79,10 @@ class TransformerConfig:
         assert self.n_heads % n_groups == 0, f"n_heads must be divisible by n_groups ({self.n_heads} % {n_groups})"
         assert self.n_experts > 0, "n_experts must be positive"
         assert 1 <= self.top_k <= self.n_experts, f"top_k must be in [1, n_experts], got {self.top_k}"
+        assert self.n_shared_experts >= 0, "n_shared_experts must be >= 0"
+        assert self.n_shared_experts == 0 or self.n_experts > 1, (
+            "n_shared_experts requires MoE (n_experts > 1); with one expert there is no routing to complement"
+        )
         assert self.quant_type in ("none", "1-bit", "2-bit", "4-bit"), (
             f"quant_type must be 'none'/'1-bit'/'2-bit'/'4-bit', got {self.quant_type}"
         )

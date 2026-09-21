@@ -275,6 +275,48 @@ class TestMoEGradient:
                 )
                 assert worst_e < 1e-5
 
+    def test_shared_experts(self) -> None:
+        """Shared-expert branch (ADR 0002): out += mean_s(E_shared_s(x)).
+
+        The shared path has no top-k kink, so its weights take a plain finite
+        difference; dx still crosses the router and stays flip-guarded.
+        """
+        rng = np.random.default_rng(0)
+        D = 8
+        op = MixtureOfExperts(embed_dim=D, n_experts=3, ff_dim=12, top_k=2, seed=4, n_shared_experts=2)
+        op.gate = _cast64(op.gate)
+        for expert in op.experts + op.shared_experts:
+            for name in ("gate_proj", "up_proj", "down_proj"):
+                setattr(expert, name, _cast64(getattr(expert, name)))
+        x = rng.normal(size=(2, 5, D))
+        dout = rng.normal(size=(2, 5, D))
+
+        def value_fn() -> float:
+            return float(np.sum(dout * op.forward(x)))
+
+        def support_fn() -> np.ndarray:
+            return _moe_support(x, op.gate, 3, 2)
+
+        dx_an, w_an = op.backward(dout, x)
+
+        def val_x(j: int) -> float:
+            res = _fd_with_flip_guard(x.reshape(-1), j, value_fn, support_fn)
+            assert res is not None
+            return res
+
+        assert _worst_rel(dx_an, val_x, samples=12, seed=1) < 1e-5
+
+        assert len(w_an["shared_experts"]) == 2
+        for s_idx, shared in enumerate(op.shared_experts):
+            for name in ("gate_proj", "up_proj", "down_proj"):
+                param_flat = getattr(shared, name).reshape(-1)
+                grads = w_an["shared_experts"][s_idx][name].reshape(-1)
+
+                def val_p(j: int, _flat: np.ndarray = param_flat) -> float:
+                    return _fd_param(lambda: _flat, j, value_fn)
+
+                assert _worst_rel(grads, val_p, samples=6, seed=11 + s_idx) < 1e-5
+
 
 class TestEmbeddingGradient:
     """Embedding backward vs finite difference."""

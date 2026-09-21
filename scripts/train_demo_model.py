@@ -1,7 +1,7 @@
 """Train and export the learning-mode demo model.
 
 The demo model is the default model for the learning-mode web page
-(`impl/_np/cli.py --learning`). It is deliberately tiny (D=8, H=4, L=3,
+(`scripts/learning.py`). It is deliberately tiny (D=8, H=4, L=3,
 E=3 MoE, char-level vocab V=20) so that every intermediate tensor is small
 enough to display and inspect on the page.
 
@@ -50,6 +50,7 @@ DEFAULT_EMBED_DIM = 8
 DEFAULT_N_HEADS = 4
 DEFAULT_N_LAYERS = 3
 DEFAULT_N_EXPERTS = 3
+DEFAULT_N_SHARED_EXPERTS = 1
 DEFAULT_VOCAB_SIZE = 20  # 19 letters + space
 DEFAULT_CONTEXT = 128
 DEFAULT_OUT = "resource/models/learning_demo"
@@ -265,6 +266,9 @@ def main() -> None:
     parser.add_argument("--n_layers", type=int, default=DEFAULT_N_LAYERS)
     parser.add_argument("--n_experts", type=int, default=DEFAULT_N_EXPERTS)
     parser.add_argument("--top_k", type=int, default=1, help="MoE top-k experts per token")
+    parser.add_argument(
+        "--n_shared_experts", type=int, default=DEFAULT_N_SHARED_EXPERTS, help="always-on shared experts (ADR 0002)"
+    )
     parser.add_argument("--ctx", type=int, default=DEFAULT_CONTEXT)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--out", type=str, default=DEFAULT_OUT, help="checkpoint output dir")
@@ -287,6 +291,7 @@ def main() -> None:
         rope_dim=0,
         n_experts=args.n_experts,
         top_k=args.top_k,
+        n_shared_experts=args.n_shared_experts,
         seed=args.seed,
     )
 

@@ -9,6 +9,20 @@ one track loads and runs on any other. A **learning mode** (NumPy or PyTorch
 backend) adds an interactive web page that visualizes the architecture, shows
 every intermediate tensor of an inference, and exports full inference records.
 
+## What each track teaches
+
+Each track answers a different question about the *same* model:
+
+| Track | Question it answers | Read it for |
+| --- | --- | --- |
+| **NumPy** (`impl/_np/`) | *How does the math work?* | Hand-derived forward + analytic backward, formula citations, shape comments on every matrix op. The teaching reference. |
+| **PyTorch** (`impl/_torch/`) | *How do you implement it properly with a framework?* | Production idiom: `nn.Module` composition, autograd, `F.scaled_dot_product_attention`, `torch.optim`. |
+| **Triton** (`impl/_triton/`) | *How do you write the kernels?* | Memory-traffic-aware GPU kernels (online softmax / FlashAttention) over a PyTorch skeleton. |
+| **CUDA** (`impl/_cuda/`) | *What does the metal see?* | Bare-metal NVRTC kernels, explicit launches, no framework. |
+
+Because all four implement bit-comparable behavior on one checkpoint format,
+you can trace the same tensor through four increasingly low-level lenses.
+
 See [CONTEXT.md](CONTEXT.md) for the domain glossary,
 [docs/theory/transformer-walkthrough.md](docs/theory/transformer-walkthrough.md)
 for a stage-by-stage tour of the forward pass (equations + code pointers),
@@ -43,7 +57,7 @@ repository guidelines and development rules.
   (`shared.constants.Keys`, HF-Llama naming) + a parameter registry
   (`shared/registry.py`) that validates shape and key-set on load
   (stale checkpoints fail fast).
-- **Learning mode** (NumPy or PyTorch backend): `impl._np.cli --learning
+- **Learning mode** (NumPy or PyTorch backend): `scripts/learning.py
   [--backend numpy|torch]` hosts a web page (stdlib HTTP server, no
   dependencies) with prompt + generation, an architecture diagram with
   flow navigation (click a node to light up its predecessors/successors) and
@@ -93,12 +107,12 @@ uv run python -m scripts.infer --model resource/models/torch_real/ --backend tor
 
 ```bash
 # Serves http://127.0.0.1:8080; auto-trains the demo model first run (~100 s)
-bash scripts/run_learning_mode.sh
+uv run python -m scripts.learning
 
-# Equivalent direct invocation (port/model/backend overridable; backend
-# selects which track materializes the model: numpy [default] or torch)
-uv run python -m impl._np.cli --learning --port 8080 --model resource/models/learning_demo
-uv run python -m impl._np.cli --learning --backend torch
+# Backend selects which track materializes the model: numpy [default] or
+# torch; port/model overridable
+uv run python -m scripts.learning --backend torch
+uv run python -m scripts.learning --port 9000 --model resource/models/torch_real
 
 # Rebuild the demo model (tiny char-level MoE: D=8, H=4, L=3, E=3, V=20)
 uv run python -m scripts.train_demo_model
@@ -138,7 +152,7 @@ The TinyStories dataset itself lives in `resource/` (also git-ignored):
 ### Equivalence verification
 
 ```bash
-# 6 scenarios: dense_np_torch, gqa_np_torch, moe_np_torch, gqa_torch_triton, cuda_shared_weights, all_four_backends
+# 7 scenarios: dense_np_torch, gqa_np_torch, moe_np_torch, moe_shared_experts_np_torch, gqa_torch_triton, cuda_shared_weights, all_four_backends
 uv run python -m scripts.verify_equivalence
 
 # Quick mode / single scenario
@@ -195,14 +209,14 @@ docs/
 scripts/
 ├── train.py               # Training loop (all backends)
 ├── infer.py               # Inference (all backends)
-├── verify_equivalence.py  # 6-scenario parity check
+├── verify_equivalence.py  # 7-scenario parity check
+├── learning.py            # learning-mode web page server
 ├── train_real_tinystories.py
 ├── train_demo_model.py    # learning-mode demo model
-├── download_tinystories.py
-└── run_learning_mode.sh   # learning-mode web page wrapper
+└── download_tinystories.py
 tests/
 ├── unit/           # Per-track unit tests + shared/root tests
-└── cross_backend/  # Parity tests (dense/GQA/MoE, GPU, 3-way; 42 tests)
+└── cross_backend/  # Parity tests (dense/GQA/MoE, GPU, 3-way; 43 tests)
 resource/           # git-ignored: TinyStories data + model checkpoints
 ```
 

@@ -282,12 +282,14 @@ def _moe_record(mlp: MixtureOfExperts, x: torch.Tensor, out: torch.Tensor) -> Mo
         topk_idx = torch.argsort(probs, dim=-1, descending=True)[..., : mlp.top_k]
         weights = probs
     expert_outs = [expert(x) for expert in mlp.experts]  # E × (B, S, D)
+    shared_outs = [shared(x) for shared in mlp.shared_expert_list]  # n_shared × (B, S, D)
     return {
         "scores": arr(scores_stable),  # (B, S, E) stable-softmaxed
         "probs": arr(probs),  # (B, S, E) after top-k mask
         "topk_idx": topk_idx.tolist(),  # (B, S, k)
         "weights": arr(weights),  # (B, S, E) renormalized
         "expert_outs": [arr(e) for e in expert_outs],
+        "shared_outs": [arr(e) for e in shared_outs],
         "out": arr(out),
         "n_experts": E,
         "top_k": mlp.top_k,

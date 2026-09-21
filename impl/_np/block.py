@@ -64,6 +64,7 @@ class TransformerBlock:
                 ff_dim=config.expert_dim,
                 top_k=config.top_k,
                 seed=seed + 2,
+                n_shared_experts=config.n_shared_experts,
             )
         else:
             self.mlp = SwiGLUFFN(embed_dim=D, ff_dim=config.expert_dim, seed=seed + 2)
@@ -155,6 +156,7 @@ class TransformerBlock:
         if isinstance(self.mlp, MixtureOfExperts):
             dparams["mlp.gate"] = mlp_grads["gate"]
             dparams["mlp.experts"] = mlp_grads["experts"]  # list of {gate_proj, up_proj, down_proj}
+            dparams["mlp.shared_experts"] = mlp_grads["shared_experts"]  # same shape, shared experts (ADR 0002)
         else:
             for name in ("gate_proj", "up_proj", "down_proj"):
                 dparams[f"mlp.{name}"] = mlp_grads[name]

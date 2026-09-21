@@ -116,12 +116,14 @@ class TestInstrumentedForward:
                 "out",
                 "probs",
                 "scores",
+                "shared_outs",
                 "top_k",
                 "topk_idx",
                 "weights",
             ]
             assert moe["n_experts"] == 3
             assert len(moe["expert_outs"]) == 3
+            assert moe["shared_outs"] == []
         for norm in [rec["final_norm"]] + [b["ln1"] for b in rec["blocks"]]:
             assert sorted(norm.keys()) == ["gamma", "out", "rms"]
 

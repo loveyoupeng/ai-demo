@@ -1,5 +1,10 @@
 """CUDAModel — full decoder-only transformer.
 
+Track intent: **the bare metal** — NVRTC-compiled kernels with explicit
+launches and explicit device memory; no framework between you and the GPU.
+The API mirrors the NumPy track's ``NumPyModel`` (plain numpy in, torch is
+used only as the host-side driver).
+
 Forward (same layout as the NumPy/PyTorch/Triton tracks):
     tokens → embedding → stack → final RMSNorm → lm_head → logits
 
@@ -135,6 +140,10 @@ class CUDAModel:
                     t[Keys.moe_expert(i, e, Mlp.GATE_PROJ)] = block.expert_gate_proj[e]
                     t[Keys.moe_expert(i, e, Mlp.UP_PROJ)] = block.expert_up_proj[e]
                     t[Keys.moe_expert(i, e, Mlp.DOWN_PROJ)] = block.expert_down_proj[e]
+                for s in range(self.config.n_shared_experts):
+                    t[Keys.moe_shared_expert(i, s, Mlp.GATE_PROJ)] = block.shared_gate_proj[s]
+                    t[Keys.moe_shared_expert(i, s, Mlp.UP_PROJ)] = block.shared_up_proj[s]
+                    t[Keys.moe_shared_expert(i, s, Mlp.DOWN_PROJ)] = block.shared_down_proj[s]
             else:
                 t[Keys.ffn(i, Mlp.GATE_PROJ)] = block.gate_proj
                 t[Keys.ffn(i, Mlp.UP_PROJ)] = block.up_proj

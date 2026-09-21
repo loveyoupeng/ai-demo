@@ -372,10 +372,10 @@ EDUCATIONAL:
 | Decision | Choice |
 |----------|--------|
 | Server | stdlib `http.server` only — zero new dependencies (KISS) |
-| Entry point | `impl/_np/cli.py --learning [--port 8080] [--model resource/models/learning_demo]` (or `scripts/run_learning_mode.sh`); lazy import — flag off = zero impact |
-| NumPy track changes | none — the **instrumented forward** (`impl/_np/learning.py`) is an overlay that recomputes component math from public parameters; `impl/_np` components stay untouched and readable |
+| Entry point | `scripts/learning.py [--port 8080] [--model resource/models/learning_demo] [--backend numpy|torch]` (moved off `impl/_np/cli.py --learning` in the 2026-09 entry-point consolidation) |
+| NumPy track changes | none — the **instrumented forward** (`impl/_np/learning.py`) is an overlay that recomputes component math from public parameters; `impl/_np` untouched |
 | Model loading | server-side checkpoint dir via `--model` (no page upload); any repo checkpoint works |
-| Demo model | char vocab V=20 (top-19 TinyStories letters + space), D=8, H=4, L=3, E=3 MoE, ctx=32, trained on TinyStories (reproducible via `scripts/train_demo_model.py`), saved to `resource/models/learning_demo/` + `vocab.json` sidecar |
+| Demo model | char vocab V=20 (top-19 TinyStories letters + space), D=8, H=4, L=3, E=3 MoE + 1 shared expert, ctx=128, `scripts/train_demo_model.py` → `resource/models/learning_demo/` |
 | Vocab persistence | optional `vocab.json` (token string list) next to the checkpoint; learning mode requires it for text I/O |
 | Page | single vanilla-JS `index.html` in `impl/_np/web/`; KaTeX vendored (offline Jetson) with plain-text formula fallbacks |
 | Display | all positions (small model); per-component formula cards; token picker → component click → detail (e.g. MHA shows Q/K/V math, scores, attention weights) |
@@ -383,7 +383,7 @@ EDUCATIONAL:
 
 ### I.2 Acceptance
 
-- `--learning` serves the page; submitting text returns generated tokens + per-step numbers; without the flag the CLI behaves exactly as before
+- `scripts.learning` serves the page; submitting text returns generated tokens + per-step numbers; the per-track CLIs stay pure inference demos
 - demo model: `resource/models/learning_demo/` loads via `load_checkpoint`; generated text is word-like (not random)
 - record JSON contains every intermediate listed in I.1 for every token step
 - unit tests: instrumented forward ≡ NumPyModel.forward; server endpoints over a live socket; demo model loads + generates

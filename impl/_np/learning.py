@@ -104,6 +104,7 @@ class MoERecord(TypedDict):
     topk_idx: list
     weights: list
     expert_outs: list
+    shared_outs: list  # per-shared-expert outputs (ADR 0002); [] when absent
     out: list
     n_experts: int
     top_k: int
@@ -241,6 +242,7 @@ def _moe_record(state: dict, out: np.ndarray, n_experts: int, top_k: int) -> MoE
         "topk_idx": np.round(state["topk_idx"]).astype(int).tolist(),  # (B, S, k)
         "weights": arr(state["weights"]),  # (B, S, E) renormalized
         "expert_outs": [arr(e) for e in state["expert_outs"]],
+        "shared_outs": [arr(e) for e in state.get("shared_outs", [])],  # (B, S, D) each
         "out": arr(out),
         "n_experts": n_experts,
         "top_k": top_k,

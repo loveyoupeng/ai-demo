@@ -31,44 +31,7 @@ def main() -> None:
     parser.add_argument("--embed_dim", type=int, default=16, help="Embedding dimension")
     parser.add_argument("--n_layers", type=int, default=1, help="Number of transformer layers")
     parser.add_argument("--n_heads", type=int, default=2, help="Number of attention heads")
-    parser.add_argument(
-        "--learning",
-        action="store_true",
-        help="Learning mode: host a webpage for interactive inference, architecture/math visualization, and inference records",
-    )
-    parser.add_argument("--port", type=int, default=8080, help="Port for --learning (default 8080)")
-    parser.add_argument(
-        "--host",
-        type=str,
-        default="0.0.0.0",
-        help="Interface to bind for --learning (default 0.0.0.0 = all interfaces, allows local-network access)",
-    )
-    parser.add_argument(
-        "--backend",
-        type=str,
-        default="numpy",
-        choices=["numpy", "torch"],
-        help="Track to materialize the learning-mode model (default numpy; torch loads the same checkpoint in PyTorch)",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="resource/models/learning_demo",
-        help="Checkpoint dir for --learning (default: the demo model)",
-    )
     args = parser.parse_args()
-    if args.learning:
-        # Opt-in learning mode — imported here so the flag-off path never touches it.
-        from impl._np import learning_server
-
-        lm, vocab, _cfg = learning_server.load_learning_model(args.model, backend=args.backend)
-        server = learning_server.start_server(lm, vocab, host=args.host, port=args.port, backend=args.backend)
-        print(f"Learning mode: listening on {args.host}:{args.port}  (model: {args.model})")
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            print("\nshutting down")
-        return
 
     model = NumPyModel(
         TransformerConfig(

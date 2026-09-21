@@ -144,6 +144,18 @@ class CuTransformerBlock:
             torch.nn.init.uniform_(self.expert_down_proj, -bound, bound, generator=gen)
             for p in (self.expert_gate_proj, self.expert_up_proj, self.expert_down_proj):
                 p.requires_grad_(True)
+            # Shared experts (ADR 0002): stacked SwiGLU projections, always
+            # active and ungated (not routed).
+            N_S = config.n_shared_experts
+            gen_sh = torch.Generator().manual_seed(seed + 12)
+            self.shared_gate_proj = torch.empty(N_S, D, FF, dtype=torch.float32)
+            torch.nn.init.uniform_(self.shared_gate_proj, -bound, bound, generator=gen_sh)
+            self.shared_up_proj = torch.empty(N_S, D, FF, dtype=torch.float32)
+            torch.nn.init.uniform_(self.shared_up_proj, -bound, bound, generator=gen_sh)
+            self.shared_down_proj = torch.empty(N_S, FF, D, dtype=torch.float32)
+            torch.nn.init.uniform_(self.shared_down_proj, -bound, bound, generator=gen_sh)
+            for p in (self.shared_gate_proj, self.shared_up_proj, self.shared_down_proj):
+                p.requires_grad_(True)
         else:
             # ── Dense SwiGLU feed-forward ──────────────────────────────
             self.gate_proj = _init_weight(D, FF, seed=seed + 9)
@@ -267,4 +279,15 @@ class CuTransformerBlock:
             w = probs[..., expert_idx : expert_idx + 1]  # (B, S, 1)
             expert_out = swiglu_ffn(x, eg[expert_idx], eu[expert_idx], ed[expert_idx])  # (B, S, D)
             out = out + w * expert_out
+
+        # Shared experts (ADR 0002): ungated additive branch, averaged.
+        N_S = self.config.n_shared_experts
+        if N_S > 0:
+            sg = self.shared_gate_proj.to(device)
+            su = self.shared_up_proj.to(device)
+            sd = self.shared_down_proj.to(device)
+            shared_sum = torch.zeros_like(x)
+            for s in range(N_S):
+                shared_sum = shared_sum + swiglu_ffn(x, sg[s], su[s], sd[s])  # (B, S, D)
+            out = out + shared_sum / N_S
         return out

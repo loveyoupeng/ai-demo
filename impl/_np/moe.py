@@ -24,6 +24,12 @@ class MixtureOfExperts:
         weights = mask / sum(mask)           (B, S, E)   renormalized to sum 1
         out    = sum_j weights_j * expert_j(x)        (B, S, D)
 
+    With ``n_shared_experts > 0`` (ADR 0002, DeepSeek-V2/V3 style) the block
+    also has always-active, UNGATED shared experts whose outputs are averaged
+    and added to the routed sum — the router never sees them:
+
+        out = out_routed + (1/N_s) * sum_s E_shared_s(x)
+
     Note (reference implementation): like the dense path, this computes every
     expert's output and multiplies by its (possibly zero) weight. Real
     systems gather tokens per expert to skip the zero-weight compute; the
@@ -55,15 +61,21 @@ class MixtureOfExperts:
        W_gate) plus each expert's input gradient, weighted by w_j.
     """
 
-    def __init__(self, embed_dim: int, n_experts: int, ff_dim: int, top_k: int, seed: int = 0) -> None:
+    def __init__(
+        self, embed_dim: int, n_experts: int, ff_dim: int, top_k: int, seed: int = 0, n_shared_experts: int = 0
+    ) -> None:
         self.embed_dim = embed_dim
         self.n_experts = n_experts
         self.top_k = top_k
+        self.n_shared_experts = n_shared_experts
         rng = np.random.default_rng(seed)
         # Router: (D, E) — no bias (Mixtral convention)
         self.gate = xavier_uniform(rng, embed_dim, n_experts)
         # Experts: one SwiGLU FFN each, distinct seeds per expert
         self.experts = [SwiGLUFFN(embed_dim, ff_dim, seed=seed + 1 + j) for j in range(n_experts)]
+        # Shared experts (ADR 0002): always active, ungated — every token gets
+        # their output added to the routed sum (DeepSeek-V2/V3 style).
+        self.shared_experts = [SwiGLUFFN(embed_dim, ff_dim, seed=seed + 50 + s) for s in range(n_shared_experts)]
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         """MoE forward. x: (B, S, D) → out: (B, S, D)."""
@@ -107,12 +119,22 @@ class MixtureOfExperts:
         for expert_idx, e_out in enumerate(expert_outs):
             w = weights[:, :, expert_idx : expert_idx + 1]  # (B, S, 1)
             out = out + w * e_out  # (B, S, D)
+
+        # Shared experts (ADR 0002): ungated, always active. Averaged so the
+        # branch magnitude does not grow with n_shared_experts.
+        if self.shared_experts:
+            shared_outs = [se.forward(x) for se in self.shared_experts]  # n_shared × (B, S, D)
+            shared_sum = np.sum(shared_outs, axis=0)  # (B, S, D)
+            out = out + shared_sum / len(shared_outs)
+        else:
+            shared_outs = []
         state = {
             "scores": scores,
             "probs": probs,
             "topk_idx": topk_idx,
             "weights": weights,
             "expert_outs": expert_outs,
+            "shared_outs": shared_outs,
         }
         return out, state
 
@@ -162,7 +184,19 @@ class MixtureOfExperts:
         dx = dx + dscores @ self.gate.T  # (B, S, D)
         dW_gate = x_flat.T @ dscores.reshape(-1, E)  # (D, E)
 
+        # --- Shared experts (ADR 0002) ---
+        # out += mean_s(E_shared_s(x)) is a plain sum of independent branches:
+        # each shared expert sees upstream dout / n_shared, no router Jacobian.
+        shared_grads: list[dict[str, np.ndarray]] = []
+        if self.shared_experts:
+            n_sh = len(self.shared_experts)
+            for se in self.shared_experts:
+                d_se_in, se_grads = se.backward(dout / n_sh, x)  # (B, S, D)
+                dx = dx + d_se_in
+                shared_grads.append(se_grads)
+
         return dx, {
             "gate": dW_gate.astype(np.float32),
             "experts": expert_grads,
+            "shared_experts": shared_grads,
         }

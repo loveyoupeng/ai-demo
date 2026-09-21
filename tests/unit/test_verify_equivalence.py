@@ -151,13 +151,13 @@ class TestVerifyEquivalenceScriptIntegration:
             # We don't care about PASS/FAIL for this basic sanity check
 
     def test_script_loads_scenarios(self):
-        """Script should define all 6 scenarios."""
+        """Script should define all 7 scenarios."""
         import scripts.verify_equivalence as ve
 
-        # Check that all 6 scenarios are defined
+        # Check that all 7 scenarios are defined
         assert hasattr(ve, "SCENARIOS")
         if isinstance(ve.SCENARIOS, list):
-            assert len(ve.SCENARIOS) == 6
+            assert len(ve.SCENARIOS) == 7
 
     def test_scenarios_have_correct_attributes(self):
         """Each scenario should have name, kwargs, and expected outputs."""
@@ -213,11 +213,11 @@ class TestScenariosFunction:
         scenarios = ve._scenarios()
         assert isinstance(scenarios, list)
 
-    def test_returns_six_scenarios(self):
+    def test_returns_seven_scenarios(self):
         import scripts.verify_equivalence as ve
 
         scenarios = ve._scenarios()
-        assert len(scenarios) == 6
+        assert len(scenarios) == 7
 
     def test_each_scenario_has_name(self):
         import scripts.verify_equivalence as ve

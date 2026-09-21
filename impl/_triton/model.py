@@ -1,5 +1,10 @@
 """TritonModel — complete decoder-only transformer on Triton kernels.
 
+Track intent: **how to write the kernels** — memory-traffic-aware GPU
+kernels (online softmax / FlashAttention in ``flash_attn.py``) over the
+PyTorch model skeleton. The RoPE operator is imported from the PyTorch track
+via the documented shared seam (``docs/seam_triton_to_torch.md``).
+
 Forward (same layout as the NumPy/PyTorch tracks):
 
     tokens (B, S)
@@ -102,6 +107,10 @@ class TritonModel(nn.Module):
                     t[Keys.moe_expert(layer_idx, expert_idx, Mlp.GATE_PROJ)] = expert.gate_proj
                     t[Keys.moe_expert(layer_idx, expert_idx, Mlp.UP_PROJ)] = expert.up_proj
                     t[Keys.moe_expert(layer_idx, expert_idx, Mlp.DOWN_PROJ)] = expert.down_proj
+                for s, shared in enumerate(mlp.shared_expert_list):
+                    t[Keys.moe_shared_expert(layer_idx, s, Mlp.GATE_PROJ)] = shared.gate_proj
+                    t[Keys.moe_shared_expert(layer_idx, s, Mlp.UP_PROJ)] = shared.up_proj
+                    t[Keys.moe_shared_expert(layer_idx, s, Mlp.DOWN_PROJ)] = shared.down_proj
             else:
                 t[Keys.ffn(layer_idx, Mlp.GATE_PROJ)] = mlp.gate_proj
                 t[Keys.ffn(layer_idx, Mlp.UP_PROJ)] = mlp.up_proj

@@ -76,6 +76,57 @@ class TestEntryEnumeration:
         assert Keys.moe_gate(0) in keys
 
 
+class TestSharedExpertEntries:
+    """Shared-expert keys (ADR 0002): present only when n_shared_experts > 0."""
+
+    @staticmethod
+    def _shared_cfg(n_shared_experts: int = 2) -> TransformerConfig:
+        return TransformerConfig.from_dict(
+            {
+                "vocab_size": 32,
+                "embed_dim": 8,
+                "n_layers": 1,
+                "n_heads": 2,
+                "n_experts": 3,
+                "top_k": 1,
+                "expert_dim": 16,
+                "n_shared_experts": n_shared_experts,
+            }
+        )
+
+    def test_shared_expert_keys_and_shapes(self) -> None:
+        reg = ParameterRegistry(self._shared_cfg(2))
+        shapes = reg.expected_shapes()
+        for s in (0, 1):
+            assert shapes[Keys.moe_shared_expert(0, s, Mlp.GATE_PROJ)] == (8, 16)
+            assert shapes[Keys.moe_shared_expert(0, s, Mlp.UP_PROJ)] == (8, 16)
+            assert shapes[Keys.moe_shared_expert(0, s, Mlp.DOWN_PROJ)] == (16, 8)
+
+    def test_default_has_no_shared_expert_keys(self) -> None:
+        keys = ParameterRegistry(_moe_cfg()).keys()
+        assert all("shared_experts" not in key for key in keys)
+
+    def test_keys_match_all_param_keys_with_shared(self) -> None:
+        from shared.constants import all_param_keys
+
+        cfg = self._shared_cfg(1)
+        reg = ParameterRegistry(cfg)
+        assert reg.keys() == all_param_keys(cfg.n_layers, has_moe=True, n_experts=3, n_shared_experts=1)
+
+    def test_dense_config_rejects_shared_experts(self) -> None:
+        with pytest.raises(AssertionError, match="requires MoE"):
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 32,
+                    "embed_dim": 8,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "n_experts": 1,
+                    "n_shared_experts": 1,
+                }
+            )
+
+
 class TestExpectedShapes:
     """Shapes are derived from the config (the format contract)."""
 

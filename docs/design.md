@@ -3,6 +3,41 @@
 **Date:** 2026-06-26 (last synced: 2026-09-19)
 **Goal:** Build a fully functional decoder-only transformer LLM in 4 equivalent implementations (NumPy, PyTorch, Triton, CUDA) for educational purposes.
 
+## Track intent (doctrine)
+
+Each track is written to teach a different skill — this guides every docstring
+and comment choice:
+
+- **NumPy = how the math works.** Every operator is hand-derived with formula
+  citations and shape comments; the analytic backward is the lesson.
+- **PyTorch = how to do it properly with a framework.** Production idiom:
+  `nn.Module` composition, autograd, SDPA, `torch.optim`. Read it to learn
+  how this model should be written in real code.
+- **Triton = how to write the kernels.** Memory-traffic-aware kernels
+  (online softmax) over the PyTorch skeleton.
+- **CUDA = the bare metal.** NVRTC kernels, explicit launches, no framework.
+
+When a track deviates from its simplest correct form, the deviation must
+answer that track's question (e.g. Triton fuses because kernel fusion *is*
+the lesson); pedagogical shortcuts that would mislead about production
+practice get a `# PROD:` note instead.
+
+## Cross-track naming (audited 2026-09)
+
+Deliberate: every track owns `forward` + `load_from_numpy_dict` +
+`get_all_parameters`/`save_as_numpy`, and classes carry the track prefix
+(`NumPyModel`, `TorchModel`, `TritonModel`, `CUDAModel`; same for the
+`TextGenerator`s). Known deltas, kept consciously:
+
+- The NumPy `TextGenerator` and `NaiveKVCache` skip the `NumPy…` prefix —
+  that track is the reference, so its names are the unadorned canonical ones.
+- Only the NumPy track publicizes `forward_prefill`/`forward_step`; the
+  PyTorch/Triton/CUDA generators own their cache loop internally (the
+  pedagogical value of the exact step path belongs to the reference track).
+- `CUDAModel` is not an `nn.Module` — bare-metal track, plain tensor
+  attributes; training collects grads by walking the block's tensor
+  attributes (fixed 2026-09 — an earlier collector walked stale names).
+
 ---
 
 ## Architecture
@@ -167,4 +202,4 @@ project/
 5. **Flat checkpoint format** — All backends save/load `model.npz` as a flat dict (keys from the shared `Keys` scheme), enabling cross-backend transfer
 6. **Standard additive residual** — the block uses the plain pre-norm skip `out = x + f(ln(x))`, matching LLaMA and every modern reference (the repo-specific "gated residual" was abandoned — see [ADR-0001](adr/0001-gated-residual-abandonment.md))
 7. **Multi-level KV caching** — Configurable cache length for efficient training vs inference
-8. **PyTorch nn.Module wrapper** — PyTorch/Triton/CUDA models are `nn.Module` instances, enabling gradient-based training via `.parameters()`
+8. **PyTorch nn.Module wrapper** — PyTorch/Triton models are `nn.Module` instances (training via `.parameters()`); `CUDAModel` is a plain class whose tensor attributes carry `requires_grad`

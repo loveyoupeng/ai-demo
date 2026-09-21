@@ -180,18 +180,23 @@ class TritonMixtureOfExperts(nn.Module):
     Router: gate = nn.Linear(D, E, bias=False) (Mixtral convention).
     """
 
-    def __init__(self, embed_dim: int, n_experts: int, ff_dim: int, top_k: int) -> None:
+    def __init__(self, embed_dim: int, n_experts: int, ff_dim: int, top_k: int, n_shared_experts: int = 0) -> None:
         super().__init__()
         self.n_experts = n_experts
         self.top_k = top_k
+        self.n_shared_experts = n_shared_experts
         self.gate = nn.Linear(embed_dim, n_experts, bias=False)
         # Typed view for pyright; nn.ModuleList registers parameters for torch
         self.expert_list: list[TritonExpert] = [TritonExpert(embed_dim, ff_dim) for _ in range(n_experts)]
         self.experts = nn.ModuleList(self.expert_list)
+        # Shared experts (ADR 0002): ungated, always active — same Triton FFN
+        # kernels, just not selected by the router.
+        self.shared_expert_list: list[TritonExpert] = [TritonExpert(embed_dim, ff_dim) for _ in range(n_shared_experts)]
+        self.shared_experts = nn.ModuleList(self.shared_expert_list)
 
     def reset_parameters(self) -> None:
         nn.init.kaiming_uniform_(self.gate.weight, a=math.sqrt(5))
-        for expert in self.expert_list:
+        for expert in self.expert_list + self.shared_expert_list:
             expert.reset_parameters()
 
     def _move_to_device(self, x: torch.Tensor) -> None:
@@ -202,12 +207,12 @@ class TritonMixtureOfExperts(nn.Module):
         dtype = x.dtype if x.dtype.is_floating_point or x.dtype.is_complex else None
         if dtype is None:
             self.gate.to(device)
-            for expert in self.expert_list:
+            for expert in self.expert_list + self.shared_expert_list:
                 for p in [expert.gate_proj, expert.up_proj, expert.down_proj]:
                     p.data = p.data.to(device)
         else:
             self.gate.to(device, dtype)
-            for expert in self.expert_list:
+            for expert in self.expert_list + self.shared_expert_list:
                 for p in [expert.gate_proj, expert.up_proj, expert.down_proj]:
                     p.data = p.data.to(device, dtype)
 
@@ -234,6 +239,12 @@ class TritonMixtureOfExperts(nn.Module):
         for expert_idx, expert in enumerate(self.experts):
             w = probs[..., expert_idx : expert_idx + 1]  # (B, S, 1)
             out = out + w * expert(x)  # (B, S, D)
+        # Shared experts (ADR 0002): ungated additive branch, averaged.
+        if self.shared_expert_list:
+            shared_sum = torch.zeros_like(x)
+            for shared in self.shared_experts:
+                shared_sum = shared_sum + shared(x)  # (B, S, D)
+            out = out + shared_sum / len(self.shared_expert_list)
         return out
 
 
@@ -258,7 +269,11 @@ class TritonTransformerBlock(nn.Module):
         self.self_attn = TritonMultiHeadAttention(config)
         if config.has_moe():
             self.mlp: TritonSwiGLUFFN | TritonMixtureOfExperts = TritonMixtureOfExperts(
-                embed_dim=D, n_experts=config.n_experts, ff_dim=config.expert_dim, top_k=config.top_k
+                embed_dim=D,
+                n_experts=config.n_experts,
+                ff_dim=config.expert_dim,
+                top_k=config.top_k,
+                n_shared_experts=config.n_shared_experts,
             )
         else:
             self.mlp = TritonSwiGLUFFN(embed_dim=D, ff_dim=config.expert_dim)

@@ -72,3 +72,35 @@ class TestMoEForward:
         out2 = moe2.forward(x.copy())
 
         np.testing.assert_array_equal(out1, out2, err_msg="Same seed should produce identical outputs")
+
+
+class TestSharedExperts:
+    """DeepSeek-style shared experts (ADR 0002): ungated, averaged, additive."""
+
+    def test_zeroed_shared_experts_match_plain_moe(self):
+        """Zero-weight shared experts contribute exactly nothing."""
+        x = np.random.default_rng(1).normal(size=(2, 4, 8)).astype(np.float32)
+        moe = MixtureOfExperts(embed_dim=8, n_experts=3, ff_dim=16, top_k=1, seed=5, n_shared_experts=2)
+        ref = MixtureOfExperts(embed_dim=8, n_experts=3, ff_dim=16, top_k=1, seed=5)
+        for shared in moe.shared_experts:
+            shared.gate_proj[...] = 0.0
+            shared.up_proj[...] = 0.0
+            shared.down_proj[...] = 0.0
+        np.testing.assert_array_equal(moe.forward(x.copy()), ref.forward(x.copy()))
+
+    def test_shared_branch_is_additive_and_averaged(self):
+        """out = routed + mean(E_shared(x)) — independent of the router."""
+        x = np.random.default_rng(1).normal(size=(2, 4, 8)).astype(np.float32)
+        moe = MixtureOfExperts(embed_dim=8, n_experts=3, ff_dim=16, top_k=1, seed=5, n_shared_experts=2)
+        ref = MixtureOfExperts(embed_dim=8, n_experts=3, ff_dim=16, top_k=1, seed=5)
+        routed = ref.forward(x.copy())
+        shared_sum = moe.shared_experts[0].forward(x) + moe.shared_experts[1].forward(x)
+        expected = routed + shared_sum / 2
+        np.testing.assert_allclose(moe.forward(x.copy()), expected, rtol=1e-5, atol=1e-6)
+
+    def test_shared_experts_change_output(self):
+        """A trained (non-zero) shared expert must actually affect the output."""
+        x = np.random.default_rng(1).normal(size=(2, 4, 8)).astype(np.float32)
+        moe = MixtureOfExperts(embed_dim=8, n_experts=3, ff_dim=16, top_k=1, seed=5, n_shared_experts=1)
+        ref = MixtureOfExperts(embed_dim=8, n_experts=3, ff_dim=16, top_k=1, seed=5)
+        assert not np.allclose(moe.forward(x.copy()), ref.forward(x.copy()), atol=1e-4)

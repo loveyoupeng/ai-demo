@@ -46,6 +46,12 @@ docs, and tests.
   top-k experts (each a SwiGLU) per token. The router is a linear layer
   (D → E) followed by softmax + top-k mask + renormalize.
 
+- **Shared expert** (a.k.a. global expert): an always-active expert that
+  processes every token without routing — `out = E_shared(x) + Σ_j wⱼ·E_j(x)`.
+  Ungated by the router (DeepSeek-V2/V3 style), so it captures common
+  features while routed experts specialize. Enabled with `n_shared_experts`;
+  0 disables it (pure top-k routing). See `docs/adr/0002-shared-expert-moe.md`.
+
 - **lm_head**: the final linear layer (D → V) that maps the last hidden state
   to logits over the vocabulary. No weight tying with the embedding in this
   project (separate parameters).
@@ -129,13 +135,27 @@ docs, and tests.
 
 ## Learning Mode
 
-- **Learning mode**: the opt-in extension of the NumPy CLI (`--learning`) that hosts a web page for interactive inference — architecture visualization, the actual numbers at every step with click-to-inspect detail, and downloadable inference records. Off by default; when off it has no impact on the NumPy track.
+- **Learning mode**: the web visualizer for interactive inference —
+  architecture diagram, the actual numbers at every step with
+  click-to-inspect detail, and downloadable inference records. Served by the
+  standalone entry point `scripts/learning.py` on top of
+  `impl/_np/learning_server.py`; backend-agnostic (NumPy default, PyTorch
+  via `--backend`), since a record is the same JSON shape from either
+  adapter. Off by default; it has no impact on any track.
 
 - **Inference record**: the per-token capture of every forward intermediate — embedding through each block's attention/FFN (or MoE) tensors, final norm, logits, and the sampled token — serialized as JSON for the page and for download.
 
 - **Instrumented forward**: the overlay that runs the model's own components and recomputes each component's math from its public parameters to capture intermediates, without modifying the NumPy track (the components stay untouched and readable as teaching code).
 
 - **Demo model**: the pretrained toy model — char-level vocabulary (V=20), D=8, H=4, L=3, E=3 MoE — exported to `resource/models/learning_demo/` (checkpoint + `vocab.json`). The learning mode's default model.
+
+- **Entry-point contract**: every per-track `cli.py` (e.g.
+  `python -m impl._torch.cli`) is a single-track smoke demo on random
+  weights — fast, dependency-minimal, answers "does this track run?".
+  Everything checkpoint-based or cross-backend lives in `scripts/`
+  (`train.py`, `infer.py`, `learning.py`, `verify_equivalence.py`) with a
+  `--backend` selector. New user-facing entry points go in `scripts/`;
+  `cli.py` files stay thin demos and never learn checkpoint loading.
 ## Tracks
 
 - **NumPy track** (`impl/_np/`): the math reference. Hand-rolled

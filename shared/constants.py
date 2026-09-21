@@ -130,12 +130,19 @@ class Keys:
         ``model.layers.{i}.mlp.experts.{j}.gate_proj.weight``."""
         return f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.{proj}.weight"
 
+    @staticmethod
+    def moe_shared_expert(layer_idx: int, shared_idx: int, proj: str) -> str:
+        """MoE shared-expert SwiGLU projection key →
+        ``model.layers.{i}.mlp.shared_experts.{s}.gate_proj.weight``."""
+        return f"model.layers.{layer_idx}.mlp.shared_experts.{shared_idx}.{proj}.weight"
 
-def all_param_keys(num_layers: int, has_moe: bool, n_experts: int) -> list[str]:
+
+def all_param_keys(num_layers: int, has_moe: bool, n_experts: int, n_shared_experts: int = 0) -> list[str]:
     """Every parameter key for a model with ``num_layers`` blocks.
 
     Dense layers contribute the three SwiGLU projections; MoE layers
-    contribute the router plus the three projections per expert.
+    contribute the router plus the three projections per expert, plus three
+    more per shared expert (ADR 0002).
     """
     keys: list[str] = [Keys.embed()]
     for i in range(num_layers):
@@ -148,6 +155,9 @@ def all_param_keys(num_layers: int, has_moe: bool, n_experts: int) -> list[str]:
             for j in range(n_experts):
                 for proj in FFN_PROJS:
                     keys.append(Keys.moe_expert(i, j, proj))
+            for s in range(n_shared_experts):
+                for proj in FFN_PROJS:
+                    keys.append(Keys.moe_shared_expert(i, s, proj))
         else:
             for proj in FFN_PROJS:
                 keys.append(Keys.ffn(i, proj))

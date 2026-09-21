@@ -81,6 +81,9 @@ class ParameterRegistry:
                 for j in range(E):
                     for proj in FFN_PROJS:
                         entries.append(ParamEntry(Keys.moe_expert(i, j, proj), ffn_shape(proj)))
+                for s in range(cfg.n_shared_experts):
+                    for proj in FFN_PROJS:
+                        entries.append(ParamEntry(Keys.moe_shared_expert(i, s, proj), ffn_shape(proj)))
             else:
                 for proj in FFN_PROJS:
                     entries.append(ParamEntry(Keys.ffn(i, proj), ffn_shape(proj)))

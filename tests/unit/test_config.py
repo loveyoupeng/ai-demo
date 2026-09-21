@@ -190,6 +190,7 @@ class TestSerialization:
             "n_experts",
             "top_k",
             "expert_dim",
+            "n_shared_experts",
             "max_length",
             "quant_type",
             "kvcache_type",

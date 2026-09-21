@@ -20,8 +20,10 @@
   .badges { display: flex; flex-wrap: wrap; gap: 6px; }
   .badge { background: var(--panel2); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: .78rem; color: var(--dim); }
   .badge b { color: var(--fg); font-weight: 600; }
-  main { display: grid; grid-template-columns: 1fr; gap: 14px; padding: 14px 18px; max-width: 1600px; margin: 0 auto; }
-  @media (min-width: 1100px) { main.record-open { grid-template-columns: 460px 1fr; } }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 34%); gap: 14px; padding: 14px 18px; max-width: 1800px; margin: 0 auto; align-items: start; }
+  main > #prompt-panel { grid-column: 1 / -1; }
+  #inspector { position: sticky; top: 14px; max-height: calc(100vh - 28px); overflow-y: auto; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } #inspector { position: static; max-height: none; } }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
   label { font-size: .8rem; color: var(--dim); display: block; margin: 8px 0 3px; }
   input[type=text], input[type=number], select { background: var(--panel2); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; width: 100%; font: inherit; }
@@ -96,6 +98,11 @@
   a { color: var(--accent); }
   #record-panel { display: none; }
   main.record-open #record-panel { display: block; }
+  main.record-open #steps-bar { display: block !important; }
+  /* inspector explanation card (what + why, before the math) */
+  .explain { border-left: 3px solid var(--accent); background: var(--panel2); border-radius: 0 8px 8px 0; padding: 10px 12px; margin-bottom: 14px; }
+  .explain .ex-what { margin-bottom: 5px; }
+  .explain .ex-why { color: var(--dim); font-size: .85rem; }
   /* tensor blocks: input / output with shape */
   .tblock { margin: 12px 0; }
   .thead { display: flex; align-items: baseline; gap: 8px; font-size: .88rem; margin-bottom: 2px; flex-wrap: wrap; }
@@ -124,8 +131,8 @@
   <div class="badges" id="badges"><span class="badge">loading model…</span></div>
 </header>
 <main id="main">
-  <section>
-    <h2>Prompt</h2>
+  <section id="prompt-panel">
+    <h2>Prompt &amp; run</h2>
     <label>Input text (chars outside the vocab are skipped and marked)</label>
     <input type="text" id="prompt" value="the she to" spellcheck="false">
     <div class="chips" id="prompt-chips"></div>
@@ -157,20 +164,23 @@
       </div>
       <div class="topbars" id="gen-top"></div>
     </section>
+    <section id="steps-bar" style="background:var(--panel2); margin-top:12px; border-color:var(--line); display:none">
+      <h2>Steps — prefill, then one decode per generated token</h2>
+      <div class="kv" id="rec-meta"></div>
+      <div class="tokmap">
+        <div class="tm-label">prompt tokens (positions 0…p-1) → generated tokens (positions p…); row r of every (S, …) matrix = token r</div>
+        <div class="chips" id="rec-tokmap"></div>
+      </div>
+      <div class="steps" id="rec-steps"></div>
+      <div class="row" style="margin-top:6px">
+        <div><button id="btn-play" class="secondary">▶ play</button></div>
+        <div class="note">Click a module or inner stage in the diagram — the inspector on the right explains what it does, then shows the math and the actual numbers.</div>
+      </div>
+    </section>
   </section>
 
   <section id="record-panel">
-    <h2>Inference record</h2>
-    <div class="kv" id="rec-meta"></div>
-    <div class="tokmap">
-      <div class="tm-label">prompt tokens (positions 0…p-1) → generated tokens (positions p…); row r of every (S, …) matrix = token r</div>
-      <div class="chips" id="rec-tokmap"></div>
-    </div>
-    <div class="steps" id="rec-steps"></div>
-    <div class="row" style="margin-top:6px">
-      <div><button id="btn-play" class="secondary">▶ play</button></div>
-      <div class="note">Click any module or its inner stages — the inspector shows input → math → output with shapes and raw numbers.</div>
-    </div>
+    <h2>Architecture</h2>
     <div id="diagram-holder" style="margin-top:10px"></div>
     <div class="legend" id="legend">
       <span class="lg"><span class="sw node"></span><b>node</b> single stage</span>
@@ -182,10 +192,10 @@
       <span class="lg"><span class="sw nl" style="border-color:var(--accent2)"></span><b>green</b> direct predecessor · <span class="sw nl" style="border-color:var(--accent)"></span><b>blue</b> direct successor (click a node; click it again or the background to reset)</span>
       <span class="lg"><span class="sw hilo"></span><b>heat color</b> red = low, blue = high (per-tensor min/max)</span>
     </div>
-    <section style="margin-top:12px" id="inspector">
-      <h2 id="ins-title">Inspector</h2>
-      <div id="ins-body"><p class="note">Pick a module in the diagram (or a step) to see its tensors and math.</p></div>
-    </section>
+  </section>
+  <section id="inspector">
+    <h2 id="ins-title">Inspector</h2>
+    <div id="ins-body"><p class="note">Pick a module in the diagram (or a step) to see its explanation, math, and tensors.</p></div>
   </section>
 </main>
 
@@ -400,6 +410,7 @@ async function init() {
     [`ctx = ${c.context_length}`, "context"],
   ];
   if (MODEL.has_moe) badges.push([`E = ${c.n_experts}`, "MoE experts (top-k " + c.top_k + ")"]);
+  if (c.n_shared_experts > 0) badges.push([`shared = ${c.n_shared_experts}`, "always-on ungated expert(s) — added to the routed sum (ADR 0002)"]);
   badges.push([`${MODEL.n_params.toLocaleString()}`, "parameters"]);
   $("badges").innerHTML = badges.map(([v, t]) => `<span class="badge" title="${t}"><b>${v}</b> ${t}</span>`).join("");
   if (!MODEL.has_vocab) setStatus("This checkpoint has no vocab.json — text input unavailable.");
@@ -615,6 +626,11 @@ function buildDiagram() {
     FLOW[`b${i}.ffn`] = { pred: [`b${i}.ln2`], succ: [`b${i}.out`] };
     if (MODEL.has_moe) {
       flowChain(`b${i}.ffn`, ["router", "topk", "weights", "experts", "sum"], `b${i}.ffn`, `b${i}.out`);
+      if (c.n_shared_experts > 0) {
+        // ADR 0002: the shared branch reads the module input ungated, re-joins at Σ.
+        FLOW[`b${i}.ffn.shared`] = { pred: [`b${i}.ffn`], succ: [`b${i}.ffn.sum`] };
+        FLOW[`b${i}.ffn.sum`].pred = [`b${i}.ffn.experts`, `b${i}.ffn.shared`];
+      }
     } else {
       const f = (s) => `b${i}.ffn.${s}`;
       FLOW[f("gate")] = { pred: [`b${i}.ffn`], succ: [f("mul")] };
@@ -733,14 +749,23 @@ function buildDiagram() {
     // row 2: ln2 → ffn/moe → out
     module(`b${i}.ln2`, CX_L, r2, CW_L, ROW_H, "LN 2 · RMSNorm", [[["rms", `b${i}.ln2`], ["×γ", `b${i}.ln2`]]]);
     if (MODEL.has_moe) {
-      module(`b${i}.ffn`, CX_C, r2, CW_C, ROW_H, "MoE feed-forward", [
-        [["router", `b${i}.ffn.router`], ["top-k", `b${i}.ffn.topk`, true], ["renorm", `b${i}.ffn.weights`, true], [`experts ×${c.n_experts}`, `b${i}.ffn.experts`], ["Σ wⱼ·Eⱼ(x)", `b${i}.ffn.sum`]],
-      ]);
+      // cells: router chain ends at Σ; the shared expert is a parallel branch
+      // (drawn last, no arrows — it joins at Σ per FLOW)
+      const moeCells = [
+        ["router", `b${i}.ffn.router`], ["top-k", `b${i}.ffn.topk`, true], ["renorm", `b${i}.ffn.weights`, true],
+        [`experts ×${c.n_experts}`, `b${i}.ffn.experts`], ["Σ wⱼ·Eⱼ(x)", `b${i}.ffn.sum`],
+      ];
+      let moeArrows = null;
+      if (c.n_shared_experts > 0) {
+        moeCells.push([`shared ×${c.n_shared_experts}`, `b${i}.ffn.shared`]);
+        moeArrows = [[[0, 1], [1, 2], [2, 3], [3, 4]]]; // shared (cell 5) gets no arrows: ungated branch
+      }
+      module(`b${i}.ffn`, CX_C, r2, CW_C, ROW_H, "MoE feed-forward", [moeCells], moeArrows);
     } else {
       // gate and up are parallel branches that meet at gate⊙up: only mul→down is a chain arrow.
       module(`b${i}.ffn`, CX_C, r2, CW_C, ROW_H, "FFN · SwiGLU", [
         [["gate=SiLU", `b${i}.ffn.gate`, true], ["up=XWu", `b${i}.ffn.up`], ["gate⊙up", `b${i}.ffn.mul`], ["·Wd", `b${i}.ffn.down`]],
-      ], [[2, 3]]);
+      ], [[[2, 3]]]);
     }
     node(`b${i}.out`, CX_R, r2, CW_R, ROW_H, "out = h + ffn", "block output");
 
@@ -1043,6 +1068,20 @@ function ffnSubView(sub, bIdx, bt) {
       });
     };
   }
+  if (sub === "shared") {
+    return (body) => {
+      tensorBlock(body, "in", "input x (LN2 output) — the same input the routed experts see", bt.y2, { cell: 12, names: ["S", "D"] });
+      body.appendChild(formula(
+        "\\text{out} = \\sum_j \\hat{p}_j E_j(x) \\;+\\; \\tfrac{1}{N_s}\\textstyle\\sum_s E^{\\text{sh}}_s(x)",
+        "the shared expert runs UNGATED — every token passes through it; the '/' shows the mean over shared experts (ADR 0002)"
+      ));
+      (m.shared_outs || []).forEach((so, s) => {
+        body.appendChild(matLabel(`shared expert ${s} output (S, D)`));
+        body.appendChild(heatGrid(so, { cell: 11, title: "E_sh" + s }));
+        body.appendChild(numsTable(so));
+      });
+    };
+  }
   if (sub === "sum") {
     return (body) => {
       body.appendChild(matLabel("weights (S, E)"));
@@ -1057,6 +1096,41 @@ function ffnSubView(sub, bIdx, bt) {
   }
   return null;
 }
+
+// Per-stage explanations, keyed by node id with the block prefix stripped
+// ("b2.attn.rope" → "attn.rope"). Shown at the top of the inspector, before
+// the formula and the tensors.
+const EXPLAIN = {
+  emb: { what: "Looks up each token id in the embedding table — a pure table gather, one D-vector per token.", why: "Positions play no role here: the same id gets the same vector wherever it sits. Order information enters later, via RoPE inside attention." },
+  pos: { what: "Positions 0…S−1 become angle tables (cos/sin) consumed by RoPE inside every attention block.", why: "This model has no learned position embedding — the dashed edge shows the only route position information takes into the network." },
+  ln1: { what: "RMSNorm before attention: rescales each row to unit root-mean-square, then applies the learned gain γ.", why: "Pre-norm keeps activations at a stable scale across depth, which is what makes deep stacks trainable without careful initialization tricks." },
+  ln2: { what: "RMSNorm before the feed-forward — same operation as LN1, own γ.", why: "Normalizing the residual stream (not the raw block input) keeps the attention result h well-scaled before the FFN reads it." },
+  attn: { what: "Attention: each position scores every earlier position, then mixes their value vectors by match strength.", why: "This is the only stage where tokens exchange information. Everything else (norms, FFN) processes each position independently." },
+  "attn.q": { what: "q = xW_q — the query: what this position is looking for.", why: "q, k and v come from the SAME input through three different matrices — one input, three roles." },
+  "attn.k": { what: "k = xW_k — the key: what this position advertises.", why: "A key is meant to be matched against queries; RoPE will rotate it so position shows up in the match score." },
+  "attn.v": { what: "v = xW_v — the value: the content this position passes on if attended to.", why: "Note v bypasses RoPE — position must not distort the content, only the matching." },
+  "attn.rope": { what: "Rotates q and k by an angle proportional to token position (head dims taken in pairs).", why: "After rotation, q·k reflects relative distance: attention can prefer nearby or specific-offset tokens without any positions stored in the weights." },
+  "attn.scores": { what: "scores = q·kᵀ / √d per head — how strongly each position matches each earlier one.", why: "The √d divisor holds pre-softmax scores near unit variance; without it, softmax saturates and gradients die early in training." },
+  "attn.mask": { what: "Sets the strict upper triangle of the scores to −∞.", why: "Causality: without the mask, position t would peek at the future it is supposed to predict." },
+  "attn.softmax": { what: "Row-wise softmax over scores → attention weights (each row sums to 1).", why: "Exponentiating emphasizes the best match; normalization turns scores into a mixing recipe." },
+  "attn.o": { what: "ctx = A·V (weighted value mix, heads merged), then out = ctx·W_o projects back to width D.", why: "W_o is where the H per-head answers are combined into one D-vector for the residual stream." },
+  h: { what: "h = x + attn_out — a plain element-wise add.", why: "The residual connection is the gradient highway: it lets each block be a small correction instead of a rewrite, which is what makes depth trainable." },
+  ffn: { what: "Feed-forward: per-position widen → non-linearity → narrow (SwiGLU), or MoE (router + experts).", why: "Attention routes information between tokens; the FFN is where each token's content is actually processed. Most of the parameters live here." },
+  "ffn.gate": { what: "gate = SiLU(xW_g), with SiLU(z) = z·σ(z) — a smooth self-gating non-linearity.", why: "Unlike ReLU it is smooth at 0, so gradients flow through the gate without dead zones." },
+  "ffn.up": { what: "up = xW_u — the raw content projection (same width as the gate).", why: "The gate modulates this projection element-wise: the network can switch parts of the width on or off per position." },
+  "ffn.mul": { what: "gate ⊙ up — element-wise product of the two parallel branches.", why: "This multiplicative interaction is exactly what makes SwiGLU non-linear enough to rival deeper plain FFNs." },
+  "ffn.down": { what: "out = (gate⊙up)·W_d — project the FF width back to the model width D.", why: "The output lands at width D ready to be added to the residual stream." },
+  "ffn.router": { what: "router: one small linear layer scores every expert for every token (xW_gate → softmax).", why: "Routing is how MoE stays cheap: many experts exist, but each token pays compute only for its top-k." },
+  "ffn.topk": { what: "Keep only the k highest router probabilities per token; zero the rest.", why: "This hard, non-linear selection is the sparsity: scaling the model up means adding experts, not compute per token." },
+  "ffn.weights": { what: "Renormalize the selected probabilities so they sum to 1.", why: "Keeps the mixed output magnitude independent of k — the block output would otherwise shrink when fewer experts are selected." },
+  "ffn.experts": { what: "Each expert is a full SwiGLU FFN; every expert evaluates every token (weights stay here, selection happens later).", why: "Experts specialize during training: different experts learn different pattern families (syntax, endings, …)." },
+  "ffn.sum": { what: "out = Σ_j wⱼ·E_j(x) — blend the selected experts' outputs by the renormalized router weights.", why: "The router's confidence becomes the mixing ratio. (If shared experts exist, their mean output is added on top — see the 'shared' cell.)" },
+  "ffn.shared": { what: "Shared expert: a full SwiGLU FFN that EVERY token passes through, ungated; its output is averaged in on top of the routed sum.", why: "DeepSeek-V2/V3 idea: patterns every token needs (grammar, common shapes) live here instead of loading the router; routed experts are freed to specialize." },
+  cache: { what: "Append-only per-block store of each position's K and V rows.", why: "Pre-fill writes the whole prompt once; each decode step appends exactly one row and reuses the rest — generation is O(1) per token instead of O(T)." },
+  fnorm: { what: "Final RMSNorm over the last block's output.", why: "Centers the hidden state before the vocabulary projection so logit scales stay comparable across positions." },
+  lmhead: { what: "Each position's D-vector is dotted with all V vocabulary rows → logits.", why: "The largest logit is the model's current guess for the next token; the full row is the belief state sampling draws from." },
+  softmax: { what: "softmax over the last position's logits → next-token distribution; greedy takes argmax, sampling draws from it.", why: "Temperature sharpens or flattens this distribution; top-k cuts off the low-probability tail before sampling." },
+};
 
 function renderInspector() {
   const body = drop($("ins-body"));
@@ -1170,6 +1244,21 @@ function renderInspector() {
   if (!view) {
     body.innerHTML = '<p class="note">Pick a module in the diagram to see its tensors and math.</p>';
     return;
+  }
+  const exKey = id.replace(/^b\d+\./, "");
+  const exInfo = EXPLAIN[exKey];
+  if (exInfo) {
+    const ex = document.createElement("div");
+    ex.className = "explain";
+    const what = document.createElement("div");
+    what.className = "ex-what";
+    what.textContent = exInfo.what;
+    const why = document.createElement("div");
+    why.className = "ex-why";
+    why.textContent = exInfo.why;
+    ex.appendChild(what);
+    ex.appendChild(why);
+    body.appendChild(ex);
   }
   view(body);
   body.querySelectorAll(".formula").forEach(renderTex);

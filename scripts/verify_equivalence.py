@@ -90,6 +90,12 @@ SCENARIOS: list[Scenario] = [
         backends=["numpy", "torch"],
     ),
     Scenario(
+        name="moe_shared_experts_np_torch",
+        description="MoE with a shared (ungated, always-on) expert (ADR 0002): NumPy vs PyTorch",
+        kwargs=_cfg(n_experts=4, top_k=2, n_shared_experts=1),
+        backends=["numpy", "torch"],
+    ),
+    Scenario(
         name="gqa_torch_triton",
         description="GQA model: PyTorch vs Triton (fp32 kernel tier)",
         kwargs=_cfg(n_heads=4, n_groups=2, rope_dim=8),

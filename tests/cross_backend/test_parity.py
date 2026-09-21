@@ -72,6 +72,29 @@ class TestForwardParity:
         )
 
     @pytest.mark.timeout(15)
+    def test_forward_match_shared_experts(self):
+        """MoE with shared experts: NumPy ↔ PyTorch parity (ADR 0002).
+
+        Exercises the extended registry keys (``shared_experts.``*) plus the
+        additive, ungated shared branch in both tracks.
+        """
+        cfg = _cfg(n_experts=3, n_shared_experts=2)
+        np_model_ = np_model.NumPyModel(cfg)
+        torch_model = torch_layers.TorchModel(cfg)
+
+        torch_model.load_from_numpy_dict(np_model_.get_all_parameters())
+
+        input_ids = torch.tensor([[0, 1, 2, 3, 4]], dtype=torch.int64)
+        np_logits = np_model_.forward(input_ids.numpy())
+        torch_model.eval()
+        with torch.no_grad():
+            torch_logits = torch_model(input_ids).numpy()
+
+        np.testing.assert_allclose(
+            np_logits, torch_logits, rtol=1e-3, atol=1e-3, err_msg="Shared-expert logits should match"
+        )
+
+    @pytest.mark.timeout(15)
     def test_output_shapes_2d(self):
         """2D input shapes produce correct output dimensions."""
         model = torch_layers.TorchModel(_cfg())

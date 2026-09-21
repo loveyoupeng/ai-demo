@@ -1,5 +1,10 @@
 """PyTorch implementation of the decoder-only transformer.
 
+Track intent: **how to do it properly with a framework** — production idiom
+(`nn.Module` composition, autograd, `F.scaled_dot_product_attention`,
+`torch.optim`). Read this track to learn how the model should be written in
+real code.
+
 This track mirrors the NumPy reference (``impl._np``) operator for operator:
 the same block layout, the same key scheme (``shared.constants.Keys``), and
 the same math — the cross-backend parity tests load one track's parameters
@@ -292,16 +297,21 @@ class MixtureOfExperts(nn.Module):
     Router: nn.Linear(D, E) with no bias (Mixtral convention); experts: SwiGLUFFN.
     """
 
-    def __init__(self, embed_dim: int, n_experts: int, ff_dim: int, top_k: int) -> None:
+    def __init__(self, embed_dim: int, n_experts: int, ff_dim: int, top_k: int, n_shared_experts: int = 0) -> None:
         super().__init__()
         self.n_experts = n_experts
         self.top_k = top_k
+        self.n_shared_experts = n_shared_experts
         # Router: (out=E, in=D) per nn.Linear convention, no bias
         self.gate = nn.Linear(embed_dim, n_experts, bias=False)
         # One SwiGLU expert per index (Mixtral-style)
         # Typed list for pyright; nn.ModuleList registers parameters for torch
         self.expert_list: list[SwiGLUFFN] = [SwiGLUFFN(embed_dim, ff_dim) for _ in range(n_experts)]
         self.experts = nn.ModuleList(self.expert_list)
+        # Shared experts (ADR 0002): ungated, always active — every token gets
+        # their (averaged) output added to the routed sum, DeepSeek-style.
+        self.shared_expert_list: list[SwiGLUFFN] = [SwiGLUFFN(embed_dim, ff_dim) for _ in range(n_shared_experts)]
+        self.shared_experts = nn.ModuleList(self.shared_expert_list)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """MoE forward. x: (B, S, D) → out: (B, S, D)."""
@@ -324,6 +334,14 @@ class MixtureOfExperts(nn.Module):
         for expert_idx, expert in enumerate(self.expert_list):
             w = probs[..., expert_idx : expert_idx + 1]  # (B, S, 1)
             out = out + w * expert(x)  # (B, S, D)
+
+        # Shared experts (ADR 0002): ungated additive branch, averaged so the
+        # branch magnitude does not grow with n_shared_experts.
+        if self.shared_expert_list:
+            shared_sum = torch.zeros_like(x)
+            for shared in self.shared_expert_list:
+                shared_sum = shared_sum + shared(x)  # (B, S, D)
+            out = out + shared_sum / len(self.shared_expert_list)
         return out
 
 
@@ -350,7 +368,11 @@ class TransformerBlock(nn.Module):
         self.self_attn = MultiHeadAttention(embed_dim=D, n_heads=H, n_groups=G, rope_dim=config.rope_dim)
         if config.has_moe():
             self.mlp: SwiGLUFFN | MixtureOfExperts = MixtureOfExperts(
-                embed_dim=D, n_experts=config.n_experts, ff_dim=config.expert_dim, top_k=config.top_k
+                embed_dim=D,
+                n_experts=config.n_experts,
+                ff_dim=config.expert_dim,
+                top_k=config.top_k,
+                n_shared_experts=config.n_shared_experts,
             )
         else:
             self.mlp = SwiGLUFFN(embed_dim=D, ff_dim=config.expert_dim)
@@ -449,6 +471,10 @@ class TorchModel(nn.Module):
                     t[Keys.moe_expert(layer_idx, expert_idx, Mlp.GATE_PROJ)] = expert.gate_proj
                     t[Keys.moe_expert(layer_idx, expert_idx, Mlp.UP_PROJ)] = expert.up_proj
                     t[Keys.moe_expert(layer_idx, expert_idx, Mlp.DOWN_PROJ)] = expert.down_proj
+                for s, shared in enumerate(mlp.shared_expert_list):
+                    t[Keys.moe_shared_expert(layer_idx, s, Mlp.GATE_PROJ)] = shared.gate_proj
+                    t[Keys.moe_shared_expert(layer_idx, s, Mlp.UP_PROJ)] = shared.up_proj
+                    t[Keys.moe_shared_expert(layer_idx, s, Mlp.DOWN_PROJ)] = shared.down_proj
             else:
                 t[Keys.ffn(layer_idx, Mlp.GATE_PROJ)] = mlp.gate_proj
                 t[Keys.ffn(layer_idx, Mlp.UP_PROJ)] = mlp.up_proj

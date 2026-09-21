@@ -200,34 +200,15 @@ def train_step(
         )
         if hasattr(model, "stacking") and hasattr(model.stacking, "blocks"):
             for i, block in enumerate(model.stacking.blocks):
-                for attr_name in [
-                    "Wq",
-                    "Wk",
-                    "Wv",
-                    "Wo",
-                    "ln1_gamma",
-                    "ln2_gamma",
-                    "gate1",
-                    "gate2",
-                    "expert_weights",
-                    "expert_bias",
-                    "routing_weights",
-                ]:
-                    attr = getattr(block, attr_name, None)
-                    if attr is not None and attr.grad is not None:
+                # Walk the block's tensor attributes directly (q_proj, ln gammas,
+                # router/expert/shared stacks, or dense SwiGLU — whichever exist).
+                for attr_name, attr in vars(block).items():
+                    if isinstance(attr, torch.Tensor) and attr.grad is not None:
                         grads[f"blocks.{i}.{attr_name}"] = attr.grad
-        # Also handle model-level parameters (embedding, output_proj, etc.)
-        for attr_name in [
-            "embedding_weights",
-            "final_norm_gamma",
-            "output_proj_weights",
-            "output_proj_bias",
-            "output_W1",
-            "output_W2",
-            "output_W3",
-        ]:
+        # Model-level parameters on CUDAModel itself
+        for attr_name in ["embedding_weights", "final_norm_gamma", "lm_head_weight"]:
             attr = getattr(model, attr_name, None)
-            if attr is not None and attr.grad is not None:
+            if attr is not None and getattr(attr, "grad", None) is not None:
                 grads[attr_name] = attr.grad
     logger.info("train_step() gradient_collect params_with_grad=%d", len(grads))
 
