@@ -62,7 +62,7 @@ def main() -> int:
     parser.add_argument(
         "--host",
         type=str,
-        default="127.0.0.1",
+        default="0.0.0.0",
         help="Interface to bind (default 127.0.0.1; 0.0.0.0 allows local-network access)",
     )
     parser.add_argument(
