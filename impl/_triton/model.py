@@ -54,6 +54,84 @@ class TritonModel(nn.Module):
         # lm_head: (in=D, out=V) per nn.Linear convention, no bias
         self.lm_head = nn.Linear(config.embed_dim, config.vocab_size, bias=False)
 
+    def make_cache(self, batch_size: int) -> list[dict[str, torch.Tensor]]:
+        """Create an empty per-layer KV cache for the per-token step path.
+
+        Same shape contract as ``impl._torch.layers.TorchModel.make_cache``
+        (which mirrors ``impl._np.model.NumPyModel.make_cache``): each layer
+        gets {"k": (B, G, 0, hd), "v": (B, G, 0, hd)} — K/V *per group*.
+
+        Returns: one dict per block (n_layers entries).
+        """
+        B = batch_size
+        G = self.config.kv_heads
+        hd = self.embed_dim // self.config.n_heads
+        device = self.embedding.weight.device
+        dtype = self.embedding.weight.dtype
+        return [
+            {
+                "k": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+                "v": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+            }
+            for _ in range(self.config.n_layers)
+        ]
+
+    def forward_prefill(
+        self, input_ids: torch.Tensor, cache: list[dict[str, torch.Tensor]] | None = None
+    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
+        """Run a full-sequence forward and fill the per-layer KV cache.
+
+        Mirrors ``impl._torch.layers.TorchModel.forward_prefill`` (which
+        mirrors ``impl._np.model.NumPyModel.forward_prefill``): the cache is
+        backfilled from the attention state the blocks capture during this
+        very forward pass — no second pass needed.
+
+        input_ids: (B, S) int token IDs.
+        cache: optional pre-allocated cache (make_cache); created when None.
+
+        Returns (logits (B, S, V), cache) ready for per-token steps.
+        """
+        self._move_to_device(input_ids)
+        B, S = input_ids.shape
+        if cache is None:
+            cache = self.make_cache(B)
+        positions = torch.arange(S, device=input_ids.device, dtype=torch.long)
+        states: list[dict[str, torch.Tensor]] = []
+        x = self.embedding(input_ids)  # (B, S, D)
+        for block in self.stack.blocks:
+            x, block_state = block._forward_state(x, positions)
+            states.append(block_state)
+        x_final = self.final_norm(x)  # (B, S, D)
+        logits = self.lm_head(x_final)  # (B, S, V)
+        for i, attn_state in enumerate(states):
+            cache[i]["k"] = attn_state["k_group"]  # (B, G, S, hd)
+            cache[i]["v"] = attn_state["v_group"]  # (B, G, S, hd)
+        return logits, cache
+
+    def forward_step(
+        self,
+        input_ids: torch.Tensor,
+        position: int,
+        cache: list[dict[str, torch.Tensor]],
+    ) -> torch.Tensor:
+        """Process ONE token per batch row against the cached K/V.
+
+        Mirrors ``impl._torch.layers.TorchModel.forward_step`` (which
+        mirrors ``impl._np.model.NumPyModel.forward_step``) — the
+        O(1)-per-token inference path.
+
+        input_ids: (B, 1) int token IDs.
+        position: the absolute token index of the token (0-based).
+        cache: the per-layer cache from ``make_cache``/``forward_prefill``.
+
+        Returns: logits (B, 1, V).
+        """
+        self._move_to_device(input_ids)
+        x = self.embedding(input_ids)  # (B, 1, D)
+        stack_out = self.stack.forward_step(x, position, cache)  # (B, 1, D)
+        x_final = self.final_norm(stack_out)  # (B, 1, D)
+        return self.lm_head(x_final)  # (B, 1, V)
+
     def _move_to_device(self, x: torch.Tensor) -> None:
         """Move all parameters to x's device/dtype (triton kernels need it)."""
         if not x.is_cuda:
@@ -122,9 +200,10 @@ class TritonModel(nn.Module):
 
         Registry-driven: key set, expected shapes, and the ``nn.Linear``
         ``(out, in) → (in, out)`` transpose rule come from
-        ``ParameterRegistry`` — this track only supplies storage.
+        ``ParameterRegistry`` — this track only supplies storage
+        via the track's binding map.
         """
-        tensors = self._param_tensors()
+        tensors = ParameterRegistry(self.config).bind(self._param_tensors())
         params: dict[str, np.ndarray] = {}
         for entry in ParameterRegistry(self.config).entries:
             array = tensors[entry.key].detach().cpu().numpy()
@@ -143,7 +222,7 @@ class TritonModel(nn.Module):
         """
         registry = ParameterRegistry(self.config)
         registry.validate(params)
-        tensors = self._param_tensors()
+        tensors = ParameterRegistry(self.config).bind(self._param_tensors())
         for entry in registry.entries:
             loaded = torch.from_numpy(params[entry.key])
             if entry.torch_transpose:

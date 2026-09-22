@@ -95,6 +95,91 @@ class TestForwardParity:
         )
 
     @pytest.mark.timeout(15)
+    def test_kv_step_matches_full_forward(self):
+        """The KV-step path: forward_prefill + forward_step ≡ full re-forward.
+
+        All four tracks now expose the NumPy track's exact O(1) step
+        interface; this is its parity invariant. Torch here; triton/cuda
+        run the same shape in their parity files.
+        """
+        cfg = _cfg(n_layers=2, n_heads=2)
+        np_model_ = np_model.NumPyModel(cfg)
+        torch_model = torch_layers.TorchModel(cfg)
+        torch_model.load_from_numpy_dict(np_model_.get_all_parameters())
+        torch_model.eval()
+
+        input_ids = torch.tensor([[0, 1, 2, 3, 4, 5]], dtype=torch.int64)
+        toks = torch.tensor([[9, 10, 11]], dtype=torch.int64)
+        with torch.no_grad():
+            full = torch_model(input_ids)
+            # Prefill all but the last token, step the last one.
+            _, cache = torch_model.forward_prefill(input_ids[:, :-1])
+            step_last = torch_model.forward_step(input_ids[:, [-1]], 5, cache)
+            np.testing.assert_allclose(
+                full[:, -1].numpy(),
+                step_last.squeeze(1).numpy(),
+                rtol=1e-3,
+                atol=1e-3,
+                err_msg="prefill + step (last token) must equal the full forward",
+            )
+            # Decode: prefill the full prompt, step 3 new tokens, compare
+            # against a full re-forward of the extended sequence.
+            logits0, cache2 = torch_model.forward_prefill(input_ids)
+            outs = [logits0[:, -1]]
+            for i in range(3):
+                outs.append(torch_model.forward_step(toks[:, [i]], 6 + i, cache2).squeeze(1))
+            stepwise = torch.stack(outs, dim=1)  # (B, 4, V)
+            reforward = torch_model(torch.cat([input_ids, toks], dim=1))[:, -4:]
+            np.testing.assert_allclose(
+                stepwise.numpy(),
+                reforward.numpy(),
+                rtol=1e-3,
+                atol=1e-3,
+                err_msg="3-step decode must equal the full re-forward",
+            )
+
+    @pytest.mark.timeout(15)
+    def test_step_parity_np_torch(self):
+        """Step-path parity across tracks: NumPy step logits ≡ PyTorch step logits.
+
+        The step-threaded cache (the NumPy generator's construction) and the
+        prefill-backfilled cache (the shared generator's) must agree — both
+        are the same K/V.
+        """
+        cfg = _cfg(n_layers=2, n_heads=2)
+        np_model_ = np_model.NumPyModel(cfg)
+        torch_model = torch_layers.TorchModel(cfg)
+        torch_model.load_from_numpy_dict(np_model_.get_all_parameters())
+        torch_model.eval()
+
+        input_ids = np.array([[0, 1, 2, 3, 4]], dtype=np.int32)
+        input_t = torch.tensor(input_ids, dtype=torch.int64)
+        np_cache = np_model_.make_cache(1)
+        with torch.no_grad():
+            t_cache = torch_model.make_cache(1)
+            for i in range(input_ids.shape[1] - 1):
+                np_model_.forward_step(input_ids[:, [i]], i, np_cache)
+                torch_model.forward_step(input_t[:, [i]], i, t_cache)
+            np_last = np_model_.forward_step(input_ids[:, [-1]], 4, np_cache)
+            t_last = torch_model.forward_step(input_t[:, [-1]], 4, t_cache)
+        # Cache K/V parity as well as logits parity (the cache is part of
+        # the parity surface now that it lives on the model interface).
+        np.testing.assert_allclose(
+            np_cache[0]["k"],
+            t_cache[0]["k"].numpy(),
+            rtol=1e-3,
+            atol=1e-3,
+            err_msg="step-threaded cache K must match across tracks",
+        )
+        np.testing.assert_allclose(
+            np_last,
+            t_last.numpy(),
+            rtol=1e-3,
+            atol=1e-3,
+            err_msg="step logits must match across tracks",
+        )
+
+    @pytest.mark.timeout(15)
     def test_output_shapes_2d(self):
         """2D input shapes produce correct output dimensions."""
         model = torch_layers.TorchModel(_cfg())

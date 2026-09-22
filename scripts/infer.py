@@ -222,39 +222,18 @@ def generate_single(
         all_tokens_np = generator.generate(prompt_np)
         all_tokens = all_tokens_np.flatten().tolist()
 
-    elif backend == "torch":
-        from impl._torch.inference import TorchTextGenerator as TorchGen
+    elif backend in ("torch", "triton", "cuda"):
+        from shared.generator import TextGenerator as SharedGen
 
-        generator = TorchGen(model, max_new_tokens, temperature, top_k)
-        torch_prompt = torch.tensor([prompt_tokens])
-        result = generator.generate(torch_prompt)
-        if isinstance(result, torch.Tensor):
-            all_tokens = result.flatten().detach().cpu().tolist()
-        else:
-            all_tokens = list(torch.tensor(result).flatten().tolist())
-
-    elif backend == "triton":
-        from impl._triton.inference import TritonTextGenerator as TritonGen
-
-        generator = TritonGen(model, max_new_tokens, temperature, top_k)
-        torch_prompt = torch.tensor([prompt_tokens])
-        result = generator.generate(torch_prompt)
-        if isinstance(result, torch.Tensor):
-            all_tokens = result.flatten().detach().cpu().tolist()
-        else:
-            all_tokens = list(torch.tensor(result).flatten().tolist())
-
-    elif backend == "cuda":
-        from impl._cuda.inference import CudaTextGenerator as CudaGen
-
-        device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
-        generator = CudaGen(model, max_new_tokens, temperature, top_k)
+        # The shared deep generator consumes the KV-step interface all
+        # three tracks now expose (O(1) per token). Device placement per
+        # track contract: the torch model runs on CPU (caller-placed
+        # tensors); triton/cuda adapt to the input's device (GPU prompt).
+        device = torch.device("cuda:0") if (backend != "torch" and torch.cuda.is_available()) else torch.device("cpu")
+        generator = SharedGen(model, max_new_tokens, temperature, top_k)
         torch_prompt = torch.tensor([prompt_tokens], device=device)
         result = generator.generate(torch_prompt)
-        if isinstance(result, torch.Tensor):
-            all_tokens = result.flatten().tolist()
-        else:
-            all_tokens = list(torch.tensor(result).flatten().tolist())
+        all_tokens = result.flatten().detach().cpu().tolist()
 
     else:
         raise ValueError(f"Unsupported backend: {backend}")

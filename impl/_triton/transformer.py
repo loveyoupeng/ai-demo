@@ -106,6 +106,97 @@ class TritonMultiHeadAttention(nn.Module):
         ctx = ctx.permute(0, 2, 1, 3).reshape(B, S, H * hd)
         return self.o_proj(ctx)  # (B, S, D)
 
+    def _forward_state(
+        self, x: torch.Tensor, positions: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Forward pass plus the raw K/V intermediates the cache needs.
+
+        Mirrors ``impl._torch.layers.MultiHeadAttention._forward_state``:
+        ``forward`` calls this and drops the state; the prefill path
+        (via the block) requests it and backfills the per-layer cache —
+        no second pass.
+
+        Returns (out (B, S, D), state) where the state holds the per-group,
+        RoPE'd K and the un-rotated V:
+            "k_group": (B, G, S, hd)  "v_group": (B, G, S, hd)
+        """
+        self._move_to_device(x)
+        B, S, _ = x.shape
+        H, G, hd = self.n_heads, self.n_groups, self.head_dim
+
+        q = self.q_proj(x)  # (B, S, H*hd)
+        k = self.k_proj(x)  # (B, S, G*hd)
+        v = self.v_proj(x)  # (B, S, G*hd)
+
+        q = q.view(B, S, H, hd).permute(0, 2, 1, 3)  # (B, H, S, hd)
+        k = k.view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd)
+        v = v.view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd)
+
+        if positions is None:
+            positions = torch.arange(S, device=x.device, dtype=torch.long)
+        q = self.rope(q.permute(0, 2, 1, 3), positions, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
+        k = self.rope(k.permute(0, 2, 1, 3), positions, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
+
+        k_group, v_group = k, v  # (B, G, S, hd) — the cacheable per-group form
+
+        if G != H:
+            k_full = k_group.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
+            v_full = v_group.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
+        else:
+            k_full, v_full = k_group, v_group
+
+        ctx = scaled_dot_product_attention(q, k_full, v_full, is_causal=True)  # (B, H, S, hd)
+        ctx = ctx.permute(0, 2, 1, 3).reshape(B, S, H * hd)
+        out = self.o_proj(ctx)  # (B, S, D)
+        return out, {"k_group": k_group, "v_group": v_group}
+
+    def forward_step(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Process ONE new token against the cached K/V (per-token inference path).
+
+        Mirrors ``impl._torch.layers.MultiHeadAttention.forward_step``: the
+        token's K/V are *appended* to the cache (per-group — GQA keeps the
+        cache H // G times smaller), and attention runs against the cached
+        (B, G, t, hd) K/V with a single query row.
+
+        x: (B, 1, D) the new token's embedding.
+        position: the absolute token index (0-based; RoPE angles for p).
+        cache: this layer's dict {"k": (B, G, t, hd), "v": (B, G, t, hd)},
+            mutated in place (K/V appended).
+
+        Returns: out (B, 1, D).
+        """
+        self._move_to_device(x)
+        B = x.shape[0]
+        H, G, hd = self.n_heads, self.n_groups, self.head_dim
+
+        # One token's Q/K/V: (B, 1, D) → (B, ·, 1, hd)
+        q = self.q_proj(x).view(B, 1, H, hd).permute(0, 2, 1, 3)  # (B, H, 1, hd)
+        k = self.k_proj(x).view(B, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
+        v = self.v_proj(x).view(B, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
+
+        # RoPE with the token's absolute position (contract: (B, S, H, D))
+        positions = torch.tensor([position], device=x.device, dtype=torch.long)
+        q = self.rope(q.permute(0, 2, 1, 3), positions, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
+        k = self.rope(k.permute(0, 2, 1, 3), positions, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
+
+        # Append the new K/V to the cache (per-group; K already RoPE'd).
+        cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+1, hd)
+        cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+1, hd)
+
+        # GQA: broadcast each cached K/V group to its H // G query heads.
+        k_full, v_full = cache["k"], cache["v"]
+        if G != H:
+            k_full = k_full.repeat_interleave(H // G, dim=1)  # (B, H, t+1, hd)
+            v_full = v_full.repeat_interleave(H // G, dim=1)  # (B, H, t+1, hd)
+
+        # Single query row: causal masking is implicit (all cached positions
+        # precede the query).
+        ctx = scaled_dot_product_attention(q, k_full, v_full)  # (B, H, 1, hd)
+
+        # Merge heads: (B, H, 1, hd) → (B, 1, H*hd) → (B, 1, D)
+        ctx = ctx.permute(0, 2, 1, 3).reshape(B, 1, H * hd)
+        return self.o_proj(ctx)  # (B, 1, D)
+
 
 class TritonSwiGLUFFN(nn.Module):
     """Dense SwiGLU feed-forward, computed by the triton ``swiglu_ffn`` kernel.
@@ -289,6 +380,41 @@ class TritonTransformerBlock(nn.Module):
         ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, S, D)
         return h + ff_out  # (B, S, D)
 
+    def _forward_state(
+        self, x: torch.Tensor, positions: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Block forward plus the attention K/V state the cache needs.
+
+        Mirrors ``impl._torch.layers.TransformerBlock._forward_state``:
+        ``forward`` calls this and drops the state; the prefill path
+        requests it and backfills the per-layer cache — no second pass.
+
+        Returns (out (B, S, D), {"k_group": (B, G, S, hd), "v_group": (B, G, S, hd)}).
+        """
+        attn_out, attn_state = self.self_attn._forward_state(self.input_layernorm(x), positions)
+        h = x + attn_out  # (B, S, D)
+        ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, S, D)
+        return h + ff_out, attn_state
+
+    def forward_step(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Process ONE new token against this block's cached K/V (KV-cached path).
+
+        Mirrors ``impl._torch.layers.TransformerBlock.forward_step``: the
+        token's K/V are appended to ``cache`` before attention runs
+        (single-token attention, O(1) per token).
+
+        x: (B, 1, D) the new token's embedding at absolute ``position``.
+        cache: this layer's dict {"k": (B, G, t, hd), "v": (B, G, t, hd)},
+            mutated in place.
+
+        Returns: out (B, 1, D).
+        """
+        self._move_to_device(x)
+        attn_out = self.self_attn.forward_step(self.input_layernorm(x), position, cache)  # (B, 1, D)
+        h = x + attn_out  # (B, 1, D)
+        ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, 1, D)
+        return h + ff_out  # (B, 1, D)
+
     def _move_to_device(self, x: torch.Tensor) -> None:
         """Move all block parameters to x's device/dtype."""
         device = x.device
@@ -330,6 +456,43 @@ class TritonDecoderStack(nn.Module):
         out = x
         for block in self.blocks:
             out = block(out, positions)
+        return out
+
+    def _forward_state(
+        self, x: torch.Tensor, positions: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
+        """Forward through all blocks, capturing each block's attention state.
+
+        Mirrors ``impl._torch.layers.DecoderStack._forward_state``:
+        ``forward`` drops the state; the model's prefill requests it and
+        backfills the per-layer cache — no second pass.
+
+        Returns (out (B, S, D), [per-block {"k_group", "v_group"}]).
+        """
+        self._move_to_device(x)
+        states: list[dict[str, torch.Tensor]] = []
+        out = x
+        for block in self.blocks:
+            out, block_state = block._forward_state(out, positions)
+            states.append(block_state)
+        return out, states
+
+    def forward_step(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
+        """Process ONE new token through all blocks (KV-cached path).
+
+        Mirrors ``impl._torch.layers.DecoderStack.forward_step``: each block
+        appends the token's K/V to its cache entry (``cache[i]`` mutated in
+        place) and attends against the cached tensors.
+
+        x: (B, 1, D) the new token's embedding at absolute ``position``.
+        cache: one dict per block, from the model's ``make_cache``.
+
+        Returns: out (B, 1, D).
+        """
+        self._move_to_device(x)
+        out = x
+        for i, block in enumerate(self.blocks):
+            out = block.forward_step(out, position, cache[i])
         return out
 
     def _move_to_device(self, x: torch.Tensor) -> None:

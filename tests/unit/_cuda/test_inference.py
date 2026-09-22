@@ -11,52 +11,43 @@ from shared.config import TransformerConfig
 
 
 class TestValidatePrompt:
-    """Test _validate_prompt helper function."""
+    """The KV-step interface is strict: the old helper's reshape/conversion
+    behavior is deliberately gone (the shared generator rejects 1-D and
+    non-integer prompts instead of coercing them)."""
 
-    def test_list_inputs_converted(self) -> None:
-        """List input should be converted to tensor."""
-        from impl._cuda.inference import _validate_prompt
+    def test_1d_rejected(self) -> None:
+        """1D prompts raise — the interface no longer reshapes."""
+        import pytest
 
-        prompt = torch.tensor([1, 2, 3])
-        result = _validate_prompt(prompt)
-        assert isinstance(result, torch.Tensor)
+        from shared.generator import _validate_prompt
 
-    def test_1d_becomes_2d(self) -> None:
-        """1D tensor should become (1, S)."""
-        from impl._cuda.inference import _validate_prompt
-
-        prompt = torch.tensor([1, 2, 3, 4, 5])
-        result = _validate_prompt(prompt)
-        assert result.ndim == 2
-        assert result.shape == (1, 5)
+        with pytest.raises(ValueError, match="2-D"):
+            _validate_prompt(torch.tensor([1, 2, 3, 4, 5]))
 
     def test_2d_preserved(self) -> None:
-        """2D tensor should remain (B, S)."""
-        from impl._cuda.inference import _validate_prompt
+        """2D tensor passes through unchanged."""
+        from shared.generator import _validate_prompt
 
         prompt = torch.tensor([[1, 2, 3], [4, 5, 6]])
-        result = _validate_prompt(prompt)
-        assert result.ndim == 2
-        assert result.shape == (2, 3)
+        assert _validate_prompt(prompt) is prompt
 
-    def test_dtype_float_becomes_int64(self) -> None:
-        """Float tensor should be converted to int64."""
-        from impl._cuda.inference import _validate_prompt
+    def test_float_rejected(self) -> None:
+        """Float tensors raise — token IDs must be integers."""
+        import pytest
 
-        prompt = torch.tensor([1.0, 2.0, 3.0])
-        result = _validate_prompt(prompt)
-        assert result.dtype == torch.int64
+        from shared.generator import _validate_prompt
 
-    def test_invalid_nd_raises(self) -> None:
-        """3D+ tensor should raise ValueError."""
-        from impl._cuda.inference import _validate_prompt
+        with pytest.raises(ValueError, match="integer"):
+            _validate_prompt(torch.tensor([1.0, 2.0, 3.0]))
 
-        prompt = torch.randn(2, 3, 4)
-        try:
-            _validate_prompt(prompt)
-            raise AssertionError("Should have raised ValueError")
-        except ValueError as e:
-            assert "1D or 2D" in str(e)
+    def test_3d_rejected(self) -> None:
+        """3D+ tensors raise ValueError."""
+        import pytest
+
+        from shared.generator import _validate_prompt
+
+        with pytest.raises(ValueError, match="2-D"):
+            _validate_prompt(torch.randn(2, 3, 4))
 
 
 class TestApplyTopKMask:
@@ -64,7 +55,7 @@ class TestApplyTopKMask:
 
     def test_no_mask_when_k_large(self) -> None:
         """top_k >= vocab_size should not modify logits."""
-        from impl._cuda.inference import _apply_top_k_mask
+        from shared.generator import _apply_top_k_mask
 
         logits = torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0]])
         masked = _apply_top_k_mask(logits, 10)
@@ -72,7 +63,7 @@ class TestApplyTopKMask:
 
     def test_masks_below_threshold(self) -> None:
         """Values below top-k should be set to -inf."""
-        from impl._cuda.inference import _apply_top_k_mask
+        from shared.generator import _apply_top_k_mask
 
         logits = torch.tensor([[-5.0, 1.0, -10.0, 4.0, 2.0]])
         masked = _apply_top_k_mask(logits, 3)
@@ -80,7 +71,7 @@ class TestApplyTopKMask:
 
     def test_top_1_kills_all_but_max(self) -> None:
         """top_k=1 should keep only the maximum logit."""
-        from impl._cuda.inference import _apply_top_k_mask
+        from shared.generator import _apply_top_k_mask
 
         logits = torch.tensor([[1.0, 5.0, 2.0, 3.0]])  # max is 5.0 at index 1
         masked = _apply_top_k_mask(logits, 1)
@@ -88,7 +79,7 @@ class TestApplyTopKMask:
 
     def test_batch_2d(self) -> None:
         """Works with batch dimension of 2."""
-        from impl._cuda.inference import _apply_top_k_mask
+        from shared.generator import _apply_top_k_mask
 
         logits = torch.tensor(
             [

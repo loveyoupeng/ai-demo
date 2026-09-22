@@ -107,6 +107,27 @@ class ParameterRegistry:
     def __contains__(self, key: object) -> bool:
         return key in self._key_set
 
+    def bind(self, binding: Mapping[str, object]) -> dict[str, object]:
+        """Materialize a track's storage binding as a full key→param dict.
+
+        binding: registry key → owning array/tensor, as each track's
+        ``_param_arrays``/``_param_tensors`` map builds it. Returns the
+        full dict in entry order, failing fast when the binding misses or
+        adds a key (the stale-walker bug class: a track dict that drifted
+        from this registry fails here, not silently at save/load).
+
+        This is the single traversal every save/load/grad path walks: the
+        registry owns the key set; each track supplies only storage.
+        """
+        missing = self._key_set - frozenset(binding)
+        extra = frozenset(binding) - self._key_set
+        if missing or extra:
+            raise ValueError(
+                f"Storage binding does not match the registry"
+                f" (missing: {sorted(missing)[:4]}, extra: {sorted(extra)[:4]})"
+            )
+        return {e.key: binding[e.key] for e in self._entries}
+
     def validate(self, params: Mapping[str, object]) -> None:
         """Fail fast when a checkpoint does not match this registry.
 

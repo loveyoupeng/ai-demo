@@ -35,13 +35,33 @@ class TestTextConversion:
 
 
 class SimpleModel(nn.Module):
+    """Minimal model implementing the KV-step interface (the same one the
+    NumPy track publicizes): forward_prefill + forward_step, dict cache.
+    The generator's decode loop, not a re-forward, is what these tests
+    exercise."""
+
     def __init__(self, vocab_size=256, embed_dim=16):
         super().__init__()
+        self.vocab_size = vocab_size
         self.embedding = nn.Embedding(vocab_size, embed_dim)
         self.linear = nn.Linear(embed_dim, vocab_size)
 
-    def forward(self, x):
-        return self.linear(self.embedding(x))
+    def make_cache(self, batch_size):
+        hd = self.embedding.embedding_dim
+        return [{"k": torch.zeros(batch_size, 1, 0, hd), "v": torch.zeros(batch_size, 1, 0, hd)} for _ in range(1)]
+
+    def forward_prefill(self, input_ids, cache=None):
+        if cache is None:
+            cache = self.make_cache(input_ids.shape[0])
+        logits = self.linear(self.embedding(input_ids))
+        return logits, cache
+
+    def forward_step(self, input_ids, position, cache):
+        # Deterministic per-token logits; append to the cache so the step
+        # path is exercised.
+        emb = self.embedding(input_ids)  # (B, 1, E)
+        cache[0]["k"] = torch.cat([cache[0]["k"], emb.unsqueeze(1).permute(0, 2, 1, 3)], dim=2)
+        return self.linear(emb)  # (B, 1, V)
 
 
 class TestInferenceGenerate:
@@ -159,15 +179,13 @@ class TestInferenceGenerate:
         assert output.shape == (1, 1 + 1)
 
     @pytest.mark.timeout(10)
-    def test_1d_prompt_automatic_batch_reshape(self):
-        """1D prompt gets reshaped to (1, seq_len)."""
+    def test_1d_prompt_rejected(self):
+        """The KV-step interface is strict: 1D prompts raise, not reshape."""
+        import pytest
+
         from impl._triton.inference import TritonTextGenerator
 
         model = SimpleModel(256, 16)
         gen = TritonTextGenerator(model, max_new_tokens=2, temperature=0.0)
-
-        # 1D input
-        prompt = torch.tensor([5, 6, 7], dtype=torch.int64)
-        output = gen.generate(prompt)
-
-        assert output.shape == (1, 3 + 2)
+        with pytest.raises(ValueError, match="2-D"):
+            gen.generate(torch.tensor([5, 6, 7], dtype=torch.int64))

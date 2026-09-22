@@ -116,6 +116,88 @@ class CUDAModel:
         logits = x @ self.lm_head_weight.to(device)
         return logits  # (B, S, V)
 
+    def make_cache(self, batch_size: int) -> list[dict[str, torch.Tensor]]:
+        """Create an empty per-layer KV cache for the per-token step path.
+
+        Same shape contract as the other tracks (which mirror
+        ``impl._np.model.NumPyModel.make_cache``): each layer gets
+        {"k": (B, G, 0, hd), "v": (B, G, 0, hd)} — K/V *per group*.
+
+        Returns: one dict per block (n_layers entries).
+        """
+        B = batch_size
+        G = self.config.kv_heads
+        hd = self.config.head_dim
+        device = self.lm_head_weight.device
+        dtype = self.lm_head_weight.dtype
+        return [
+            {
+                "k": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+                "v": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+            }
+            for _ in range(self.config.n_layers)
+        ]
+
+    def forward_prefill(
+        self, input_ids: torch.Tensor, cache: list[dict[str, torch.Tensor]] | None = None
+    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
+        """Run a full-sequence forward and fill the per-layer KV cache.
+
+        Mirrors ``impl._torch.layers.TorchModel.forward_prefill`` (which
+        mirrors ``impl._np.model.NumPyModel.forward_prefill``): the cache is
+        backfilled from the attention state the blocks capture during this
+        very forward pass — no second pass needed.
+
+        input_ids: (B, S) int token IDs on CUDA.
+        cache: optional pre-allocated cache (make_cache); created when None.
+
+        Returns (logits (B, S, V), cache) ready for per-token steps.
+        """
+        B, S = input_ids.shape
+        if cache is None:
+            cache = self.make_cache(B)
+        device = input_ids.device
+        positions = torch.arange(S, device=device, dtype=torch.long)
+        states: list[dict[str, torch.Tensor]] = []
+        x = self.embedding_weights.to(device)[input_ids]  # (B, S, D)
+        # Capture each block's attention state while forwarding (no second pass).
+        for block in self.stacking.blocks:
+            x, block_state = block._forward_state(x, positions)
+            states.append(block_state)
+        x = _rmsnorm(x, self.final_norm_gamma.to(device), eps=self.config.norm_eps)  # (B, S, D)
+        logits = x @ self.lm_head_weight.to(device)  # (B, S, V)
+        for i, attn_state in enumerate(states):
+            cache[i]["k"] = attn_state["k_group"]  # (B, G, S, hd)
+            cache[i]["v"] = attn_state["v_group"]  # (B, G, S, hd)
+        return logits, cache
+
+    def forward_step(
+        self,
+        input_ids: torch.Tensor,
+        position: int,
+        cache: list[dict[str, torch.Tensor]],
+    ) -> torch.Tensor:
+        """Process ONE token per batch row against the cached K/V.
+
+        Mirrors ``impl._torch.layers.TorchModel.forward_step`` (which
+        mirrors ``impl._np.model.NumPyModel.forward_step``) — the
+        O(1)-per-token inference path.
+
+        input_ids: (B, 1) int token IDs on CUDA.
+        position: the absolute token index of the token (0-based).
+        cache: the per-layer cache from ``make_cache``/``forward_prefill``.
+
+        Returns: logits (B, 1, V).
+        """
+        device = input_ids.device
+        # Adapt the cache to the input's device (the CUDA track's contract:
+        # the model adapts to the caller's placement).
+        cache = [{"k": c["k"].to(device), "v": c["v"].to(device)} for c in cache]
+        x = self.embedding_weights.to(device)[input_ids]  # (B, 1, D)
+        stack_out = self.stacking.forward_step(x, position, cache)  # (B, 1, D)
+        x_final = _rmsnorm(stack_out, self.final_norm_gamma.to(device), eps=self.config.norm_eps)  # (B, 1, D)
+        return x_final @ self.lm_head_weight.to(device)  # (B, 1, V)
+
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         """Make the model callable — delegates to forward."""
         return self.forward(x)
@@ -154,9 +236,10 @@ class CUDAModel:
         """Flat dict of all parameters keyed by ``shared.constants.Keys``.
 
         Registry-driven; CUDA stores every projection in the checkpoint's
-        ``(in, out)`` layout, so no transposition is needed.
+        ``(in, out)`` layout, so no transposition is needed. Storage is
+        supplied via the track's binding map.
         """
-        tensors = self._param_tensors()
+        tensors = ParameterRegistry(self.config).bind(self._param_tensors())
         return {
             entry.key: tensors[entry.key].detach().cpu().numpy() for entry in ParameterRegistry(self.config).entries
         }
@@ -169,7 +252,7 @@ class CUDAModel:
         """
         registry = ParameterRegistry(self.config)
         registry.validate(params)
-        tensors = self._param_tensors()
+        tensors = ParameterRegistry(self.config).bind(self._param_tensors())
         for entry in registry.entries:
             loaded = torch.from_numpy(params[entry.key]).to(tensors[entry.key].dtype)
             tensors[entry.key].data.copy_(loaded)

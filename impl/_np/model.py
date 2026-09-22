@@ -125,16 +125,19 @@ class NumPyModel:
 
         This is the checkpoint contract: the same dict is what
         ``load_from_numpy_dict`` and the cross-track save/load paths use.
-        The key set and shapes are owned by ``ParameterRegistry``.
+        The key set and shapes are owned by ``ParameterRegistry``; this
+        method only supplies storage via the track's binding map.
         """
-        arrays = self._param_arrays()
-        return {e.key: arrays[e.key] for e in ParameterRegistry(self.config).entries}
+        return ParameterRegistry(self.config).bind(self._param_arrays())
 
     def load_from_numpy_dict(self, params: dict[str, np.ndarray]) -> None:
         """Load parameters from a flat dict (inverse of ``get_all_parameters``).
 
         Validates against the registry first, so stale or mismatched
-        checkpoints fail fast instead of half-loading.
+        checkpoints fail fast instead of half-loading. The assignment walk
+        mirrors the track's binding map (``_param_arrays``) exactly — both
+        address the same objects, so a binding drift fails at one of the
+        two, never silently.
         """
         registry = ParameterRegistry(self.config)
         registry.validate(params)

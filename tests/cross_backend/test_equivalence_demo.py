@@ -108,7 +108,7 @@ def _greedy_demo(npm, tp, trp) -> dict:
     from impl._triton.inference import TritonTextGenerator
 
     g3 = TritonTextGenerator(trp, max_new_tokens=8, temperature=0.0)
-    r3 = g3._generate_greedy(torch.tensor(prompt, device="cuda"))[0].detach().cpu().tolist()
+    r3 = g3.generate_greedy(torch.tensor(prompt, device="cuda"))[0].detach().cpu().tolist()
 
     return {"numpy": r1, "torch": r2, "triton": r3}
 

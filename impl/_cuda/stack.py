@@ -113,3 +113,38 @@ class CuDecoderStack:
         for block in self.blocks:
             out = block.forward(out, positions=positions)
         return out
+
+    def _forward_state(
+        self, x: torch.Tensor, positions: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
+        """Forward through all blocks, capturing each block's attention state.
+
+        Mirrors ``impl._torch.layers.DecoderStack._forward_state``: the
+        model's prefill requests the state and backfills the per-layer
+        cache — no second pass.
+
+        Returns (out (B, S, D), [per-block {"k_group", "v_group"}]).
+        """
+        states: list[dict[str, torch.Tensor]] = []
+        out = x
+        for block in self.blocks:
+            out, block_state = block._forward_state(out, positions)
+            states.append(block_state)
+        return out, states
+
+    def forward_step(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
+        """Process ONE new token through all blocks (KV-cached path).
+
+        Mirrors ``impl._torch.layers.DecoderStack.forward_step``: each block
+        appends the token's K/V to its cache entry (``cache[i]`` mutated in
+        place) and attends against the cached tensors.
+
+        x: (B, 1, D) the new token's embedding at absolute ``position``.
+        cache: one dict per block, from the model's ``make_cache``.
+
+        Returns: out (B, 1, D).
+        """
+        out = x
+        for i, block in enumerate(self.blocks):
+            out = block.forward_step(out, position, cache[i])
+        return out

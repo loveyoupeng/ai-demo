@@ -243,6 +243,124 @@ class CuTransformerBlock:
         out = h + ff_out  # (B, S, D)
         return out
 
+    def _forward_state(
+        self, x: torch.Tensor, positions: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Block forward plus the attention K/V state the cache needs.
+
+        Mirrors ``impl._torch.layers.TransformerBlock._forward_state`` (which
+        mirrors ``impl._np.block.TransformerBlock._forward_state``): the
+        prefill path requests the state and backfills the per-layer cache —
+        no second pass.
+
+        Returns (out (B, S, D), {"k_group": (B, G, S, hd), "v_group": (B, G, S, hd)}).
+        """
+        B, S, D = x.shape
+        device = x.device
+        H, G, hd = self.n_heads, self.n_groups, self.head_dim
+
+        Wq, Wk, Wv, Wo = (
+            self.q_proj.to(device),
+            self.k_proj.to(device),
+            self.v_proj.to(device),
+            self.o_proj.to(device),
+        )
+        ln1 = self.input_layernorm_gamma.to(device)
+        ln2 = self.post_attention_layernorm_gamma.to(device)
+
+        xn = rmsnorm(x, ln1, eps=self.config.norm_eps)  # (B, S, D)
+        q = xn @ Wq  # (B, S, H·hd)
+        k = xn @ Wk  # (B, S, G·hd)
+        v = xn @ Wv  # (B, S, G·hd)
+
+        q = q.view(B, S, H, hd)  # (B, S, H, hd)
+        k = k.view(B, S, G, hd)  # (B, S, G, hd)
+        v = v.view(B, S, G, hd)
+        v = v.transpose(1, 2).contiguous()  # (B, G, S, hd)
+
+        if positions is None:
+            positions = torch.arange(S, device=device, dtype=torch.long)
+        q = apply_rope(q, positions, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, S, hd)
+        k = apply_rope(k, positions, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, S, hd)
+
+        k_group, v_group = k, v  # (B, G, S, hd) — the cacheable per-group form
+
+        if G != H:
+            k_full = k_group.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
+            v_full = v_group.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
+        else:
+            k_full, v_full = k_group, v_group
+
+        attn = cuda_sdp_attention(q, k_full, v_full, is_causal=True)  # (B, H, S, hd)
+        attn_out = attn.transpose(1, 2).contiguous().view(B, S, H * hd) @ Wo  # (B, S, D)
+        h = x + attn_out  # (B, S, D)
+
+        hn = rmsnorm(h, ln2, eps=self.config.norm_eps)  # (B, S, D)
+        if self.config.has_moe():
+            ff_out = self._moe_forward(hn, device)  # (B, S, D)
+        else:
+            ff_out = swiglu_ffn(hn, self.gate_proj.to(device), self.up_proj.to(device), self.down_proj.to(device))
+        out = h + ff_out  # (B, S, D)
+        return out, {"k_group": k_group, "v_group": v_group}
+
+    def forward_step(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Process ONE new token against this block's cached K/V (KV-cached path).
+
+        Mirrors ``impl._torch.layers.TransformerBlock.forward_step`` (which
+        mirrors ``impl._np.block.TransformerBlock.forward_step``): the token's
+        K/V are appended to ``cache`` before attention runs (single-token
+        attention, O(1) per token).
+
+        x: (B, 1, D) the new token's embedding at absolute ``position``.
+        cache: this layer's dict {"k": (B, G, t, hd), "v": (B, G, t, hd)},
+            mutated in place.
+
+        Returns: out (B, 1, D).
+        """
+        B = x.shape[0]
+        device = x.device
+        H, G, hd = self.n_heads, self.n_groups, self.head_dim
+
+        Wq, Wk, Wv, Wo = (
+            self.q_proj.to(device),
+            self.k_proj.to(device),
+            self.v_proj.to(device),
+            self.o_proj.to(device),
+        )
+        ln1 = self.input_layernorm_gamma.to(device)
+        ln2 = self.post_attention_layernorm_gamma.to(device)
+
+        xn = rmsnorm(x, ln1, eps=self.config.norm_eps)  # (B, 1, D)
+        q = (xn @ Wq).view(B, 1, H, hd)  # (B, 1, H, hd)
+        k = (xn @ Wk).view(B, 1, G, hd)  # (B, 1, G, hd)
+        v = (xn @ Wv).view(B, 1, G, hd).transpose(1, 2).contiguous()  # (B, G, 1, hd)
+
+        positions = torch.tensor([position], device=device, dtype=torch.long)
+        q = apply_rope(q, positions, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, 1, hd)
+        k = apply_rope(k, positions, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, 1, hd)
+
+        # Append the new K/V to the cache (per-group; K already RoPE'd).
+        cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+1, hd)
+        cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+1, hd)
+
+        k_full, v_full = cache["k"], cache["v"]
+        if G != H:
+            k_full = k_full.repeat_interleave(H // G, dim=1)  # (B, H, t+1, hd)
+            v_full = v_full.repeat_interleave(H // G, dim=1)  # (B, H, t+1, hd)
+
+        # Single query row: causal masking is implicit (all cached positions
+        # precede the query).
+        attn = cuda_sdp_attention(q, k_full, v_full)  # (B, H, 1, hd)
+        attn_out = attn.transpose(1, 2).contiguous().view(B, 1, H * hd) @ Wo  # (B, 1, D)
+        h = x + attn_out  # (B, 1, D)
+
+        hn = rmsnorm(h, ln2, eps=self.config.norm_eps)  # (B, 1, D)
+        if self.config.has_moe():
+            ff_out = self._moe_forward(hn, device)  # (B, 1, D)
+        else:
+            ff_out = swiglu_ffn(hn, self.gate_proj.to(device), self.up_proj.to(device), self.down_proj.to(device))
+        return h + ff_out  # (B, 1, D)
+
     def _moe_forward(self, x: torch.Tensor, device: torch.device) -> torch.Tensor:
         """MoE forward: torch routing (identical to the other tracks) + CUDA SwiGLU experts.
 

@@ -202,43 +202,103 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, positions: torch.Tensor | None = None) -> torch.Tensor:
         """Multi-head attention forward. x: (B, S, D) → out: (B, S, D)."""
+        out, _state = self._forward_state(x, positions)
+        return out
+
+    def _forward_state(
+        self, x: torch.Tensor, positions: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Forward pass plus the raw K/V intermediates the cache needs.
+
+        Mirrors ``impl._np.attention.MultiHeadAttention._forward_state``:
+        ``forward`` calls this and drops the state; ``forward_prefill``
+        (via the block) requests it and backfills the per-layer cache —
+        no second pass.
+
+        Returns (out (B, S, D), state) where the state holds the per-group,
+        RoPE'd K and the un-rotated V:
+            "k_group": (B, G, S, hd)  "v_group": (B, G, S, hd)
+        """
         batch_size, seq_len, _ = x.shape
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
 
-        # (B, S, D) @ (D, H*hd) → (B, S, H*hd)
         q = self.q_proj(x)  # (B, S, H*hd)
         k = self.k_proj(x)  # (B, S, G*hd)
         v = self.v_proj(x)  # (B, S, G*hd)
 
-        # Split into heads: (B, S, H*hd) → (B, H, S, hd)
         q = q.view(batch_size, seq_len, H, hd).permute(0, 2, 1, 3)  # (B, H, S, hd)
         k = k.view(batch_size, seq_len, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd)
         v = v.view(batch_size, seq_len, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd)
 
-        # RoPE on q and k (RoPE's contract shape is (B, S, H, D)).
         if positions is None:
             positions = torch.arange(seq_len, device=x.device, dtype=torch.long)
         q = self.rope(q.permute(0, 2, 1, 3), positions, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
         k = self.rope(k.permute(0, 2, 1, 3), positions, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
 
-        # GQA: broadcast each K/V group to its H // G query heads (SDPA
-        # requires the K/V head count to match the query head count on this
-        # PyTorch build).
+        k_group, v_group = k, v  # (B, G, S, hd) — the cacheable per-group form
+
         if G != H:
-            k = k.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
-            v = v.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
+            k_full = k_group.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
+            v_full = v_group.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
+        else:
+            k_full, v_full = k_group, v_group
 
-        # Scaled dot-product attention via the framework's SDPA (dispatches to
-        ctx = F.scaled_dot_product_attention(
-            q,  # (B, H, S, hd)
-            k,  # (B, G, S, hd)
-            v,  # (B, G, S, hd)
-            is_causal=True,
-        )  # (B, H, S, hd)
-
-        # Merge heads: (B, H, S, hd) → (B, S, H*hd) → project to (B, S, D)
+        ctx = F.scaled_dot_product_attention(q, k_full, v_full, is_causal=True)  # (B, H, S, hd)
         ctx = ctx.permute(0, 2, 1, 3).reshape(batch_size, seq_len, H * hd)
-        return self.o_proj(ctx)  # (B, S, D)
+        out = self.o_proj(ctx)  # (B, S, D)
+        return out, {"k_group": k_group, "v_group": v_group}
+
+    def forward_step(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Process ONE new token against the cached K/V (per-token inference path).
+
+        Mirrors ``impl._np.attention.MultiHeadAttention.forward_step``: the
+        token's K/V are *appended* to the cache (per-group — GQA keeps the
+        cache H // G times smaller), and attention runs against the cached
+        (B, G, t, hd) K/V with a single query row.
+
+        x: (B, 1, D) the new token's embedding.
+        position: the absolute token index (0-based; RoPE is relative, so a
+            step at absolute position p gets RoPE angles for p).
+        cache: this layer's dict {"k": (B, G, t, hd), "v": (B, G, t, hd)},
+            mutated in place (K/V appended).
+
+        Returns: out (B, 1, D).
+        """
+        batch_size = x.shape[0]
+        H, G, hd = self.n_heads, self.n_groups, self.head_dim
+
+        # One token's Q/K/V: (B, 1, D) @ (D, ·) → (B, 1, ·)
+        q = self.q_proj(x)  # (B, 1, H*hd)
+        k = self.k_proj(x)  # (B, 1, G*hd)
+        v = self.v_proj(x)  # (B, 1, G*hd)
+
+        # Split into heads: (B, 1, ·) → (B, ·, 1, hd)
+        q = q.view(batch_size, 1, H, hd).permute(0, 2, 1, 3)  # (B, H, 1, hd)
+        k = k.view(batch_size, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
+        v = v.view(batch_size, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
+
+        # RoPE with the token's absolute position (contract: (B, S, H, D))
+        positions = torch.tensor([position], device=x.device, dtype=torch.long)
+        q = self.rope(q.permute(0, 2, 1, 3), positions, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
+        k = self.rope(k.permute(0, 2, 1, 3), positions, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
+
+        # Append the new K/V to the cache (per-group; K already RoPE'd).
+        cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+1, hd)
+        cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+1, hd)
+
+        # GQA: broadcast each cached K/V group to its H // G query heads.
+        k_full, v_full = cache["k"], cache["v"]
+        if G != H:
+            k_full = k_full.repeat_interleave(H // G, dim=1)  # (B, H, t+1, hd)
+            v_full = v_full.repeat_interleave(H // G, dim=1)  # (B, H, t+1, hd)
+
+        # Single query row: causal masking is implicit (the query attends to
+        # every cached position, all of which precede it).
+        ctx = F.scaled_dot_product_attention(q, k_full, v_full)  # (B, H, 1, hd)
+
+        # Merge heads: (B, H, 1, hd) → (B, 1, H*hd) → project to (B, 1, D)
+        ctx = ctx.permute(0, 2, 1, 3).reshape(batch_size, 1, H * hd)
+        return self.o_proj(ctx)  # (B, 1, D)
 
 
 class SwiGLUFFN(nn.Module):
@@ -387,6 +447,40 @@ class TransformerBlock(nn.Module):
         ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, S, D)
         return h + ff_out  # (B, S, D)
 
+    def _forward_state(
+        self, x: torch.Tensor, positions: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Block forward plus the attention K/V state the cache needs.
+
+        Mirrors ``impl._np.block.TransformerBlock._forward_state``:
+        ``forward`` calls this and drops the state; the prefill path
+        requests it and backfills the per-layer cache — no second pass.
+
+        Returns (out (B, S, D), {"k_group": (B, G, S, hd), "v_group": (B, G, S, hd)}).
+        """
+        attn_out, attn_state = self.self_attn._forward_state(self.input_layernorm(x), positions)
+        h = x + attn_out  # (B, S, D)
+        ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, S, D)
+        return h + ff_out, attn_state
+
+    def forward_step(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Process ONE new token against this block's cached K/V (KV-cached path).
+
+        Mirrors ``impl._np.block.TransformerBlock.forward_step``: the token's
+        K/V are appended to ``cache`` before attention runs (single-token
+        attention, O(1) per token).
+
+        x: (B, 1, D) the new token's embedding at absolute ``position``.
+        cache: this layer's dict {"k": (B, G, t, hd), "v": (B, G, t, hd)},
+            mutated in place.
+
+        Returns: out (B, 1, D).
+        """
+        attn_out = self.self_attn.forward_step(self.input_layernorm(x), position, cache)  # (B, 1, D)
+        h = x + attn_out  # (B, 1, D)
+        ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, 1, D)
+        return h + ff_out  # (B, 1, D)
+
 
 class DecoderStack(nn.Module):
     """Stack of n_layers TransformerBlocks (the "body" of the decoder).
@@ -407,6 +501,41 @@ class DecoderStack(nn.Module):
         out = x
         for block in self.blocks:
             out = block(out, positions)
+        return out
+
+    def _forward_state(
+        self, x: torch.Tensor, positions: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
+        """Forward through all blocks, capturing each block's attention state.
+
+        Mirrors ``impl._np.stack.DecoderStack``: ``forward`` drops the
+        state; the model's prefill requests it and backfills the per-layer
+        cache — no second pass.
+
+        Returns (out (B, S, D), [per-block {"k_group", "v_group"}]).
+        """
+        states: list[dict[str, torch.Tensor]] = []
+        out = x
+        for block in self.blocks:
+            out, block_state = block._forward_state(out, positions)
+            states.append(block_state)
+        return out, states
+
+    def forward_step(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
+        """Process ONE new token through all blocks (KV-cached path).
+
+        Mirrors ``impl._np.stack.DecoderStack.forward_step``: each block
+        appends the token's K/V to its cache entry (``cache[i]`` mutated in
+        place) and attends against the cached tensors.
+
+        x: (B, 1, D) the new token's embedding at absolute ``position``.
+        cache: one dict per block, from the model's ``make_cache``.
+
+        Returns: out (B, 1, D).
+        """
+        out = x
+        for i, block in enumerate(self.blocks):
+            out = block.forward_step(out, position, cache[i])
         return out
 
 
@@ -447,6 +576,85 @@ class TorchModel(nn.Module):
         # (B, S, D) → (B, S, V)
         return self.lm_head(x)
 
+    def make_cache(self, batch_size: int) -> list[dict[str, torch.Tensor]]:
+        """Create an empty per-layer KV cache for the per-token step path.
+
+        Each layer gets {"k": (B, G, 0, hd), "v": (B, G, 0, hd)} — K/V
+        *per group* (GQA keeps the cache H // G times smaller), the same
+        shape contract as ``impl._np.model.NumPyModel.make_cache``.
+
+        Returns: one dict per block (n_layers entries).
+        """
+        B = batch_size
+        G = self.config.kv_heads
+        hd = self.embed_dim // self.config.n_heads
+        device = self.embedding.weight.device
+        dtype = self.embedding.weight.dtype
+        return [
+            {
+                "k": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+                "v": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+            }
+            for _ in range(self.config.n_layers)
+        ]
+
+    def forward_prefill(
+        self, input_ids: torch.Tensor, cache: list[dict[str, torch.Tensor]] | None = None
+    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
+        """Run a full-sequence forward and fill the per-layer KV cache.
+
+        Mirrors ``impl._np.model.NumPyModel.forward_prefill``: the cache is
+        backfilled from the attention state the blocks capture during this
+        very forward pass (per-group, RoPE'd K / un-rotated V) — no second
+        pass needed.
+
+        input_ids: (B, S) int token IDs.
+        cache: optional pre-allocated cache (make_cache); created when None.
+
+        Returns (logits (B, S, V), cache) ready for per-token steps.
+        """
+        B, S = input_ids.shape
+        if cache is None:
+            cache = self.make_cache(B)
+        positions = torch.arange(S, device=input_ids.device, dtype=torch.long)
+        states: list[dict[str, torch.Tensor]] = []
+        x = self.embedding(input_ids)  # (B, S, D)
+        for block in self.stack.blocks:
+            x, block_state = block._forward_state(x, positions)
+            states.append(block_state)
+        x_final = self.final_norm(x)  # (B, S, D)
+        logits = self.lm_head(x_final)  # (B, S, V)
+        # Backfill each layer's cache from this pass's attention state:
+        # K/V per group (GQA keeps it small), K already RoPE'd, V un-rotated.
+        for i, attn_state in enumerate(states):
+            cache[i]["k"] = attn_state["k_group"]  # (B, G, S, hd)
+            cache[i]["v"] = attn_state["v_group"]  # (B, G, S, hd)
+        return logits, cache
+
+    def forward_step(
+        self,
+        input_ids: torch.Tensor,
+        position: int,
+        cache: list[dict[str, torch.Tensor]],
+    ) -> torch.Tensor:
+        """Process ONE token per batch row against the cached K/V.
+
+        Mirrors ``impl._np.model.NumPyModel.forward_step`` — the
+        O(1)-per-token inference path: only the new token's K/V are
+        computed; attention runs against the cached (B, G, t, hd) K/V.
+
+        input_ids: (B, 1) int token IDs.
+        position: the absolute token index of the token (0-based).
+        cache: the per-layer cache from ``make_cache``/``forward_prefill``;
+            the token's K/V are appended to each layer's entry.
+
+        Returns: logits (B, 1, V).
+        """
+        x = self.embedding(input_ids)  # (B, 1, D)
+        stack_out = self.stack.forward_step(x, position, cache)  # (B, 1, D)
+        x_final = self.final_norm(stack_out)  # (B, 1, D)
+        return self.lm_head(x_final)  # (B, 1, V)
+
     def _param_tensors(self) -> dict[str, torch.Tensor]:
         """Storage binding: registry key → owning tensor (the track's only traversal)."""
         t: dict[str, torch.Tensor] = {
@@ -486,9 +694,10 @@ class TorchModel(nn.Module):
 
         Registry-driven: the key set, expected shapes, and the PyTorch
         ``nn.Linear`` ``(out, in) → (in, out)`` transpose rule all come
-        from ``ParameterRegistry`` — this track only supplies storage.
+        from ``ParameterRegistry`` — this track only supplies storage
+        via the track's binding map.
         """
-        tensors = self._param_tensors()
+        tensors = ParameterRegistry(self.config).bind(self._param_tensors())
         params: dict[str, Any] = {}
         for entry in ParameterRegistry(self.config).entries:
             array = tensors[entry.key].detach().cpu().numpy()
@@ -507,7 +716,7 @@ class TorchModel(nn.Module):
         """
         registry = ParameterRegistry(self.config)
         registry.validate(params_dict)
-        tensors = self._param_tensors()
+        tensors = ParameterRegistry(self.config).bind(self._param_tensors())
         for entry in registry.entries:
             loaded = torch.from_numpy(params_dict[entry.key])
             if entry.torch_transpose:
