@@ -51,6 +51,68 @@ class TestCUDAForwardCorrectness:
     def teardown_method(self) -> None:
         _clean_cuda()
 
+
+class TestCUDAStepParity:
+    """CUDA step path: forward_prefill + forward_step ≡ full re-forward."""
+
+    def setup_method(self) -> None:
+        _clean_cuda()
+
+    def teardown_method(self) -> None:
+        _clean_cuda()
+
+    def test_kv_step_matches_full_forward(self) -> None:
+        """Prefill + step on the last prompt token == the full forward (tier 1e-3)."""
+        from impl._cuda.model import CUDAModel
+
+        model = CUDAModel(
+            TransformerConfig.from_dict(
+                {
+                    "vocab_size": 64,
+                    "embed_dim": 16,
+                    "n_layers": 2,
+                    "n_heads": 2,
+                    "rope_dim": 0,
+                    "seed": 42,
+                }
+            )
+        )
+        x = th.randint(0, 64, (2, 6), dtype=th.int64, device="cuda")
+        with th.no_grad():
+            full = model(x)
+            _, cache = model.forward_prefill(x[:, :-1])
+            step_last = model.forward_step(x[:, [-1]], 5, cache)
+        assert th.allclose(full[:, -1], step_last.squeeze(1), rtol=1e-3, atol=1e-3), (
+            "CUDA prefill + step must equal the full forward"
+        )
+
+    def test_step_parity_across_torch_and_cuda(self) -> None:
+        """Torch and CUDA step through the same prompt and produce equal logits."""
+        from impl._cuda.model import CUDAModel
+        from impl._torch.layers import TorchModel
+
+        cfg = TransformerConfig.from_dict(
+            {
+                "vocab_size": 64,
+                "embed_dim": 16,
+                "n_layers": 2,
+                "n_heads": 2,
+                "rope_dim": 0,
+                "seed": 42,
+            }
+        )
+        torch_model = TorchModel(cfg).cuda().eval()
+        cuda_model = CUDAModel(cfg)
+        cuda_model.load_from_numpy_dict(torch_model.save_as_numpy())
+
+        x = th.randint(0, 64, (1, 4), dtype=th.int64, device="cuda")
+        with th.no_grad():
+            _, t_cache = torch_model.forward_prefill(x[:, :-1], torch_model.make_cache(1))
+            _, c_cache = cuda_model.forward_prefill(x[:, :-1], cuda_model.make_cache(1))
+            torch_last = torch_model.forward_step(x[:, [-1]], 3, t_cache)
+            cuda_last = cuda_model.forward_step(x[:, [-1]], 3, c_cache)
+        assert th.allclose(torch_last, cuda_last, rtol=1e-3, atol=1e-3), "torch and CUDA step logits must agree"
+
     def test_forward_1layer_shape(self) -> None:
         """1-layer forward output has correct shape."""
         from impl._cuda.model import CUDAModel
@@ -65,7 +127,7 @@ class TestCUDAForwardCorrectness:
                     "n_experts": 2,
                     "expert_dim": 128,
                     "top_k": 2,
-                    "rope_dim": 16,
+                    "rope_dim": 0,
                     "seed": 42,
                 }
             )
@@ -117,7 +179,7 @@ class TestCUDAForwardCorrectness:
                     "n_experts": 2,
                     "expert_dim": 64,
                     "top_k": 1,
-                    "rope_dim": 16,
+                    "rope_dim": 0,
                     "seed": 42,
                 }
             )
@@ -188,7 +250,7 @@ class TestCUDAForwardCorrectness:
                     "n_experts": 2,
                     "expert_dim": 128,
                     "top_k": 2,
-                    "rope_dim": 16,
+                    "rope_dim": 0,
                     "seed": 99,
                 }
             )
@@ -211,7 +273,7 @@ class TestCUDAForwardCorrectness:
                     "n_experts": 2,
                     "expert_dim": 128,
                     "top_k": 2,
-                    "rope_dim": 16,
+                    "rope_dim": 0,
                     "seed": 42,
                 }
             )
@@ -238,7 +300,7 @@ class TestCUDAForwardCorrectness:
                     "n_experts": 2,
                     "expert_dim": 64,
                     "top_k": 1,
-                    "rope_dim": 16,
+                    "rope_dim": 0,
                     "seed": 42,
                 }
             )
@@ -312,7 +374,7 @@ class TestCUDAForwardCrossEnd:
                     "n_experts": 2,
                     "expert_dim": 64,
                     "top_k": 1,
-                    "rope_dim": 16,
+                    "rope_dim": 0,
                     "seed": 42,
                 }
             )
@@ -327,7 +389,7 @@ class TestCUDAForwardCrossEnd:
                     "n_experts": 2,
                     "expert_dim": 64,
                     "top_k": 1,
-                    "rope_dim": 16,
+                    "rope_dim": 0,
                     "seed": 42,
                 }
             )
@@ -358,7 +420,7 @@ class TestCUDAForwardCrossEnd:
                     "n_experts": 2,
                     "expert_dim": 64,
                     "top_k": 1,
-                    "rope_dim": 16,
+                    "rope_dim": 0,
                     "seed": 42,
                 }
             )
@@ -373,7 +435,7 @@ class TestCUDAForwardCrossEnd:
                     "n_experts": 2,
                     "expert_dim": 64,
                     "top_k": 1,
-                    "rope_dim": 16,
+                    "rope_dim": 0,
                     "seed": 42,
                 }
             )

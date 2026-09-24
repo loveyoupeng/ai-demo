@@ -22,21 +22,29 @@ answer that track's question (e.g. Triton fuses because kernel fusion *is*
 the lesson); pedagogical shortcuts that would mislead about production
 practice get a `# PROD:` note instead.
 
-## Cross-track naming (audited 2026-09)
+## Cross-track naming (audited 2026-09, revised 2026-09-23)
 
 Deliberate: every track owns `forward` + `load_from_numpy_dict` +
-`get_all_parameters`/`save_as_numpy`, and classes carry the track prefix
-(`NumPyModel`, `TorchModel`, `TritonModel`, `CUDAModel`; same for the
-`TextGenerator`s). Known deltas, kept consciously:
+`get_all_parameters`/`save_as_numpy` and `make_cache` / `forward_prefill`
+/ `forward_step` (the shared KV-step interface), and classes carry the
+track prefix (`NumPyModel`, `TorchModel`, `TritonModel`, `CUDAModel`).
+Known deltas, kept consciously:
 
 - The NumPy `TextGenerator` and `NaiveKVCache` skip the `NumPy…` prefix —
-  that track is the reference, so its names are the unadorned canonical ones.
-- Only the NumPy track publicizes `forward_prefill`/`forward_step`; the
-  PyTorch/Triton/CUDA generators own their cache loop internally (the
-  pedagogical value of the exact step path belongs to the reference track).
+  that track is the reference, so its names are the unadorned canonical
+  ones. The torch/triton/cuda generators are thin aliases over
+  `shared/generator.py`'s generator (the single deep implementation), not
+  parallel teaching artifacts — they've collapsed, not diverged.
+- Every track publicizes the KV-step interface; the full-sequence
+  `forward` stays as a parity oracle only (no re-forward anywhere at
+  generation time).
 - `CUDAModel` is not an `nn.Module` — bare-metal track, plain tensor
   attributes; training collects grads by walking the block's tensor
   attributes (fixed 2026-09 — an earlier collector walked stale names).
+- `ParameterRegistry.bind(binding)` is the single storage-binding
+  materialization every track's save/load path walks (replaces the
+  per-track key-list walkers; a drifted binding fails at `bind`, not at
+  save-load time).
 
 ---
 
@@ -98,10 +106,16 @@ project/
 │   ├── _torch/       # PyTorch track (production ops: F.scaled_dot_product_attention)
 │   │   ├── layers.py     # TorchModel + all nn.Module components
 │   │   ├── learning.py   # torch record adapter (same JSON shapes as the np one)
-│   │   └── inference.py / training.py / cross_entropy.py / kv_cache.py
+│   │   └── inference.py / training.py / cross_entropy.py / turboquant_kv_cache.py
 │   ├── _triton/      # Triton GPU kernels (flash attention, etc.)
 │   ├── _cuda/        # CUDA bare-metal (kernels/, NVRTC compiler, per-track CLI)
 │   └── (per-track) cli.py entry points: uv run python -m impl._<track>.cli
+├── shared/
+│   ├── config.py / constants.py / registry.py  # keys + shape owner; bind()
+│   ├── generator.py  # one deep TextGenerator over the KV-step interface
+│   │                 #   (torch/triton/cuda consume it; numpy keeps its own
+│   │                 #   teaching generator)
+│   └── checkpoint.py / init.py / tokenizer.py / dataset.py
 ├── tests/
 │   ├── unit/         # per-backend unit tests (_np/, _torch/, _triton/, _cuda/) + shared
 │   └── cross_backend/ # parity tests between tracks (3-way, GPU parity)

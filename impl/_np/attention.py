@@ -1,6 +1,13 @@
 """Multi-head attention for the NumPy reference implementation.
 
 Scaled dot-product attention with GQA and RoPE, with the analytic backward.
+
+**Intuition:** attention answers "for this token's current question
+(query), which previous tokens (keys) are relevant?". QK^T / sqrt(d) is a
+soft semantic lookup — higher scores get more weight in the value mix.
+The causal mask stops tokens from peeking at the future, which is what
+makes next-token prediction possible. Softmax turns raw scores into a
+probability distribution per query position.
 """
 
 from __future__ import annotations

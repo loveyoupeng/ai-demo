@@ -2,6 +2,14 @@
 
 Root Mean Square Layer Normalization (Zhang & Sennrich, 2019) with the
 analytic backward.
+
+**Intuition:** feature magnitudes drift as computation flows through the
+stack — before dividing any vector by a learned weight, the block rescales
+every row to unit RMS so attention/FFN see a sane scale. There's no
+mean-centering (unlike LayerNorm): only the overall scale matters here.
+The learned `gamma` per-dimension gain then re-amplifies what the
+normalization just dampened, letting the network decide which dimensions
+to keep.
 """
 
 from __future__ import annotations

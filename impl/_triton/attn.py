@@ -264,6 +264,7 @@ class _ScaledDotProductAttentionTF(torch.autograd.Function):
     differentiates it with ``grad_outputs=grad_output``.
     """
 
+    @staticmethod
     def forward(ctx: Any, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, is_causal: bool = False) -> torch.Tensor:
         """Forward pass: compute attention via Triton kernel + PyTorch backward.
 

@@ -22,9 +22,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import TypeVar
 
 from shared.config import TransformerConfig
 from shared.constants import FFN_PROJS, Attn, Keys, LayerNorm, Mlp
+
+# The storage type varies per track (np.ndarray for NumPy, torch.Tensor for
+# the GPU tracks); the binding contract is storage-agnostic.
+_StorageT = TypeVar("_StorageT")
 
 
 @dataclass(frozen=True)
@@ -107,7 +112,7 @@ class ParameterRegistry:
     def __contains__(self, key: object) -> bool:
         return key in self._key_set
 
-    def bind(self, binding: Mapping[str, object]) -> dict[str, object]:
+    def bind(self, binding: Mapping[str, _StorageT]) -> dict[str, _StorageT]:
         """Materialize a track's storage binding as a full key→param dict.
 
         binding: registry key → owning array/tensor, as each track's

@@ -1,6 +1,14 @@
 """Mixture of Experts feed-forward for the NumPy reference implementation.
 
 A router + top-k SwiGLU experts, with the analytic backward.
+
+**Intuition:** instead of running every token through the same FFN, the
+router picks the k specialists that matter for this token. The router is
+a softmax over expert scores; the top-k mask keeps the best matches and
+renormalizes so the weights still sum to 1. A shared expert (un-gated)
+always runs to hold the common ground. Wider expert banks trade parameter
+memory for the ability to encode many narrow rules ("if plural noun,
+conjugate the verb") without paying for all of them on every token.
 """
 
 from __future__ import annotations

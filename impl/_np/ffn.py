@@ -1,6 +1,14 @@
 """SwiGLU feed-forward network for the NumPy reference implementation.
 
 The dense feed-forward layer with its analytic backward.
+
+**Intuition:** the FFN is where the model "thinks" — attention moves
+information around; the FFN is where it gets transformed. Each token's
+hidden vector is gated by a learned second projection (SiLU(x @ gate) *
+(x @ up)) and then pushed back to the model dimension. The gate provides
+a per-channel on/off switch instead of a smooth squashing, which is why
+FFNs are said to encode knowledge ("plural noun → verb form") while
+attention is said to route it.
 """
 
 from __future__ import annotations

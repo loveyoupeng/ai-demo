@@ -93,6 +93,51 @@ class TestForwardParity:
         assert not math.isnan(logits.abs().max().item())
 
 
+class TestForwardStepParity:
+    """Triton step path: forward_prefill + forward_step ≡ full re-forward."""
+
+    @pytest.mark.timeout(30)
+    def test_kv_step_matches_full_forward(self):
+        """Prefill + step on the last prompt token == the full forward, GPU (tier 1e-3)."""
+        skip_if_no_gpu()
+        from impl._triton.model import TritonModel
+
+        cfg = _cfg(n_layers=2, n_heads=2)
+        model = TritonModel(cfg).cuda()
+
+        x = torch.randint(0, 64, (2, 6), dtype=torch.int64, device="cuda")
+        with torch.no_grad():
+            full = model(x)
+            _, cache = model.forward_prefill(x[:, :-1])
+            step_last = model.forward_step(x[:, [-1]], 5, cache)
+
+        assert torch.allclose(full[:, -1], step_last.squeeze(1), rtol=1e-3, atol=1e-3), (
+            "prefill + step (last token) must equal the full forward"
+        )
+
+    @pytest.mark.timeout(30)
+    def test_step_parity_across_tracks(self):
+        """Triton and torch step through the same prompt and produce equal logits."""
+        skip_if_no_gpu()
+        from impl._torch.layers import TorchModel
+        from impl._triton.model import TritonModel
+
+        cfg = _cfg(n_layers=2, n_heads=2)
+        torch_model = TorchModel(cfg).cuda()
+        triton_model = TritonModel(cfg).cuda()
+        triton_model.load_from_numpy_dict(torch_model.save_as_numpy())
+        torch_model.eval()
+
+        x = torch.randint(0, 64, (1, 4), dtype=torch.int64, device="cuda")
+        with torch.no_grad():
+            _, t_cache = torch_model.forward_prefill(x[:, :-1], torch_model.make_cache(1))
+            _, tr_cache = triton_model.forward_prefill(x[:, :-1], triton_model.make_cache(1))
+            torch_last = torch_model.forward_step(x[:, [-1]], 3, t_cache)
+            triton_last = triton_model.forward_step(x[:, [-1]], 3, tr_cache)
+
+        assert torch.allclose(torch_last, triton_last, rtol=1e-3, atol=1e-3), "torch and triton step logits must agree"
+
+
 class TestBackwardParity:
     """Compare gradient magnitude and flow between backends."""
 

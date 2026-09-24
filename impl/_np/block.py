@@ -3,6 +3,13 @@
 One LLaMA-style pre-norm decoder block: RMSNorm → attention → residual,
 RMSNorm → feed-forward (dense SwiGLU or MoE) → residual. Owns the forward
 and the analytic backward (which composes the per-operator backwards).
+
+**Intuition:** each block is a two-step conversation — the tokens first
+talk to one another (attention collects context across the sequence),
+then the model per token processes what it just heard (the FFN). The
+residual skips are the memory: outputs are added, never overwritten, so
+early token information always survives. Pre-norm keeps each sublayer's
+input in a scale that dot-products can reason about.
 """
 
 from __future__ import annotations

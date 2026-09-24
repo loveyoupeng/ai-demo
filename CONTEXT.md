@@ -132,7 +132,6 @@ docs, and tests.
   smaller than the full-precision cache. See
   `impl/_np/turboquant_kv_cache.py` and the parity-budget test.
 
-
 ## Learning Mode
 
 - **Learning mode**: the web visualizer for interactive inference —
@@ -143,11 +142,15 @@ docs, and tests.
   via `--backend`), since a record is the same JSON shape from either
   adapter. Off by default; it has no impact on any track.
 
-- **Inference record**: the per-token capture of every forward intermediate — embedding through each block's attention/FFN (or MoE) tensors, final norm, logits, and the sampled token — serialized as JSON for the page and for download.
+- **Inference record**: the per-token capture of every forward intermediate — embedding through each block's
+  attention/FFN (or MoE) tensors, final norm, logits, and the sampled token — serialized as JSON for the page and
+  for download.
 
-- **Instrumented forward**: the overlay that runs the model's own components and recomputes each component's math from its public parameters to capture intermediates, without modifying the NumPy track (the components stay untouched and readable as teaching code).
+- **Instrumented forward**: the overlay that runs the model's own components and recomputes each component's math
+  from its public parameters to capture intermediates, without modifying the NumPy track.
 
-- **Demo model**: the pretrained toy model — char-level vocabulary (V=20), D=8, H=4, L=3, E=3 MoE — exported to `resource/models/learning_demo/` (checkpoint + `vocab.json`). The learning mode's default model.
+- **Demo model**: the pretrained toy model — char-level vocabulary (V=20), D=8, H=4, L=3, E=3 MoE — exported to
+  `resource/models/learning_demo/` (checkpoint + `vocab.json`). The learning mode's default model.
 
 - **Entry-point contract**: every per-track `cli.py` (e.g.
   `python -m impl._torch.cli`) is a single-track smoke demo on random
@@ -156,6 +159,31 @@ docs, and tests.
   (`train.py`, `infer.py`, `learning.py`, `verify_equivalence.py`) with a
   `--backend` selector. New user-facing entry points go in `scripts/`;
   `cli.py` files stay thin demos and never learn checkpoint loading.
+
+- **KV-step interface**: the shared decode contract all four tracks
+  satisfy (`make_cache` / `forward_prefill` / `forward_step` on every
+  model class). Prefill runs the full prompt once and backfills each
+  block's per-group K/V cache from the attention state it already
+  computed; each subsequent step appends exactly one token's K/V and
+  attends against the cached tensors — O(1) per token instead of O(T).
+  The NumPy track's reference implementation is the template the other
+  three tracks mirror. The plain `forward` stays as the parity oracle.
+
+- **Shared generator** (`shared/generator.py`): the single deep
+  `TextGenerator` implementation behind the KV-step interface —
+  sampling math (temperature, top-k, entropy) lives inside. Used by the
+  torch/triton/cuda tracks; the NumPy track keeps its own teaching
+  generator (`impl/_np/inference.py`) alongside it, so there's no seam
+  between "the reference" and "the production path" at generation time.
+
+- **Binding** (registry): the mapping from each registry key to the
+  owning storage object in a track's model (`impl/_np.model.NumPyModel.
+  _param_arrays`, `impl/_torch.layers.TorchModel._param_tensors`, etc.).
+  `ParameterRegistry.bind(binding)` materializes it as the full
+  key→param dict in entry order and is what every save/load path walks;
+  a drifted binding (stale/extra keys on a track) fails there, not at
+  save-load time.
+
 ## Tracks
 
 - **NumPy track** (`impl/_np/`): the math reference. Hand-rolled

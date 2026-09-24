@@ -136,7 +136,7 @@ def _sampling_demo(npm, tp, trp) -> dict:
 
     torch.manual_seed(npm.config.seed)
     g3 = TritonTextGenerator(trp, max_new_tokens=10, temperature=T)
-    r3 = g3._generate_sampled(torch.tensor(prompt, device="cuda"), T)[0].detach().cpu().tolist()
+    r3 = g3.generate_sampled(torch.tensor(prompt, device="cuda"), T)[0].detach().cpu().tolist()
 
     return {"numpy": r1, "torch": r2, "triton": r3}
 
@@ -162,7 +162,7 @@ def _topk_demo(npm, tp, trp) -> dict:
     from impl._triton.inference import TritonTextGenerator
 
     g3 = TritonTextGenerator(trp, max_new_tokens=6, temperature=T, top_k=K)
-    r3 = g3._generate_sampled(torch.tensor(prompt, device="cuda"), T)[0].detach().cpu().tolist()
+    r3 = g3.generate_sampled(torch.tensor(prompt, device="cuda"), T)[0].detach().cpu().tolist()
 
     return {"numpy": r1, "torch": r2, "triton": r3}
 

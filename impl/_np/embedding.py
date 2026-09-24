@@ -3,6 +3,12 @@
 The embedding is a learned lookup table from token IDs to dense vectors.
 This module owns the forward pass *and* the analytic backward (the chain
 rule for a row lookup).
+
+**Intuition:** the model never sees raw token IDs — each token gets its own
+learned vector, so semantically similar symbols end up close together.
+The backward is a scatter-add: every time a token appears, its row of
+weights gets a gradient contribution, so a token that shows up across many
+different contexts averages over all of them.
 """
 
 from __future__ import annotations

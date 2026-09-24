@@ -264,6 +264,7 @@ class TestDemoModelCheckpoint:
         model, vocab, cfg = load_learning_model(str(DEMO_MODEL))
         assert vocab is not None and len(vocab) == cfg.vocab_size
         assert " " in vocab  # space is part of the char vocab
+        assert isinstance(model, NumPyModel)  # default backend is numpy
         rec = generate_with_records(model, vocab, [vocab.index("t"), vocab.index("h"), vocab.index("e")], 5, seed=42)
         assert len(rec["generated"]["tokens"]) == 5
         text = rec["generated"]["text"]

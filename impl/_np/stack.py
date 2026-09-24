@@ -1,6 +1,11 @@
 """Decoder stack for the NumPy reference implementation.
 
 A stack of TransformerBlocks — the "body" of the decoder.
+
+**Intuition:** the model is depth × width. Every block refines the hidden
+stream so the next block can answer a higher-level question. The stack is
+uniform — no state persists between blocks other than the hidden stream
+itself.
 """
 
 from __future__ import annotations

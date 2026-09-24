@@ -2,6 +2,15 @@
 
 RoPE (Su et al., 2021, "RoFormer") with the analytic backward. RoPE has no
 learned parameters, so its backward is a pure input gradient.
+
+**Intuition:** attention has no way to tell "token 3" from "token 30"
+without position. RoPE rotates each (x_m, x_{m+1}) pair by an angle
+p·θ_m — where p is the absolute position and θ_m = 10000^(-2m/d) is the
+pair's rotation frequency. High-frequency pairs (small m) spin fast
+position by position; low-frequency pairs (large m) spin slowly across
+the whole context. Absolute position becomes a smooth, multi-scale
+rotation instead of a rigid offset, and the q·k inner product ends up
+depending only on the relative distance between two tokens.
 """
 
 from __future__ import annotations

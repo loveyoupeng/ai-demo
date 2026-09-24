@@ -44,9 +44,9 @@ differences (float64, ~1e-10, MoE top-k flip-aware).
   and the `torch_transpose` layout rule — only `nn.Linear`-backed weights are
   transposed for the PyTorch track.
 - Each track has exactly **one** storage-binding map
-  (`_param_arrays()` np / `_param_tensors()` torch, triton, cuda); all
-  save/load paths walk `ParameterRegistry.entries` — never a parallel key
-  list. Load validates key-set + shapes (stale checkpoints fail fast).
+  (`_param_arrays()` np / `_param_tensors()` torch, triton, cuda →
+  `ParameterRegistry.bind()`); all save/load walk the registry, not a
+  per-track key list. Load validates key-set + shapes (stale checkpoints fail fast).
 - `shared/checkpoint.py` does disk I/O: `config.json` + flat `model.npz`.
 
 **Learning mode (NumPy + PyTorch tracks):** `impl/_np/learning.py` and
@@ -67,11 +67,11 @@ materialized track. The default demo model is a tiny char-level MoE LM
 | Path | Purpose |
 | --- | --- |
 | `impl/_np/` | NumPy reference track: per-operator modules, `model.py` (analytic backward), `training.py`, `inference.py`, KV cache (+ TurboQuant), `gradcheck.py`, `cli.py`, learning mode |
-| `impl/_torch/` | PyTorch track: `layers.py` (all nn.Modules, `TorchModel`), `training.py`, `inference.py`, `kv_cache.py`, `turboquant_kv_cache.py`, `learning.py`, `cli.py` |
+| `impl/_torch/` | PyTorch track: `layers.py` (all nn.Modules, `TorchModel`), `training.py`, `inference.py`, `turboquant_kv_cache.py`, `learning.py`, `cli.py` |
 | `impl/_triton/` | Triton kernels over a PyTorch model: `attn.py`, `flash_attn.py` (online softmax), `transformer.py`, `cli.py` |
 | `impl/_cuda/` | NVRTC bare-metal kernels: `compiler.py`, `attention.py`, `layernorm.py`, `rope.py`, `ffn.py`, `moe.py`, `model.py`, `training.py`, `cli.py` |
 | `shared/` | Cross-track backbone: `config.py` (`TransformerConfig`), `constants.py` (Keys), `registry.py`, `checkpoint.py`, `init.py`, `tokenizer.py`, `dataset.py`, `config_utils.py`, `utils/` |
-|`scripts/`|Unified `train.py`/`infer.py`/`learning.py` (all backends), `verify_equivalence.py`, `train_real_tinystories.py`, `train_demo_model.py`, `download_tinystories.py`|
+| `scripts/` | Unified `train.py`/`infer.py`/`learning.py` (all backends), `verify_equivalence.py`, `train_real_tinystories.py`, `train_demo_model.py`, `download_tinystories.py` |
 | `tests/` | `unit/` (root: shared, scripts, registry; plus `_np`, `_torch`, `_triton`, `_cuda`) and `cross_backend/` (43 parity tests) |
 | `docs/` | `specs/architecture-fixes.md` (spec + progress of record), `theory/transformer-walkthrough.md` (forward-pass tour), `seam_triton_to_torch.md`, `docstring_style.md`, `adr/`, `design.md` |
 | `resource/` | **git-ignored**: TinyStories JSON + `models/{numpy,torch,triton,cuda}_real` and `models/learning_demo` checkpoints — recreate via scripts |
@@ -157,7 +157,7 @@ uv run python -m scripts.download_tinystories
     clean. If a request is unclear or has materially different approaches,
     confirm with the user first; do not make technical or business
     assumptions.
-11. **Subagents** — never run more than 3 subagents in parallel at a time.
+12. **Subagents** — never run more than 3 subagents in parallel at a time.
 
 ## Important Files
 
