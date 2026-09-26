@@ -112,6 +112,32 @@ docs, and tests.
 - **Cross-entropy loss**: the standard language-modeling loss. Compares the
   logits to the target token IDs; ignores `ignore_index` positions.
 
+- **SFT (supervised fine-tuning)**: post-training on instruction-following
+  data — the model learns to *answer* the prompt, not just continue it.
+  Unlike pre-training (next-token over raw text), SFT data are
+  (prompt, response) pairs and the **loss is masked**: only the response
+  tokens contribute to the loss and gradient (the prompt positions are
+  excluded via ``ignore_index``). Foundation model baseline + a small SFT
+  step = a usable coder.
+
+- **Prompt masking**: the mechanism that tells the loss function "these
+  tokens are context, not candidates — compute next-token loss only on
+  the response side." Implementation: build ``targets`` where prompt
+  positions are ``ignore_index`` (=-100) and response positions hold the
+  real next-token IDs.
+
+- **Tool calling**: a model output format where the assistant's response
+  is not prose, but a JSON `tool_calls` array (function name +
+  arguments). The training data carries the tool schema and example
+  traces (assistant calls → tool result → final answer) so the model
+  learns the JSON shape. Real setup is OpenAI-style messages.
+
+- **BPE tokenizer**: byte-pair-encoding tokenizer — builds a vocabulary
+  of sub-word tokens by merging the most frequent byte pairs until the
+  target vocab size. The script trains one on the SFT dataset itself so
+  the tokenizer merges common code patterns (e.g. ``"def"``, ``"tool_calls"``)
+  into single tokens.
+
 ## Inference
 
 - **Greedy decoding**: pick the argmax token at each step. Deterministic.
