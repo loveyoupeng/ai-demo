@@ -216,7 +216,7 @@
       <div><label>Seed</label><input type="number" id="compare-seed" value="42" min="0" style="width:70px"></div>
       <div><button id="btn-compare" class="secondary">Compare</button></div>
     </div>
-    <div id="compare-results"></div>
+    <div id="compare-grid"></div>
   </section>
   <section id="inspector">
     <h2 id="ins-title">Inspector</h2>
@@ -1340,7 +1340,7 @@ async function doCompare() {
         label,
         steps: steps.map((s) => ({
           kind: s.kind || "decode",
-          token: _tok(s.token, ids, vocab),
+          token: _tok(s.token, null, vocab),
           tokenId: s.token,
           tops: (s.top_tokens || []).map((p) => ({
             id: Number(p[0]),
