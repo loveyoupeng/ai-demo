@@ -118,12 +118,14 @@ def _sample(logits: np.ndarray, temp: float | None, top_k: int | None, rng: np.r
 
 
 class _LearningHandler(BaseHTTPRequestHandler):
-    """Static file + JSON API handler with the model bound at construction."""
+    """Static file + JSON API handler with the model(s) bound at construction."""
 
-    model: NumPyModel | TorchModel
+    model: NumPyModel | TorchModel  # the "default" model (the old backend semantics)
     backend: str
     vocab: list[str] | None
     web_dir: Path
+    models: dict[str, NumPyModel | TorchModel]  # label → model (compare tab)
+    vocabs: dict[str, list[str] | None]  # label → vocab (compare tab)
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: D102 — quiet the default stderr noise
         logger.debug(format, *args)
@@ -167,6 +169,8 @@ class _LearningHandler(BaseHTTPRequestHandler):
                 self._send_json(self._api_inference(body))
             elif self.path == "/api/record":
                 self._send_json(self._api_record(body))
+            elif self.path == "/api/compare":
+                self._send_json(self._api_compare(body))
             else:
                 self._send_error(404, "unknown endpoint")
         except ValueError as e:  # user-facing validation errors from the endpoint body
@@ -297,6 +301,25 @@ class _LearningHandler(BaseHTTPRequestHandler):
         record_out["skipped_chars"] = skipped
         return record_out
 
+    def _api_compare(self, body: dict[str, object]) -> dict[str, object]:
+        """Run the same prompt over every loaded model and return their records.
+
+        The compare tab is where the model's weight update *means* something:
+        same input, different records (per-step logits, decoded tokens, and
+        the same for every model in ``self.models`` (the default model is
+        excluded; it lives at position 0 in the tab skeleton)).
+        """
+        saved_model, saved_vocab = self.model, self.vocab
+        results: dict[str, object] = {}
+        try:
+            for label, model in self.models.items():
+                self.model = model
+                self.vocab = self.vocabs.get(label)
+                results[label] = self._api_record(body)  # includes skipped_chars + per-model record
+        finally:
+            self.model, self.vocab = saved_model, saved_vocab
+        return results
+
     # --- response helpers ----------------------------------------------------
 
     def _send_json(self, obj: object) -> None:
@@ -320,11 +343,28 @@ class _LearningHandler(BaseHTTPRequestHandler):
 
 
 def make_handler(
-    model: NumPyModel | TorchModel, vocab: list[str] | None, backend: str = "numpy", web_dir: Path = WEB_DIR
+    model: NumPyModel | TorchModel,
+    vocab: list[str] | None,
+    backend: str = "numpy",
+    web_dir: Path = WEB_DIR,
+    models: dict[str, NumPyModel | TorchModel] | None = None,
+    vocabs: dict[str, list[str] | None] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
-    """Bind the model + backend + vocab + web dir into a handler class (closure over state)."""
+    """Bind the model + backend + vocab + web dir into a handler class
+    (closure over state). The compare tab adds its secondary models via
+    ``models``; model/vocab stay as defaults for the ""-keyed endpoints.
+    """
     return type(
-        "LearningHandler", (_LearningHandler,), {"model": model, "backend": backend, "vocab": vocab, "web_dir": web_dir}
+        "LearningHandler",
+        (_LearningHandler,),
+        {
+            "model": model,
+            "backend": backend,
+            "vocab": vocab,
+            "web_dir": web_dir,
+            "models": models if models is not None else {},
+            "vocabs": vocabs if vocabs is not None else {},
+        },
     )
 
 
@@ -334,13 +374,16 @@ def start_server(
     host: str = "0.0.0.0",
     port: int = 8080,
     backend: str = "numpy",
+    models: dict[str, NumPyModel | TorchModel] | None = None,
+    vocabs: dict[str, list[str] | None] | None = None,
 ) -> ThreadingHTTPServer:
     """Create the learning-mode HTTP server (bound and listening, not yet serving).
 
     The caller owns the serving loop: ``server.serve_forever()`` (CLI) or a
-    daemon thread (tests).
+    daemon thread (tests). The ``models``/``vocabs`` sets are the named
+    compare-tab models; the main model is the default ""-keyed endpoints.
     """
-    handler = make_handler(model, vocab, backend=backend)
+    handler = make_handler(model, vocab, backend=backend, models=models, vocabs=vocabs)
     server = ThreadingHTTPServer((host, port), handler)
     logger.info("learning mode: serving on http://%s:%d", host, port)
     return server

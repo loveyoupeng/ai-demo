@@ -164,6 +164,19 @@
       </div>
       <div class="topbars" id="gen-top"></div>
     </section>
+    <section id="compare-panel" style="background:var(--panel2); margin-top:12px; border-color:var(--line); display:none">
+      <h2>Compare — base vs fine-tuned</h2>
+      <div class="kv">Runs the same prompt against every registered model, then shows the whole decode record per model (top-5 logits per step) and type-annotated diff.</div>
+      <div class="row" style="margin-top:6px">
+        <div>
+          <label style="margin:0">prompt (same for all)</label>
+          <input id="compare-prompt" type="text" placeholder="Write a function…" value="Write a Python function to add two numbers." style="width:340px">
+        </div>
+        <div><button id="btn-compare" class="secondary">Compare</button></div>
+        <div class="note" id="compare-count"></div>
+      </div>
+      <div id="compare-grid" class="chips" style="display:none"></div>
+    </section>
     <section id="steps-bar" style="background:var(--panel2); margin-top:12px; border-color:var(--line); display:none">
       <h2>Steps — prefill, then one decode per generated token</h2>
       <div class="kv" id="rec-meta"></div>
@@ -1271,6 +1284,63 @@ $("btn-gen").onclick = doGenerate;
 $("btn-rec").onclick = doRecord;
 $("btn-dl").onclick = downloadRecord;
 $("btn-play").onclick = togglePlay;
+
+// ---------------------------------------------------------------------------
+// Compare tab — same prompt over every comparison model, side by side.
+// ---------------------------------------------------------------------------
+async function doCompare() {
+  setStatus("comparing…");
+  $("compare-count").textContent = "running…";
+  try {
+    const out = await api("/api/compare", {
+      text: $("compare-prompt").value,
+      n_tokens: parseInt($("ntokens").value || "12", 10),
+      temperature: null,
+      top_k: 0,
+      seed: 42,
+    });
+    const labels = Object.keys(out);
+    $("compare-count").textContent = `${labels.length} models`;
+    const grid = $("compare-grid");
+    grid.innerHTML = "";
+    grid.style.display = "block";
+    const per = labels.map((label) => {
+      const rec = out[label];
+      const steps = (rec && rec.steps) || [];
+      return { label, steps: steps.map((s) => {
+        const tops = (s.top_tokens || []).map((p) => ({
+          token: typeof p === "object" && p.token !== undefined ? MODEL.vocab[p.token] : String(p[1]),
+          prob: (typeof p === "object" && p.prob !== undefined) ? p.prob : p[1],
+        }));
+        const token = s.token !== undefined ? MODEL.vocab[s.token] : (s.text || "?");
+        return { tops, token };
+      }) };
+    });
+    const table = document.createElement("table");
+    table.className = "chip";
+    table.style.width = "100%";
+    table.style.borderCollapse = "collapse";
+    table.style.fontFamily = "system-ui, sans-serif";
+    table.innerHTML = "<tr><th>step</th>" + per.map((p) => `<th>${esc(p.label)}</th>`).join("") + "</tr>";
+    for (let s = 0; s < Math.max(...per.map((p) => p.steps.length)); s++) {
+      const cells = per.map((p) => {
+        const step = p.steps[s];
+        if (!step) return "<td></td>";
+        const top = step.tops.map((t) => `<span class="chip" style="background:var(--panel2)">${esc(t.token)} ${t.prob.toFixed(3)}</span>`).join(" ");
+        const chosen = `<b>${esc(step.token)}</b>`;
+        return `<td valign="top" style="padding:8px">${chosen}<div>${top}</div></td>`;
+      });
+      table.innerHTML += `<tr style="border-top:1px solid var(--line)"><td style="padding:6px">${s + 1}</td>${cells.join("")}</tr>`;
+    }
+    grid.appendChild(table);
+    setStatus(`${labels.length} models compared.`);
+  } catch (e) {
+    setStatus("compare error: " + (e.message || String(e)));
+    $("compare-count").textContent = "";
+  }
+}
+$("btn-compare").onclick = doCompare;
+$("compare-panel").style.display = "block";
 
 init().catch((e) => setStatus("model load error: " + e.message));
 </script>

@@ -78,7 +78,29 @@ def main() -> int:
         default=DEFAULT_MODEL,
         help="Checkpoint directory (default: the learning demo model)",
     )
+    parser.add_argument(
+        "--compare",
+        action="append",
+        metavar="label=path",
+        default=[],
+        help="Register a named secondary model for the compare tab (default: 'base=resource/models/learning_demo,sft=resource/models/learning_sft' service-side if present)",
+    )
     args = parser.parse_args()
+
+    default_compare = [
+        ("base", "resource/models/learning_demo"),
+        ("sft", "resource/models/learning_sft"),
+    ]
+    if args.compare:
+        specs = []
+        for arg in args.compare:
+            if "=" in arg:
+                label, path = arg.split("=", 1)
+                specs.append((label, path))
+            else:
+                specs.append((f"m{len(specs)}", arg))
+        default_compare.extend(specs)
+    args.compare = default_compare
 
     if args.model == DEFAULT_MODEL:
         _ensure_demo_model(args.model)
@@ -87,7 +109,26 @@ def main() -> int:
         return 1
 
     model, vocab, _cfg = learning_server.load_learning_model(args.model, backend=args.backend)
-    server = learning_server.start_server(model, vocab, host=args.host, port=args.port, backend=args.backend)
+    # compare tab: register additional named (pre-trained + fine-trained) models
+    compare_models = {}
+    compare_vocabs = {}
+    for label, mpath in args.compare:
+        try:
+            m, v, _ = learning_server.load_learning_model(mpath, backend=args.backend)
+        except (OSError, ValueError) as e:
+            print(f"compare model {label}={mpath} skipped: {e}")
+            continue
+        compare_models[label] = m
+        compare_vocabs[label] = v
+    server = learning_server.start_server(
+        model,
+        vocab,
+        host=args.host,
+        port=args.port,
+        backend=args.backend,
+        models=compare_models,
+        vocabs=compare_vocabs,
+    )
     print(f"Learning mode: listening on {args.host}:{args.port}  (model: {args.model}, backend: {args.backend})")
     try:
         server.serve_forever()
