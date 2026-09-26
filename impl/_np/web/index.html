@@ -199,17 +199,24 @@
     </div>
   </section>
   <section id="compare-panel" style="background:var(--panel2); border-color:var(--line); display:none; grid-column: 1 / -1;">
-    <h2>Compare — base vs fine-tuned</h2>
-    <div class="kv">Runs the same prompt against every registered model, then shows the whole decode record per model (top-5 logits per step).</div>
+    <div class="row" style="justify-content:space-between;align-items:baseline">
+      <h2>Compare — same prompt, different model weights</h2>
+      <div class="note" id="compare-count" style="margin:0"></div>
+    </div>
+    <div class="kv">Each cell shows that model's chosen token plus its top-5 candidates as `token prob` chips.
+    Clicking the header toggles highlight of the first step where the two models diverge — that row is the "what changed".
+    To inspect any module's internals, click a module box above (in the diagram) then a row in a model's column.</div>
     <div class="row" style="margin-top:6px">
       <div>
         <label style="margin:0">prompt (same for all)</label>
         <input id="compare-prompt" type="text" placeholder="Write a function…" value="Write a Python function to add two numbers." style="width:340px">
       </div>
       <div><button id="btn-compare" class="secondary">Compare</button></div>
-      <div class="note" id="compare-count"></div>
     </div>
-    <div id="compare-grid" style="display:none"></div>
+    <div id="compare-raw" style="display:none; margin:8px 0 0; padding:8px; background:var(--bg); border-radius:8px">
+      <h3 style="margin:8px 0 4px;font-size:.8rem">prompt → tokens (each step's chosen token is the row anchor)</h3>
+    </div>
+    <div id="compare-grid" style="display:none; overflow-x:auto"></div>
   </section>
   <section id="inspector">
     <h2 id="ins-title">Inspector</h2>
@@ -1309,37 +1316,75 @@ async function doCompare() {
     const grid = $("compare-grid");
     grid.innerHTML = "";
     grid.style.display = "block";
+
+    // steps[i]["top_tokens"] is an array of [tokenId, prob] pairs (record
+    // shape from "record" adapter). Choose tokens are in step["token"] or
+    // step["position"] when a *generated* record (with text) is re-run.
+    const vocab = MODEL.vocab || [];
     const per = labels.map((label) => {
       const rec = out[label];
       const steps = (rec && rec.steps) || [];
-      return { label, steps: steps.map((s) => {
-        const tops = (s.top_tokens || []).map((p) => ({
-          token: typeof p === "object" && p.token !== undefined ? MODEL.vocab[p.token] : String(p[1]),
-          prob: (typeof p === "object" && p.prob !== undefined) ? p.prob : p[1],
-        }));
-        const token = s.token !== undefined ? MODEL.vocab[s.token] : (s.text || "?");
-        return { tops, token };
-      }) };
+      return {
+        label,
+        steps: steps.map((s) => {
+          const tops = (s.top_tokens || []).map((p) => ({
+            tok: vocab[p[0]] ?? `id${p[0]}`,
+            prob: Number(p[1]),
+          }));
+          const chosen = s.token !== undefined && s.token !== null ? vocab[s.token] ?? `id${s.token}` : "?";
+          return { tops, token: chosen, kind: s.kind };
+        }),
+      };
     });
+
     const table = document.createElement("table");
     table.style.width = "100%";
     table.style.borderCollapse = "collapse";
     table.style.font = "13px/1.4 system-ui, sans-serif";
-    const header = "<tr><th style='text-align:left;padding:8px 6px'>step</th>" +
-      per.map((p) => `<th style='text-align:left;padding:8px 6px'>${esc(p.label)}</th>`).join("") + "</tr>";
+
+    const header = document.createElement("tr");
+    header.innerHTML = "<th style='text-align:left;padding:8px 6px'>step</th>" +
+      per.map((p) => `<th style='text-align:left;padding:8px 6px'>${esc(p.label)}</th>`).join("");
+    table.appendChild(header);
+
+    // The first row where models diverge on the chosen token — highlighted.
     const maxSteps = Math.max(...per.map((p) => p.steps.length));
-    const rows = Array.from({ length: maxSteps }, (_, s) => {
-      const cells = per.map((p) => {
+    let firstDiv = -1;
+    for (let s = 0; s < maxSteps; s++) {
+      const chosen = per.map((p) => p.steps[s]?.token).filter((t) => t !== undefined);
+      if (chosen.length > 1 && new Set(chosen).size > 1) { firstDiv = s + 1; break; }
+    }
+
+    const rows = [];
+    for (let s = 0; s < maxSteps; s++) {
+      const tr = document.createElement("tr");
+      tr.style.borderTop = s === 0 ? "1px solid var(--accent)" : "1px solid var(--line)";
+      tr.setAttribute("style", "border-top:1px solid var(--line);padding:6px");
+      const cells = `<td style='padding:6px'>${s + 1}</td>` + per.map((p) => {
         const step = p.steps[s];
         if (!step) return "<td></td>";
-        const top = step.tops.map((t) => `<span class='chip' style='background:var(--panel2);margin:2px'>${esc(t.tok)} ${t.prob.toFixed(3)}</span>`).join(" ");
-        const chosen = `<b>${esc(step.token)}</b>`;
-        return `<td valign='top' style='padding:6px;border-top:1px solid var(--line)'>${chosen}<div>${top}</div></td>`;
-      });
-      return `<tr style='border-top:1px solid var(--accent)'><td style='padding:6px'>${s + 1}</td>${cells.join("")}</tr>`;
-    });
-    table.innerHTML = header + rows.join("");
+        const chipTop = step.tops.map((t) =>
+          `<span class="chip" style="background:var(--panel2);margin:2px">` +
+          `<b>${esc(t.tok)}</b> ${t.prob.toFixed(3)}</span>`
+        ).join(" ");
+        const chosenStr = `<b>${esc(step.token)}</b>`;
+        return `<td valign="top" style="padding:6px;border-top:1px solid var(--line)">` +
+               `<div>${esc(step.kind)}</div>${chosenStr}<div>${chipTop}</div></td>`;
+      }).join("");
+      tr.innerHTML = cells;
+      if (s + 1 === firstDiv) {
+        tr.style.background = "rgba(224,163,94,.12)";
+      }
+      rows.push(tr);
+    }
+    table.appendChild(...rows);
     grid.appendChild(table);
+
+    if (firstDiv > 0) {
+      $("compare-count").textContent = `${labels.length} models — first divergence at step ${firstDiv}`;
+    } else {
+      $("compare-count").textContent = `${labels.length} models — same output`;
+    }
     setStatus(`${labels.length} models compared.`);
   } catch (e) {
     setStatus("compare error: " + (e.message || String(e)));
@@ -1347,7 +1392,9 @@ async function doCompare() {
   }
 }
 
+// ---------------------------------------------------------------------------
 // Tab management — which view is active?
+// ---------------------------------------------------------------------------
 let compareMode = false;  // false = main tab (visual decoder), true = compare tab
 
 function setTab(which) {
@@ -1355,7 +1402,6 @@ function setTab(which) {
   $("tab-main").style.opacity = compareMode ? ".6" : "1";
   $("tab-compare").style.opacity = compareMode ? "1" : ".6";
   $("prompt-panel").style.display = compareMode ? "none" : "";
-  $("record-panel").style.display = compareMode ? "none" : "";
   $("compare-panel").style.display = compareMode ? "" : "none";
 }
 
