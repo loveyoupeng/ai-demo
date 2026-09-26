@@ -30,7 +30,13 @@ sys.path.insert(0, str(_project_root))
 from impl._np import learning_server  # noqa: E402
 from shared.utils.logger_setup import setup_logging  # noqa: E402
 
-DEFAULT_MODEL = "resource/models/learning_demo"
+DEFAULT_MODEL = "resource/models/learning_tool"
+
+
+DEFAULT_COMPARE = [
+    ("base", "resource/models/learning_base"),
+    ("sft", "resource/models/learning_sft"),
+]
 
 
 def _port_free(host: str, port: int) -> bool:
@@ -83,14 +89,11 @@ def main() -> int:
         action="append",
         metavar="label=path",
         default=[],
-        help="Register a named secondary model for the compare tab (default: 'base=resource/models/learning_demo,sft=resource/models/learning_sft' service-side if present)",
+        help="Register a named secondary model for the compare tab (default: the two-stage SFT demo models)",
     )
     args = parser.parse_args()
 
-    default_compare = [
-        ("base", "resource/models/learning_demo"),
-        ("sft", "resource/models/learning_sft"),
-    ]
+    default_compare = list(DEFAULT_COMPARE)
     if args.compare:
         specs = []
         for arg in args.compare:

@@ -131,6 +131,11 @@
   <div class="badges" id="badges"><span class="badge">loading model…</span></div>
 </header>
 <main id="main">
+  <div id="tab-row" style="grid-column: 1 / -1; display:flex; gap:6px; margin-bottom:4px">
+    <button id="tab-main" class="secondary" style="font-weight:700">Visual Decoder</button>
+    <button id="tab-compare" class="secondary" style="opacity:.65">Compare models</button>
+  </div>
+
   <section id="prompt-panel">
     <h2>Prompt &amp; run</h2>
     <label>Input text (chars outside the vocab are skipped and marked)</label>
@@ -164,19 +169,6 @@
       </div>
       <div class="topbars" id="gen-top"></div>
     </section>
-    <section id="compare-panel" style="background:var(--panel2); margin-top:12px; border-color:var(--line); display:none">
-      <h2>Compare — base vs fine-tuned</h2>
-      <div class="kv">Runs the same prompt against every registered model, then shows the whole decode record per model (top-5 logits per step) and type-annotated diff.</div>
-      <div class="row" style="margin-top:6px">
-        <div>
-          <label style="margin:0">prompt (same for all)</label>
-          <input id="compare-prompt" type="text" placeholder="Write a function…" value="Write a Python function to add two numbers." style="width:340px">
-        </div>
-        <div><button id="btn-compare" class="secondary">Compare</button></div>
-        <div class="note" id="compare-count"></div>
-      </div>
-      <div id="compare-grid" class="chips" style="display:none"></div>
-    </section>
     <section id="steps-bar" style="background:var(--panel2); margin-top:12px; border-color:var(--line); display:none">
       <h2>Steps — prefill, then one decode per generated token</h2>
       <div class="kv" id="rec-meta"></div>
@@ -205,6 +197,19 @@
       <span class="lg"><span class="sw nl" style="border-color:var(--accent2)"></span><b>green</b> direct predecessor · <span class="sw nl" style="border-color:var(--accent)"></span><b>blue</b> direct successor (click a node; click it again or the background to reset)</span>
       <span class="lg"><span class="sw hilo"></span><b>heat color</b> red = low, blue = high (per-tensor min/max)</span>
     </div>
+  </section>
+  <section id="compare-panel" style="background:var(--panel2); border-color:var(--line); display:none; grid-column: 1 / -1;">
+    <h2>Compare — base vs fine-tuned</h2>
+    <div class="kv">Runs the same prompt against every registered model, then shows the whole decode record per model (top-5 logits per step).</div>
+    <div class="row" style="margin-top:6px">
+      <div>
+        <label style="margin:0">prompt (same for all)</label>
+        <input id="compare-prompt" type="text" placeholder="Write a function…" value="Write a Python function to add two numbers." style="width:340px">
+      </div>
+      <div><button id="btn-compare" class="secondary">Compare</button></div>
+      <div class="note" id="compare-count"></div>
+    </div>
+    <div id="compare-grid" style="display:none"></div>
   </section>
   <section id="inspector">
     <h2 id="ins-title">Inspector</h2>
@@ -1317,21 +1322,23 @@ async function doCompare() {
       }) };
     });
     const table = document.createElement("table");
-    table.className = "chip";
     table.style.width = "100%";
     table.style.borderCollapse = "collapse";
-    table.style.fontFamily = "system-ui, sans-serif";
-    table.innerHTML = "<tr><th>step</th>" + per.map((p) => `<th>${esc(p.label)}</th>`).join("") + "</tr>";
-    for (let s = 0; s < Math.max(...per.map((p) => p.steps.length)); s++) {
+    table.style.font = "13px/1.4 system-ui, sans-serif";
+    const header = "<tr><th style='text-align:left;padding:8px 6px'>step</th>" +
+      per.map((p) => `<th style='text-align:left;padding:8px 6px'>${esc(p.label)}</th>`).join("") + "</tr>";
+    const maxSteps = Math.max(...per.map((p) => p.steps.length));
+    const rows = Array.from({ length: maxSteps }, (_, s) => {
       const cells = per.map((p) => {
         const step = p.steps[s];
         if (!step) return "<td></td>";
-        const top = step.tops.map((t) => `<span class="chip" style="background:var(--panel2)">${esc(t.token)} ${t.prob.toFixed(3)}</span>`).join(" ");
+        const top = step.tops.map((t) => `<span class='chip' style='background:var(--panel2);margin:2px'>${esc(t.tok)} ${t.prob.toFixed(3)}</span>`).join(" ");
         const chosen = `<b>${esc(step.token)}</b>`;
-        return `<td valign="top" style="padding:8px">${chosen}<div>${top}</div></td>`;
+        return `<td valign='top' style='padding:6px;border-top:1px solid var(--line)'>${chosen}<div>${top}</div></td>`;
       });
-      table.innerHTML += `<tr style="border-top:1px solid var(--line)"><td style="padding:6px">${s + 1}</td>${cells.join("")}</tr>`;
-    }
+      return `<tr style='border-top:1px solid var(--accent)'><td style='padding:6px'>${s + 1}</td>${cells.join("")}</tr>`;
+    });
+    table.innerHTML = header + rows.join("");
     grid.appendChild(table);
     setStatus(`${labels.length} models compared.`);
   } catch (e) {
@@ -1339,8 +1346,22 @@ async function doCompare() {
     $("compare-count").textContent = "";
   }
 }
+
+// Tab management — which view is active?
+let compareMode = false;  // false = main tab (visual decoder), true = compare tab
+
+function setTab(which) {
+  compareMode = which === "compare";
+  $("tab-main").style.opacity = compareMode ? ".6" : "1";
+  $("tab-compare").style.opacity = compareMode ? "1" : ".6";
+  $("prompt-panel").style.display = compareMode ? "none" : "";
+  $("record-panel").style.display = compareMode ? "none" : "";
+  $("compare-panel").style.display = compareMode ? "" : "none";
+}
+
 $("btn-compare").onclick = doCompare;
-$("compare-panel").style.display = "block";
+$("tab-main").onclick = () => setTab("main");
+$("tab-compare").onclick = () => setTab("compare");
 
 init().catch((e) => setStatus("model load error: " + e.message));
 </script>
