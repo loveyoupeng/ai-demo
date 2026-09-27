@@ -198,26 +198,21 @@
       <span class="lg"><span class="sw hilo"></span><b>heat color</b> red = low, blue = high (per-tensor min/max)</span>
     </div>
   </section>
-      <section id="compare-panel" style="background:var(--panel2); border-color:var(--line); display:none; grid-column: 1 / -1;">
-    <div class="row" style="justify-content:space-between;align-items:baseline;margin:0">
-      <h2>Compare — same prompt, different model weights</h2>
-      <div class="note" id="compare-status" style="margin:0"></div>
-    </div>
-    <div class="kv">Same prompt into every registered model. Each model column shows its chosen token (bold) per step + top-5 candidates with probabilities. The first step where the models disagree is highlighted amber.</div>
+        <section id="compare-panel" style="background:var(--panel2); border-color:var(--line); display:none; grid-column: 1 / -1;">
+    <h2>Compare — same prompt, different model weights</h2>
+    <div class="kv">Same prompt into every registered model. Each model column shows its chosen token (bold) per step + top candidates with probabilities. Rows highlighted amber on the first divergent step.</div>
     <div class="row" style="margin-top:10px">
       <div>
         <label style="margin:0">prompt</label>
         <input id="compare-prompt" type="text" value="Write a Python function to reverse a list." style="width:340px">
       </div>
       <div><label>Tokens</label><input type="number" id="compare-ntokens" value="8" min="1" max="32" style="width:90px"></div>
-      <div><label>Temp</label><input type="number" id="compare-temp" value="0.8" min="0" step="0.1" style="width:70px"></div>
       <div><label>Top-k</label><input type="number" id="compare-topk" value="10" min="0" style="width:70px"></div>
-      <div><label>Seed</label><input type="number" id="compare-seed" value="42" min="0" style="width:70px"></div>
       <div><button id="btn-compare" class="secondary">Compare</button></div>
     </div>
-    <div id="compare-grid"></div>
-    <div id="compare-steps" style="margin-top:8px"></div>
+    <div id="compare-grid" style="overflow-x:auto;margin-top:12px"></div>
   </section>
+
 
 
 <section id="inspector">
