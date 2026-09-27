@@ -198,10 +198,10 @@
       <span class="lg"><span class="sw hilo"></span><b>heat color</b> red = low, blue = high (per-tensor min/max)</span>
     </div>
   </section>
-    <section id="compare-panel" style="background:var(--panel2); border-color:var(--line); display:none; grid-column: 1 / -1;">
+      <section id="compare-panel" style="background:var(--panel2); border-color:var(--line); display:none; grid-column: 1 / -1;">
     <div class="row" style="justify-content:space-between;align-items:baseline;margin:0">
       <h2>Compare — same prompt, different model weights</h2>
-      <div class="note" id="compare-status"></div>
+      <div class="note" id="compare-status" style="margin:0"></div>
     </div>
     <div class="kv">Same prompt into every registered model. Each model column shows its chosen token (bold) per step + top-5 candidates with probabilities. The first step where the models disagree is highlighted amber.</div>
     <div class="row" style="margin-top:10px">
@@ -215,8 +215,10 @@
       <div><label>Seed</label><input type="number" id="compare-seed" value="42" min="0" style="width:70px"></div>
       <div><button id="btn-compare" class="secondary">Compare</button></div>
     </div>
-    <div id="compare-grid" style="overflow-x:auto;margin-top:12px"></div>
+    <div id="compare-grid"></div>
+    <div id="compare-steps" style="margin-top:8px"></div>
   </section>
+
 
 <section id="inspector">
     <h2 id="ins-title">Inspector</h2>
@@ -1382,6 +1384,10 @@ async function doCompare() {
           `<span class="chip" style="background:var(--panel2);margin:2px" title="${tlv.kind}">${esc(t.tok)} ${t.prob.toFixed(3)}</span>`
         ).join(" ");
         td.innerHTML = `<b>${esc(tlv.token)}</b><div>${chipStr}</div>`;
+        td.onclick = () => showCmpDetails(tlv, s, p.label);
+        td.style.cursor = "pointer";
+        td.dataset.step = String(s);
+        td.dataset.model = String(p.label);
         tr.appendChild(td);
       });
       table.appendChild(tr);
