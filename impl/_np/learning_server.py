@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
+from tokenizers import Tokenizer
 
 from impl._np.learning import generate_with_records
 from impl._np.model import NumPyModel
@@ -90,11 +91,19 @@ def load_learning_model(
     return model, vocab, cfg, tokenizer
 
 
-def tokenize_text(text: str, vocab: list[str]) -> tuple[list[int], int]:
-    """Map text to in-vocab token IDs; OOV characters are skipped.
+def tokenize_text(text: str, vocab: list[str], tok: Tokenizer | None = None) -> tuple[list[int], int]:
+    """Map text to token IDs.
+
+    If the checkpoint carries a BPE ``tokenizer.json`` (all the SFT demo
+    checkpoints do), encode with it — the model was trained on those token
+    streams, so this is the only correct encode path for them. Otherwise
+    fall back to the per-character vocab lookup (the old learning-demo
+    path, which preserves spaces as their own vocab entries).
 
     Returns (token_ids, n_skipped).
     """
+    if tok is not None:
+        return tok.encode(text).ids, 0
     idx = {c: i for i, c in enumerate(vocab)}
     ids: list[int] = []
     skipped = 0
@@ -133,9 +142,11 @@ class _LearningHandler(BaseHTTPRequestHandler):
     model: NumPyModel | TorchModel  # the "default" model (the old backend semantics)
     backend: str
     vocab: list[str] | None
+    tokenizer: Tokenizer | None  # main model's BPE (None on old char-only demos)
     web_dir: Path
     models: dict[str, NumPyModel | TorchModel]  # label → model (compare tab)
     vocabs: dict[str, list[str] | None]  # label → vocab (compare tab)
+    tokenizers: dict[str, Tokenizer | None]  # label → BPE (compare tab)
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: D102 — quiet the default stderr noise
         logger.debug(format, *args)
@@ -222,7 +233,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
         seed = int(body.get("seed", 42))
         if not (1 <= n_tokens <= 512):
             raise ValueError("n_tokens must be in [1, 512]")
-        ids, skipped = tokenize_text(text, self.vocab)
+        ids, skipped = tokenize_text(text, self.vocab, self.tokenizer)
         if not ids:
             raise ValueError("no in-vocab characters in the input text")
         t: float | None = None if temp is None else float(temp)
@@ -335,15 +346,16 @@ class _LearningHandler(BaseHTTPRequestHandler):
         the same for every model in ``self.models`` (the default model is
         excluded; it lives at position 0 in the tab skeleton)).
         """
-        saved_model, saved_vocab = self.model, self.vocab
+        saved_model, saved_vocab, saved_tok = self.model, self.vocab, self.tokenizer
         results: dict[str, object] = {}
         try:
             for label, model in self.models.items():
                 self.model = model
                 self.vocab = self.vocabs.get(label)
+                self.tokenizer = self.tokenizers.get(label)
                 results[label] = self._api_record(body)  # includes skipped_chars + per-model record
         finally:
-            self.model, self.vocab = saved_model, saved_vocab
+            self.model, self.vocab, self.tokenizer = saved_model, saved_vocab, saved_tok
         return results
 
     # --- response helpers ----------------------------------------------------
