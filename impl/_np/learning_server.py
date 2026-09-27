@@ -46,7 +46,7 @@ Backend = Literal["numpy", "torch"]
 
 def load_learning_model(
     model_dir: str, backend: Backend = "numpy"
-) -> tuple[NumPyModel | TorchModel, list[str] | None, TransformerConfig]:
+) -> tuple[NumPyModel | TorchModel, list[str] | None, TransformerConfig, "Tokenizer | None"]:
     """Load a checkpoint (+ optional ``vocab.json`` sidecar) into the requested backend.
 
     ``backend`` selects which track materializes the weights:
@@ -77,7 +77,17 @@ def load_learning_model(
     vocab_path = Path(model_dir) / "vocab.json"
     if vocab_path.exists():
         vocab = json.loads(vocab_path.read_text())
-    return model, vocab, cfg
+
+    # If the checkpoint carries a tokenizer.json (from scripts/train_tokenizer.py),
+    # decode through it instead of vocab char lookup — Training pipe makes one,
+    # and the learning-visuals page needs real token text.
+    tok_path = Path(model_dir) / "tokenizer.json"
+    tokenizer: Tokenizer | None = None
+    if tok_path.exists():
+        from tokenizers import Tokenizer
+
+        tokenizer = Tokenizer.from_file(str(tok_path))
+    return model, vocab, cfg, tokenizer
 
 
 def tokenize_text(text: str, vocab: list[str]) -> tuple[list[int], int]:
@@ -349,6 +359,8 @@ def make_handler(
     web_dir: Path = WEB_DIR,
     models: dict[str, NumPyModel | TorchModel] | None = None,
     vocabs: dict[str, list[str] | None] | None = None,
+    tokenizer: "Tokenizer | None" = None,
+    tokenizers: dict[str, "Tokenizer | None"] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Bind the model + backend + vocab + web dir into a handler class
     (closure over state). The compare tab adds its secondary models via
@@ -362,8 +374,10 @@ def make_handler(
             "backend": backend,
             "vocab": vocab,
             "web_dir": web_dir,
+            "tokenizer": tokenizer,
             "models": models if models is not None else {},
             "vocabs": vocabs if vocabs is not None else {},
+            "tokenizers": tokenizers if tokenizers is not None else {},
         },
     )
 
@@ -376,14 +390,19 @@ def start_server(
     backend: str = "numpy",
     models: dict[str, NumPyModel | TorchModel] | None = None,
     vocabs: dict[str, list[str] | None] | None = None,
+    tokenizer: "Tokenizer | None" = None,
+    tokenizers: dict[str, "Tokenizer | None"] | None = None,
 ) -> ThreadingHTTPServer:
     """Create the learning-mode HTTP server (bound and listening, not yet serving).
 
     The caller owns the serving loop: ``server.serve_forever()`` (CLI) or a
-    daemon thread (tests). The ``models``/``vocabs`` sets are the named
-    compare-tab models; the main model is the default ""-keyed endpoints.
+    daemon thread (tests). The ``models``/``vocabs``/``tokenizers`` sets are
+    the named compare-tab models; the main model is the default ""-keyed
+    endpoints.
     """
-    handler = make_handler(model, vocab, backend=backend, models=models, vocabs=vocabs)
+    handler = make_handler(
+        model, vocab, backend=backend, models=models, vocabs=vocabs, tokenizer=tokenizer, tokenizers=tokenizers
+    )
     server = ThreadingHTTPServer((host, port), handler)
     logger.info("learning mode: serving on http://%s:%d", host, port)
     return server

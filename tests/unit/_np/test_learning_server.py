@@ -162,7 +162,7 @@ class TestLoadLearningModel:
         demo = Path(__file__).resolve().parents[3] / "resource" / "models" / "learning_demo"
         if not demo.is_dir():
             pytest.skip("demo checkpoint not trained yet")
-        model, vocab, cfg = load_learning_model(str(demo))
+        model, vocab, cfg, _tok = load_learning_model(str(demo))
         assert vocab is not None
         assert len(vocab) == cfg.vocab_size
         # registry-validated load: parameter count matches the registry

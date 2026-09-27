@@ -261,7 +261,7 @@ class TestDemoModelCheckpoint:
         from impl._np.learning_server import load_learning_model
 
         assert DEMO_MODEL.is_dir(), "demo checkpoint missing — run scripts/train_demo_model.py"
-        model, vocab, cfg = load_learning_model(str(DEMO_MODEL))
+        model, vocab, cfg, _tok = load_learning_model(str(DEMO_MODEL))
         assert vocab is not None and len(vocab) == cfg.vocab_size
         assert " " in vocab  # space is part of the char vocab
         assert isinstance(model, NumPyModel)  # default backend is numpy

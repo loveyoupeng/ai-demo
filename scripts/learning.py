@@ -111,18 +111,20 @@ def main() -> int:
         print(f"error: port {args.port} is already in use (override with --port)", file=sys.stderr)
         return 1
 
-    model, vocab, _cfg = learning_server.load_learning_model(args.model, backend=args.backend)
+    model, vocab, _cfg, _tok = learning_server.load_learning_model(args.model, backend=args.backend)
     # compare tab: register additional named (pre-trained + fine-trained) models
     compare_models = {}
     compare_vocabs = {}
+    compare_tokens = {}
     for label, mpath in args.compare:
         try:
-            m, v, _ = learning_server.load_learning_model(mpath, backend=args.backend)
+            m, v, _, tok = learning_server.load_learning_model(mpath, backend=args.backend)
         except (OSError, ValueError) as e:
             print(f"compare model {label}={mpath} skipped: {e}")
             continue
         compare_models[label] = m
         compare_vocabs[label] = v
+        compare_tokens[label] = tok
     server = learning_server.start_server(
         model,
         vocab,
@@ -131,6 +133,8 @@ def main() -> int:
         backend=args.backend,
         models=compare_models,
         vocabs=compare_vocabs,
+        tokenizer=_tok,
+        tokenizers=compare_tokens,
     )
     print(f"Learning mode: listening on {args.host}:{args.port}  (model: {args.model}, backend: {args.backend})")
     try:

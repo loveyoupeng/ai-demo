@@ -199,26 +199,25 @@
     </div>
   </section>
   <section id="compare-panel" style="background:var(--panel2); border-color:var(--line); display:none; grid-column: 1 / -1;">
-    <div class="row" style="justify-content:space-between;align-items:baseline">
+    <div class="row" style="justify-content:space-between;align-items:baseline;margin:0">
       <h2>Compare — same prompt, different model weights</h2>
-      <div class="note" id="compare-status" style="margin:0"></div>
+      <div class="note" id="compare-status"></div>
     </div>
-    <div class="kv">Each model's step column shows the chosen token (bold) and its top candidates with probabilities. Click a token chip to inspect that position's logits (the same table feeds the whole decode; a chip click keys the tensor view).</div>
-    <div class="row" style="margin-top:8px">
+    <div class="kv">Same prompt into every registered model. Each cell shows the chosen token (bold) and the top-5 candidates with probabilities. The first row where the models disagree is highlighted amber.</div>
+    <div class="row" style="margin-top:10px">
       <div>
-        <!-- same controls the visual decoder has -->
         <label style="margin:0">prompt</label>
-        <input id="compare-prompt" type="text" placeholder="Write a function…" value="Write a Python function to reverse a list." style="width:340px">
+        <input id="compare-prompt" type="text" value="Write a Python function to reverse a list." style="width:340px">
       </div>
-      <div><label>Tokens to generate</label><input type="number" id="compare-ntokens" value="8" min="1" max="32" style="width:90px"></div>
+      <div><label>Tokens</label><input type="number" id="compare-ntokens" value="8" min="1" max="32" style="width:90px"></div>
       <div><label>Temp</label><input type="number" id="compare-temp" value="0.8" min="0" step="0.1" style="width:70px"></div>
       <div><label>Top-k</label><input type="number" id="compare-topk" value="10" min="0" style="width:70px"></div>
       <div><label>Seed</label><input type="number" id="compare-seed" value="42" min="0" style="width:70px"></div>
       <div><button id="btn-compare" class="secondary">Compare</button></div>
     </div>
-    <div id="compare-grid"></div>
+    <div id="compare-grid" style="overflow-x:auto;margin-top:12px"></div>
   </section>
-  <section id="inspector">
+<section id="inspector">
     <h2 id="ins-title">Inspector</h2>
     <div id="ins-body"><p class="note">Pick a module in the diagram (or a step) to see its explanation, math, and tensors.</p></div>
   </section>
@@ -1340,70 +1339,64 @@ async function doCompare() {
         label,
         steps: steps.map((s) => ({
           kind: s.kind || "decode",
-          token: _tok(s.token, null, vocab),
+          token: vocab[s.token] ?? `id${s.token}`,
           tokenId: s.token,
           tops: (s.top_tokens || []).map((p) => ({
             id: Number(p[0]),
-            tok: _tok(p[0], null, vocab),
+            tok: vocab[p[0]] ?? `id${p[0]}`,
             prob: Number(p[1]),
           })),
         })),
       };
     });
 
+    // find first diverging step
     let firstDiv = -1;
-    for (let s = 0; s < maxSteps(per); s++) {
+    for (let s = 0; s < per[0].steps.length; s++) {
       if (!per.every((p) => p.steps[s] && p.steps[s].tokenId === per[0].steps[s]?.tokenId)) { firstDiv = s; break; }
     }
 
+    // table: rows = models, cols = steps
     const table = document.createElement("table");
     table.style.width = "100%";
     table.style.borderCollapse = "collapse";
-    const thead = document.createElement("tr");
-    thead.innerHTML =
-      "<th style='text-align:left;padding:8px 6px;border-bottom:1px solid var(--line)'>step</th>" +
-      per.map((p) => `<th style='text-align:left;padding:8px 6px;border-bottom:1px solid var(--line)'>${esc(p.label)}</th>`).join("");
-    table.appendChild(thead);
-    for (let s = 0; s < maxSteps(per); s++) {
+    table.style.font = "13px/1.4 system-ui, sans-serif";
+    const head = document.createElement("tr");
+    head.innerHTML = "<th style='padding:8px 6px;border-bottom:1px solid var(--line);text-align:left'>model</th>" +
+      per[0].steps.map((_, i) => `<th style='padding:8px 6px;border-bottom:1px solid var(--line)'>${i + 1}</th>`).join("");
+    table.appendChild(head);
+
+    per.forEach((p) => {
       const tr = document.createElement("tr");
       tr.style.borderTop = "1px solid var(--line)";
-      if (s === firstDiv) {
-        tr.style.background = "rgba(224,163,94,.10)";
-        tr.title = "first token-value divergence between models";
-      }
-      const cells = [`<td style="padding:6px">${s + 1}</td>`];
-      per.forEach((p) => {
-        const step = p.steps[s];
-        if (!step) { cells.push("<td></td>"); return; }
-        const top = step.tops.map((t) =>
-          `<span class="chip" style="background:var(--panel2);margin:2px" title="${step.kind}">${esc(t.tok)} ${t.prob.toFixed(3)}</span>`
+      const td = document.createElement("td");
+      td.innerHTML = `<b>${esc(p.label)}</b>`;
+      td.style.padding = "8px 6px";
+      tr.appendChild(td);
+      p.steps.forEach((tlv, s) => {
+        const td = document.createElement("td");
+        td.style.padding = "8px 6px";
+        if (s === firstDiv) td.style.background = "rgba(224,163,94,.10)";
+        const chipStr = tlv.tops.map((t) =>
+          `<span class="chip" style="background:var(--panel2);margin:2px" title="${tlv.kind}">${esc(t.tok)} ${t.prob.toFixed(3)}</span>`
         ).join(" ");
-        cells.push(
-          `<td valign="top" style="padding:6px;border-top:1px solid var(--line)">` +
-          `<b>${esc(step.token)}</b><div>${top}</div></td>`);
+        td.innerHTML = `<b>${esc(tlv.token)}</b><div>${chipStr}</div>`;
+        tr.appendChild(td);
       });
-      tr.innerHTML = cells.join("");
       table.appendChild(tr);
-    }
+    });
     grid.appendChild(table);
     grid.style.display = "block";
 
-    if (firstDiv >= 0) {
-      const b = per[0].steps[firstDiv];
-      const c = per.slice(1).map((p) => p.steps[firstDiv]?.token || "?").join(", ");
-      compareStatus(`${per.length} models — first divergence at step ${firstDiv + 1}: base→${b.token}, other→${c}`, "warn");
-    } else {
-      compareStatus(`${per.length} models — same output decoded`, "accent2");
-    }
-    setStatus(`${labels.length} models compared.`);
+    compareStatus(
+      `${per.length} models${firstDiv >= 0 ? ` — divergence at step ${firstDiv + 1}` : " — same tokens"}`,
+      firstDiv >= 0 || per.length ? "warn" : "ok",
+    );
+    setStatus(`${per.length} models compared.`);
   } catch (e) {
     setStatus("compare error: " + (e.message || String(e)));
     compareStatus(String(e).slice(0, 120), "warn");
   }
-}
-
-function maxSteps(per) {
-  return Math.max(...per.map((p) => p.steps.length));
 }
 
 if ($("btn-compare")) $("btn-compare").onclick = doCompare;

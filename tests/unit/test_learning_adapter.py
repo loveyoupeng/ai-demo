@@ -39,13 +39,13 @@ def _vocab_size() -> int:
 
 
 def _load_numpy() -> tuple[NumPyModel, list[str]]:
-    model, vocab, _cfg = load_learning_model(str(DEMO))
+    model, vocab, _cfg, _ = load_learning_model(str(DEMO))
     assert isinstance(model, NumPyModel)
     return model, _require_vocab(vocab)
 
 
 def _load_torch() -> tuple[TorchModel, list[str]]:
-    model, vocab, _cfg = load_learning_model(str(DEMO), backend="torch")
+    model, vocab, _cfg, _ = load_learning_model(str(DEMO), backend="torch")
     assert isinstance(model, TorchModel)
     return model, _require_vocab(vocab)
 

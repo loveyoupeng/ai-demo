@@ -175,8 +175,18 @@ docs, and tests.
 - **Instrumented forward**: the overlay that runs the model's own components and recomputes each component's math
   from its public parameters to capture intermediates, without modifying the NumPy track.
 
-- **Demo model**: the pretrained toy model — char-level vocabulary (V=20), D=8, H=4, L=3, E=3 MoE — exported to
-  `resource/models/learning_demo/` (checkpoint + `vocab.json`). The learning mode's default model.
+- **SFT model** ("post-trained"): the checkpoint after pre-training + code-instruction SFT + tool-call SFT
+  (`resource/models/learning_tool/`, default for the visual-decoder tab).
+
+- **Compare tab**: the second tab in the learning page — runs the same prompt through the base+SFT+tool-call models
+  (via `--compare label=path`), shows a per-step token table side-by-side, and highlights the first row where the
+  models' chosen tokens diverge.
+
+- **First-divergence step**: the first decode step where the models' chosen tokens differ. The straight answer to
+  "what changed when we fine-tuned".
+
+- **Demo model**: the old pretrained toy model — char-level vocabulary (V=20) — was the original learning-mode
+  default. The current default is the SFT pipeline's final checkpoint (`learning_tool`).
 
 - **Entry-point contract**: every per-track `cli.py` (e.g.
   `python -m impl._torch.cli`) is a single-track smoke demo on random
