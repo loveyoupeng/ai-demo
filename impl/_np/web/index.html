@@ -198,12 +198,12 @@
       <span class="lg"><span class="sw hilo"></span><b>heat color</b> red = low, blue = high (per-tensor min/max)</span>
     </div>
   </section>
-  <section id="compare-panel" style="background:var(--panel2); border-color:var(--line); display:none; grid-column: 1 / -1;">
+    <section id="compare-panel" style="background:var(--panel2); border-color:var(--line); display:none; grid-column: 1 / -1;">
     <div class="row" style="justify-content:space-between;align-items:baseline;margin:0">
       <h2>Compare — same prompt, different model weights</h2>
       <div class="note" id="compare-status"></div>
     </div>
-    <div class="kv">Same prompt into every registered model. Each cell shows the chosen token (bold) and the top-5 candidates with probabilities. The first row where the models disagree is highlighted amber.</div>
+    <div class="kv">Same prompt into every registered model. Each model column shows its chosen token (bold) per step + top-5 candidates with probabilities. The first step where the models disagree is highlighted amber.</div>
     <div class="row" style="margin-top:10px">
       <div>
         <label style="margin:0">prompt</label>

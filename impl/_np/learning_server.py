@@ -46,7 +46,7 @@ Backend = Literal["numpy", "torch"]
 
 def load_learning_model(
     model_dir: str, backend: Backend = "numpy"
-) -> tuple[NumPyModel | TorchModel, list[str] | None, TransformerConfig, "Tokenizer | None"]:
+) -> tuple[NumPyModel | TorchModel, list[str] | None, TransformerConfig, Tokenizer | None]:
     """Load a checkpoint (+ optional ``vocab.json`` sidecar) into the requested backend.
 
     ``backend`` selects which track materializes the weights:
@@ -146,6 +146,14 @@ class _LearningHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/api/model":
             self._send_json(self._model_info())
+            return
+        if path == "/api/tokenize":
+            from urllib.parse import unquote_plus
+
+            text = self.path.split("?", 1)[1].split("=", 1)[1] if "?" in self.path else ""
+            text = unquote_plus(text)
+            tokens = self.tokenizer.encode(text).ids if self.tokenizer else []
+            self._send_json({"tokens": tokens, "text": text})
             return
         # static: serve from the web dir, '/' → index.html
         rel = "index.html" if path in ("/", "/index.html") else path.lstrip("/")
@@ -282,9 +290,17 @@ class _LearningHandler(BaseHTTPRequestHandler):
         p /= p.sum()
         top = np.argsort(p)[::-1][:10]
         return {
-            "prompt": {"tokens": list(ids), "text": "".join(vocab[i] for i in ids)},
+            "prompt": {
+                "tokens": list(ids),
+                "text": self.tokenizer.decode(list(ids)) if self.tokenizer else "".join(vocab[i] for i in ids),
+            },
             "skipped_chars": skipped,
-            "generated": {"tokens": seq[len(ids) :], "text": "".join(vocab[i] for i in seq[len(ids) :])},
+            "generated": {
+                "tokens": seq[len(ids) :],
+                "text": self.tokenizer.decode(seq[len(ids) :])
+                if self.tokenizer
+                else "".join(vocab[i] for i in seq[len(ids) :]),
+            },
             "last_step": {
                 "logits": [round(float(v), 6) for v in last],
                 "top_tokens": [[int(i), float(p[i])] for i in top],
@@ -359,8 +375,8 @@ def make_handler(
     web_dir: Path = WEB_DIR,
     models: dict[str, NumPyModel | TorchModel] | None = None,
     vocabs: dict[str, list[str] | None] | None = None,
-    tokenizer: "Tokenizer | None" = None,
-    tokenizers: dict[str, "Tokenizer | None"] | None = None,
+    tokenizer: Tokenizer | None = None,
+    tokenizers: dict[str, Tokenizer | None] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Bind the model + backend + vocab + web dir into a handler class
     (closure over state). The compare tab adds its secondary models via
@@ -390,8 +406,8 @@ def start_server(
     backend: str = "numpy",
     models: dict[str, NumPyModel | TorchModel] | None = None,
     vocabs: dict[str, list[str] | None] | None = None,
-    tokenizer: "Tokenizer | None" = None,
-    tokenizers: dict[str, "Tokenizer | None"] | None = None,
+    tokenizer: Tokenizer | None = None,
+    tokenizers: dict[str, Tokenizer | None] | None = None,
 ) -> ThreadingHTTPServer:
     """Create the learning-mode HTTP server (bound and listening, not yet serving).
 
