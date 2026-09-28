@@ -153,7 +153,7 @@ def save_checkpoint(model: TorchModel, name: str, tok: Tokenizer) -> None:
     out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out / "model.npz", **model.get_all_parameters())
     (out / "config.json").write_text(json.dumps(cfg.to_dict()))
-    (out / "vocab.json").write_text(json.dumps([tok.id_to_token(i) for i in range(VOCAB)]))
+    (out / "vocab.json").write_text(json.dumps([tok.decode([i]) for i in range(VOCAB)]))
     tok.save(str(out / "tokenizer.json"))
     print(f"saved resource/models/{name}/")
 
