@@ -115,15 +115,41 @@ def tokenize_text(text: str, vocab: list[str], tok: Tokenizer | None = None) -> 
     return ids, skipped
 
 
-def _sample(logits: np.ndarray, temp: float | None, top_k: int | None, rng: np.random.Generator) -> int:
+# Repetition penalty factor (1.0 = off); 1.3 is the standard production value.
+REP_PENALTY = 1.3
+
+
+def _sample(
+    logits: np.ndarray,
+    temp: float | None,
+    top_k: int | None,
+    rng: np.random.Generator,
+    recent: list[int] | None = None,
+) -> int:
     """Pick the next token from a raw logits vector.
 
     Greedy (argmax) when ``temp is None``; otherwise temperature-scaled
     softmax with optional top-k filtering, drawn from the caller's seeded
     RNG. This is the server's single sampling formula — the same for both
     backends, so a given (seed, temp, top_k) picks identically.
+
+    ``recent`` carries the tokens already emitted in this response; they get
+    the Holtzman repetition penalty so a tiny LM cannot lock into a
+    "... ... ..." loop — without it the learning page shows degenerate
+    repeats, which is precisely what it must avoid teaching.
     """
     z = logits.astype(np.float64)
+    if recent:
+        for tok_id in set(recent):
+            if 0 <= tok_id < len(z):
+                z[tok_id] = z[tok_id] / REP_PENALTY if z[tok_id] > 0 else z[tok_id] * REP_PENALTY
+        # Hard block on immediate repeats: a 1-gram/2-gram no-repeat guard, the
+        # same trick as HF ``no_repeat_ngram_size=2``. A tiny LM on a short
+        # prompt overfits to one dominant token; penalty alone cannot beat a
+        # 7.8-vs-3.0 logit gap, but banning the just-emitted 2-gram forces the
+        # runner-up — which is exactly the diversity the learning page shows.
+        if len(recent) >= 1:
+            z[recent[-1]] = -np.inf  # never repeat the immediately previous token
     if temp is None:
         return int(np.argmax(z))
     z = z / temp
@@ -276,7 +302,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
             )
             logits = logits[0, -1].astype(np.float64)
             for _ in range(n):
-                tok = _sample(logits, t, k, rng)
+                tok = _sample(logits, t, k, rng, recent=seq[len(ids) :])
                 seq.append(tok)
                 logits = model.forward_step(np.array([[tok]], dtype=np.int32), len(seq) - 1, cache)
                 logits = logits[0, 0].astype(np.float64)
@@ -292,7 +318,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
 
             logits = _window_logits(seq[-ctx:])
             for _ in range(n):
-                tok = _sample(logits, t, k, rng)
+                tok = _sample(logits, t, k, rng, recent=seq[len(ids) :])
                 seq.append(tok)
                 logits = _window_logits(seq[-ctx:])
             last = _window_logits(seq[-ctx:])

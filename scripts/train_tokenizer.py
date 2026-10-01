@@ -47,10 +47,32 @@ SPECIAL_TOKENS = [
 
 
 def _unicode_fold(text: str) -> str:
-    """A simple Unicode fold: lowercase + collapse whitespace-ish runs."""
+    """Kept for old-checkpoint compat; NOT used for training — the coding-agent
+    model must see real casing, code indentation, and whitespace verbatim."""
     import re as _re
 
     return _re.sub(r"\s+", " ", text.lower().strip())
+
+
+def _python_texts() -> list[str]:
+    """Real Python functions + SFT instructions + tool calls — verbatim."""
+    parts: list[str] = []
+    corpus = RESOURCE_DIR / "corpus_python.json"
+    if corpus.exists():
+        parts.extend(json.loads(corpus.read_text()))
+    code_file = RESOURCE_DIR / "code_instructions.json"
+    if code_file.exists():
+        for row in json.loads(code_file.read_text()):
+            parts.append(f"INSTRUCTION: {row['instruction']}\nANSWER: {row['output']}")
+    tool_file = RESOURCE_DIR / "tool_calls.json"
+    if tool_file.exists():
+        for row in json.loads(tool_file.read_text()):
+            for msg in row.get("messages", []):
+                if msg.get("content"):
+                    parts.append(msg["content"])
+            for tool in row.get("tools", []):
+                parts.append(json.dumps(tool, ensure_ascii=False))
+    return parts
 
 
 def _tool_row_texts(row: dict) -> list[str]:
@@ -88,9 +110,12 @@ def collect_text() -> str:
 
 def train(tokenizer_path: Path | None = None, vocab_size: int = DEFAULT_VOCAB) -> None:
     """Train BPE on the collected text and save."""
-    text = collect_text()
-    # Subsample to a sensible size — full train corpus is 1k rows anyway.
-    text = _unicode_fold(text)
+    # The coding-agent tokenizer trains on REAL code: casing + indentation
+    # + whitespace verbatim. Python corpus dominates; SFT texts join it.
+    lines: list[str] = []
+    for doc in _python_texts():
+        lines.extend(doc.split("\n"))
+    text = "\n".join(lines)
 
     tok = Tokenizer(models.BPE())
     tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
