@@ -31,10 +31,30 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from shared.constants import REP_PENALTY
+
 if TYPE_CHECKING:
     from impl._np.model import NumPyModel
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_rep_guard(step_logits: np.ndarray, emitted: list[list[int]]) -> np.ndarray:
+    """Per-row repetition guard (in place): penalty on already-emitted tokens
+    + a hard block on the immediately previous token.
+
+    Same rule as every other sampler in the repo — server ``_sample``, record
+    ``_pick``, shared ``generator.py`` — so all four tracks decode equivalently.
+    Rows are independent sequences, so the guard is applied per row.
+    """
+    for b in range(step_logits.shape[0]):
+        for tid in set(emitted[b]):
+            if 0 <= tid < step_logits.shape[-1]:
+                v = step_logits[b, tid]
+                step_logits[b, tid] = v / REP_PENALTY if v > 0 else v * REP_PENALTY
+        if emitted[b]:
+            step_logits[b, emitted[b][-1]] = -np.inf  # never immediately repeat
+    return step_logits
 
 
 class TextGenerator:
@@ -123,13 +143,23 @@ class TextGenerator:
         for i in range(seq_len - 1):
             self.model.forward_step(sequence[:, [i]], i, cache, quantize=self.quantize)
 
+        # Per-row emitted tokens (repeat guard, cf. shared/generator.py —
+        # rows are independent sequences, so the guard must be per row).
+        emitted = [[] for _ in range(sequence.shape[0])]
+
         for step in range(self.max_new_tokens):
             step_logits = self.model.forward_step(
                 sequence[:, [-1]], sequence.shape[1] - 1, cache, quantize=self.quantize
             )  # (B, 1, V)
-            step_logits = step_logits[:, 0, :]  # (B, V)
+            step_logits = step_logits[:, 0, :].astype(np.float64)  # (B, V)
+
+            # Repetition guard — same rule as every other sampler in the repo
+            # (server _sample, record _pick, shared generator).
+            step_logits = _apply_rep_guard(step_logits, emitted)
 
             next_token = np.argmax(step_logits, axis=-1)  # (B,)
+            for b in range(sequence.shape[0]):
+                emitted[b].append(int(next_token[b]))
 
             # Log top-5 tokens for traceability on first/last step
             if step == 0 or step == self.max_new_tokens - 1 or self.max_new_tokens <= 5:
@@ -208,11 +238,17 @@ class TextGenerator:
         for i in range(seq_len - 1):
             self.model.forward_step(sequence[:, [i]], i, cache, quantize=self.quantize)
 
+        # Per-row emitted tokens (repeat guard; rows are independent).
+        emitted = [[] for _ in range(sequence.shape[0])]
+
         for step in range(self.max_new_tokens):
             step_logits = self.model.forward_step(
                 sequence[:, [-1]], sequence.shape[1] - 1, cache, quantize=self.quantize
             )  # (B, 1, V)
-            step_logits = step_logits[:, 0, :]  # (B, V)
+            step_logits = step_logits[:, 0, :].astype(np.float64)  # (B, V)
+
+            # Repetition guard — same rule as every other sampler in the repo.
+            step_logits = _apply_rep_guard(step_logits, emitted)
 
             scaled_logits = step_logits / effective_temperature
             logger.debug(
@@ -242,6 +278,8 @@ class TextGenerator:
                 next_token = np.array([rng.choice(self.model.vocab_size, p=probs[0])])
             else:
                 next_token = np.array([rng.choice(self.model.vocab_size, p=probs[b]) for b in range(batch_size)])
+            for b in range(sequence.shape[0]):
+                emitted[b].append(int(next_token[b]))
 
             if step == 0 or step == self.max_new_tokens - 1 or self.max_new_tokens <= 5:
                 # Use np.asarray to ensure proper numpy array type

@@ -26,10 +26,7 @@ import numpy as np
 from impl._np.block import TransformerBlock
 from impl._np.model import NumPyModel
 from impl._np.moe import MixtureOfExperts
-
-# Same constant as the server sampler (impl/_np/learning_server.py) — duplicated
-# locally to avoid a circular import; keep the two values in sync.
-REP_PENALTY = 1.3
+from shared.constants import REP_PENALTY
 
 # ---------------------------------------------------------------------------
 # Tensor → JSON helpers

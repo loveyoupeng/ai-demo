@@ -164,3 +164,16 @@ def all_param_keys(num_layers: int, has_moe: bool, n_experts: int, n_shared_expe
     keys.append(Keys.final_norm())
     keys.append(Keys.lm_head())
     return keys
+
+
+# ── Generation / decoding ─────────────────────────────────────────────────────
+
+REP_PENALTY: float = 1.3
+"""Repetition-penalty factor for generation (Holtzman et al., CTL 2020).
+
+Shared by every sampler in the repo (the server's ``_sample``, and the
+NumPy/Torch record adapters' ``_pick``) so the four tracks stay
+equivalent: a given (seed, temp, top_k) decodes identically everywhere.
+1.3 is the standard production value; 1.0 disables the penalty (the hard
+no-immediate-repeat block is separate and always on).
+"""

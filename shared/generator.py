@@ -32,6 +32,8 @@ from typing import Protocol
 
 import torch
 
+from shared.constants import REP_PENALTY
+
 logger = logging.getLogger(__name__)
 
 
@@ -150,14 +152,30 @@ class TextGenerator:
         logits, cache = self.model.forward_prefill(sequence)
         next_logits = logits[:, -1, :]  # (B, V)
 
+        # Repetition guard — same rule as every other sampler in the repo
+        # (server _sample, NumPy/Torch record _pick): penalty on tokens
+        # already emitted in this response + a hard block on the immediately
+        # previous token. Without it a tiny LM degenerates into repeat
+        # loops; with it, all four tracks decode equivalently.
+        emitted = torch.zeros((batch_size, 0), dtype=torch.long, device=next_logits.device)
+
         for step in range(self.max_new_tokens):
+            guarded = next_logits.clone()
+            for b in range(batch_size):
+                if emitted.shape[1] > 0:
+                    seen = emitted[b].unique()
+                    for tid in seen.tolist():
+                        v = guarded[b, tid]
+                        guarded[b, tid] = v / REP_PENALTY if v > 0 else v * REP_PENALTY
+                    guarded[b, int(emitted[b, -1].item())] = -float("inf")  # never immediately repeat
+
             if temperature == 0.0:
                 # Greedy: argmax picks the highest-logit token
-                next_token = torch.argmax(next_logits, dim=-1)  # (B,)
+                next_token = torch.argmax(guarded, dim=-1)  # (B,)
                 probs = None
             else:
                 # Temperature scaling: softmax(z/T)
-                scaled = next_logits / max(temperature, 1e-8)
+                scaled = guarded / max(temperature, 1e-8)
                 # Top-k filtering: keep only the top-k logits
                 if self.top_k > 0:
                     scaled = _apply_top_k_mask(scaled, self.top_k)
@@ -168,6 +186,7 @@ class TextGenerator:
                 next_token = torch.stack(
                     [torch.multinomial(probs[b].float(), num_samples=1) for b in range(batch_size)]
                 ).squeeze(-1)  # (B,)
+            emitted = torch.cat([emitted, next_token.reshape(batch_size, 1)], dim=1)
 
             # Educational logging (first/last step, or short generations)
             if step == 0 or step == self.max_new_tokens - 1 or self.max_new_tokens <= 5:

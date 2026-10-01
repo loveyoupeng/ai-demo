@@ -28,6 +28,7 @@ import torch
 import torch.nn.functional as F
 
 from impl._torch.layers import MixtureOfExperts, MultiHeadAttention, SwiGLUFFN
+from shared.constants import REP_PENALTY
 
 if TYPE_CHECKING:
     # Record shape contract: the JSON shapes are owned by the NumPy track.
@@ -412,11 +413,27 @@ def generate_with_records(
     seq = list(prompt_ids)
     steps: list[StepRecord] = []
 
+    emitted: list[int] = []  # generated tokens so far (repeat guard, cf. NumPy track)
+
     def _pick(p_last: np.ndarray) -> int:
-        """Greedy argmax, or seeded temperature/top-k sampling (same formula as the NumPy track)."""
+        """Greedy argmax, or seeded temperature/top-k sampling.
+
+        Identical formula AND identical repetition guard as the NumPy track's
+        ``_pick`` (impl/_np/learning.py) and the server's ``_sample``: penalty
+        on already-emitted tokens + a hard block on the immediately previous
+        token. The two record adapters must stay equivalent — the page
+        consumes either backend's records interchangeably.
+        """
+        z = np.log(p_last + 1e-30)
+        if temp is not None:
+            z = z / temp
+        if emitted:
+            for tid in set(emitted):
+                if 0 <= tid < len(z):
+                    z[tid] = z[tid] / REP_PENALTY if z[tid] > 0 else z[tid] * REP_PENALTY
+            z[emitted[-1]] = -np.inf  # never immediately repeat
         if temp is None:
-            return int(np.argmax(p_last))
-        z = np.log(p_last + 1e-30) / temp
+            return int(np.argmax(z))
         if top_k is not None:
             kth = np.partition(z, -top_k)[-1]
             z = np.where(z < kth, -np.inf, z)
@@ -429,6 +446,7 @@ def generate_with_records(
     x = torch.tensor([seq[-ctx:]], dtype=torch.int64)
     rec = instrumented_forward(model, x)
     tok = _pick(np.asarray(rec["softmax"], dtype=np.float64)[0][-1])
+    emitted.append(tok)
     steps.append(
         {
             "step": 0,
@@ -504,6 +522,7 @@ def generate_with_records(
             "top_tokens": top_tokens,
         }
         tok = _pick(p[0, 0].detach().cpu().numpy())
+        emitted.append(tok)
         steps.append(
             {
                 "step": i,

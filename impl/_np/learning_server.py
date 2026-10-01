@@ -30,6 +30,7 @@ from tokenizers import Tokenizer
 
 from impl._np.learning import generate_with_records
 from impl._np.model import NumPyModel
+from shared.constants import REP_PENALTY
 from shared.checkpoint import load_checkpoint
 from shared.config import TransformerConfig
 
@@ -113,10 +114,6 @@ def tokenize_text(text: str, vocab: list[str], tok: Tokenizer | None = None) -> 
         else:
             skipped += 1
     return ids, skipped
-
-
-# Repetition penalty factor (1.0 = off); 1.3 is the standard production value.
-REP_PENALTY = 1.3
 
 
 def _sample(
