@@ -27,6 +27,10 @@ from impl._np.block import TransformerBlock
 from impl._np.model import NumPyModel
 from impl._np.moe import MixtureOfExperts
 
+# Same constant as the server sampler (impl/_np/learning_server.py) — duplicated
+# locally to avoid a circular import; keep the two values in sync.
+REP_PENALTY = 1.3
+
 # ---------------------------------------------------------------------------
 # Tensor → JSON helpers
 
@@ -370,11 +374,26 @@ def generate_with_records(
     seq = list(prompt_ids)
     steps: list[StepRecord] = []
 
+    emitted: list[int] = []  # generated tokens so far (repeat guard, cf. server _sample)
+
     def _pick(p_last: np.ndarray) -> int:
-        """Greedy argmax, or seeded temperature/top-k sampling."""
+        """Greedy argmax, or seeded temperature/top-k sampling.
+
+        Applies the same repetition guard as the server's ``_sample``:
+        penalty on already-emitted tokens + a hard block on the immediately
+        previous token, so the record path cannot lock into a "xx xx xx"
+        loop — before this, the compare tab showed `ĠlistĠlistĠlist`.
+        """
+        z = np.log(p_last + 1e-30)
+        if temp is not None:
+            z = z / temp
+        if emitted:
+            for tid in set(emitted):
+                if 0 <= tid < len(z):
+                    z[tid] = z[tid] / REP_PENALTY if z[tid] > 0 else z[tid] * REP_PENALTY
+            z[emitted[-1]] = -np.inf  # never immediately repeat
         if temp is None:
-            return int(np.argmax(p_last))
-        z = np.log(p_last + 1e-30) / temp
+            return int(np.argmax(z))
         if top_k is not None:
             kth = np.partition(z, -top_k)[-1]
             z = np.where(z < kth, -np.inf, z)
@@ -392,6 +411,7 @@ def generate_with_records(
     _logits, cache = model.forward_prefill(x, None, position_offset=P - P0, record=raw)
     rec = _forward_record(model, raw, x)
     tok = _pick(np.asarray(rec["softmax"], dtype=np.float64)[0][-1])
+    emitted.append(tok)
     steps.append(
         {
             "step": 0,
@@ -414,6 +434,7 @@ def generate_with_records(
         model.forward_step(x1, t, cache, record=raw)
         rec = _forward_record(model, raw, x1)
         tok = _pick(np.asarray(rec["softmax"], dtype=np.float64)[0][0])
+        emitted.append(tok)
         steps.append(
             {
                 "step": i,

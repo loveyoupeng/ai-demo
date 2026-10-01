@@ -160,10 +160,30 @@ class TestGenerateWithRecords:
 
     @pytest.mark.timeout(30)
     def test_greedy_matches_direct_forward(self):
-        """Greedy recorded generation reproduces a direct greedy loop exactly."""
+        """Greedy recorded generation matches a direct greedy loop WITH the
+        no-repeat guard (the record sampler hard-blocks the immediately
+        previous token — same contract as the server's _sample; without it
+        a tiny LM degenerates into repeat loops, the exact bug the learning
+        page must not show)."""
         model = tiny_model()
         prompt = [1, 3, 5, 2]
-        ref = self._reference_greedy(model, prompt, 6)
+        # reference loop with guard parity: penalty on emitted tokens +
+        # hard block on the immediately previous token (record-sampler rules)
+        from impl._np.learning import instrumented_forward
+
+        seq = list(prompt)
+        gen = []
+        for _ in range(6):
+            x = np.array([seq[-model.config.context_length :]], dtype=np.int32)
+            p = np.asarray(instrumented_forward(model, x)["softmax"], dtype=np.float64)[0][-1].copy()
+            for tid in set(gen):
+                if 0 <= tid < len(p):
+                    p[tid] = p[tid] / 1.3 if p[tid] > 0 else p[tid] * 1.3
+            p[seq[-1]] = -np.inf
+            tok = int(np.argmax(p))
+            gen.append(tok)
+            seq.append(tok)
+        ref = seq
         rec = generate_with_records(model, [chr(97 + i) for i in range(8)], prompt, 6, seed=42)
         assert rec["generated"]["tokens"] == ref[4:]
         assert rec["steps"][0]["token"] == ref[4]
@@ -230,13 +250,20 @@ class TestGenerateWithRecords:
         vocab = [chr(97 + i) for i in range(8)]
         prompt = [1, 3, 5, 2]
         rec = generate_with_records(model, vocab, prompt, 6)  # greedy
-        # naive reference: full forward every step, argmax
+        # naive reference: full forward every step, argmax WITH the same
+        # no-repeat guard as the record sampler (never immediately repeat)
         seq = list(prompt)
         naive = []
         for _ in range(6):
             x = np.array([seq[-model.config.context_length :]], dtype=np.int32)
             f = instrumented_forward(model, x)
-            p = np.asarray(f["softmax"], dtype=np.float64)[0][-1]
+            p = np.asarray(f["softmax"], dtype=np.float64)[0][-1].copy()
+            # guard parity with the record sampler: penalty on emitted + hard block
+            emitted = [x for x in naive]
+            for tid in set(emitted):
+                if 0 <= tid < len(p):
+                    p[tid] = p[tid] / 1.3 if p[tid] > 0 else p[tid] * 1.3
+            p[seq[-1]] = -np.inf  # never immediately repeat
             t = int(np.argmax(p))
             naive.append(t)
             seq.append(t)
