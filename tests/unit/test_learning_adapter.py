@@ -91,7 +91,7 @@ class TestLoadBackend:
     @pytest.mark.timeout(120)
     def test_invalid_backend_raises(self):
         # Deliberately out-of-literal input: the runtime guard must reject it.
-        backend = cast(Backend, "cuda")
+        backend = cast(Backend, "webgpu")  # not one of the four supported tracks
         with pytest.raises(ValueError, match="backend must be"):
             load_learning_model(str(DEMO), backend=backend)
 

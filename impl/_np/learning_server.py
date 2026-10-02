@@ -21,50 +21,48 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 from tokenizers import Tokenizer
 
 from impl._np.learning import generate_with_records
 from impl._np.model import NumPyModel
-from shared.constants import REP_PENALTY
 from shared.checkpoint import load_checkpoint
 from shared.config import TransformerConfig
+from shared.constants import REP_PENALTY
 
 if TYPE_CHECKING:
     from impl._torch.layers import TorchModel
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL_DIR = "resource/models/learning_demo"
+DEFAULT_MODEL_DIR = "resource/models/learning_tool"  # BPE-trained (mirrors scripts/learning.py DEFAULT_MODEL)
 WEB_DIR = Path(__file__).parent / "web"
 
 
-Backend = Literal["numpy", "torch"]
+Backend = Literal["numpy", "torch", "triton", "cuda"]
 
 
 def load_learning_model(
     model_dir: str, backend: Backend = "numpy"
 ) -> tuple[NumPyModel | TorchModel, list[str] | None, TransformerConfig, Tokenizer | None]:
-    """Load a checkpoint (+ optional ``vocab.json`` sidecar) into the requested backend.
+    """Load a checkpoint (+ sidecars: vocab.json + tokenizer.json) into one of
+    the four tracks (numpy/torch/triton/cuda).
 
-    ``backend`` selects which track materializes the weights:
-      - ``"numpy"`` (default) → ``NumPyModel`` (float32, the NumPy track).
-      - ``"torch"`` → ``TorchModel`` (float64 via ``.double()`` so the record
-        adapter's float64 math matches the NumPy track's records).
-
-    The vocab sidecar is what makes text I/O possible: without it the model
-    still loads and can run on raw token IDs, but the page's text box has
-    nothing to encode/decode.
+    Returns (model, vocab, config, tokenizer). Triton/CUDA paths import lazily so
+    the learning page works on the NumPy/Torch tracks untouched even on a machine
+    without a full GPU stack; they fall back only if the user picks them.
     """
     params, cfg = load_checkpoint(model_dir)
     if cfg is None:
         raise ValueError(f"checkpoint {model_dir} failed registry validation")
     if backend == "numpy":
-        model: NumPyModel | TorchModel = NumPyModel(cfg)
+        model: NumPyModel | TorchModel | Any = NumPyModel(cfg)
         model.load_from_numpy_dict({k: v.copy() for k, v in params.items()})
     elif backend == "torch":
         from impl._torch.layers import TorchModel as _TorchModel
@@ -72,24 +70,34 @@ def load_learning_model(
         torch_model = _TorchModel(cfg).double()
         torch_model.load_from_numpy_dict({k: v.copy() for k, v in params.items()})
         torch_model.eval()
+        torch_model = torch_model
         model = torch_model
+    elif backend == "triton":
+        from impl._triton.model import TritonModel
+
+        triton_model = TritonModel(cfg).cuda()
+        triton_model.load_from_numpy_dict({k: v.copy() for k, v in params.items()})
+        triton_model.eval()
+        model = triton_model
+    elif backend == "cuda":
+        from impl._cuda.model import CUDAModel as _CUDAModel
+
+        cuda_model = _CUDAModel(cfg)
+        cuda_model.load_from_numpy_dict({k: v.copy() for k, v in params.items()})
+        model = cuda_model
     else:
-        raise ValueError(f"backend must be 'numpy' or 'torch', got {backend!r}")
+        raise ValueError(f"backend must be 'numpy'|'torch'|'triton'|'cuda', got {backend!r}")
+
     vocab: list[str] | None = None
     vocab_path = Path(model_dir) / "vocab.json"
-    if vocab_path.exists():
+    if vocab_path.is_file():
         vocab = json.loads(vocab_path.read_text())
 
-    # If the checkpoint carries a tokenizer.json (from scripts/train_tokenizer.py),
-    # decode through it instead of vocab char lookup — Training pipe makes one,
-    # and the learning-visuals page needs real token text.
+    tok: Tokenizer | None = None
     tok_path = Path(model_dir) / "tokenizer.json"
-    tokenizer: Tokenizer | None = None
-    if tok_path.exists():
-        from tokenizers import Tokenizer
-
-        tokenizer = Tokenizer.from_file(str(tok_path))
-    return model, vocab, cfg, tokenizer
+    if tok_path.is_file():
+        tok = Tokenizer.from_file(str(tok_path))
+    return model, vocab, cfg, tok
 
 
 def tokenize_text(text: str, vocab: list[str], tok: Tokenizer | None = None) -> tuple[list[int], int]:
@@ -163,16 +171,61 @@ class _LearningHandler(BaseHTTPRequestHandler):
     """Static file + JSON API handler with the model(s) bound at construction."""
 
     model: NumPyModel | TorchModel  # the "default" model (the old backend semantics)
-    backend: str
+    backend: str  # default backend (= startup -backend)
     vocab: list[str] | None
     tokenizer: Tokenizer | None  # main model's BPE (None on old char-only demos)
     web_dir: Path
     models: dict[str, NumPyModel | TorchModel]  # label → model (compare tab)
     vocabs: dict[str, list[str] | None]  # label → vocab (compare tab)
     tokenizers: dict[str, Tokenizer | None]  # label → BPE (compare tab)
+    backend_models: dict[str, Any]  # backend → model of the default checkpoint
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: D102 — quiet the default stderr noise
         logger.debug(format, *args)
+
+    @contextmanager
+    def _per_backend(self, backend: str | None):
+        """Swap self.model/vocab/tokenizer for the named backend.
+
+        Lazily loads the named track's model from the SAME default
+        checkpoint on first use. Triton/CUDA loading is GPU-gated: when the
+        GPU is missing or the backend couldn't be loaded, `backend_models.get`
+        returns None and the endpoint raises a 400 with a user-facing
+        "backend unavailable" message — never silently serving the default
+        backend's output under the wrong name.
+        """
+        if not backend or backend == self.backend:
+            yield
+            return
+        if backend not in ("numpy", "torch", "triton", "cuda"):
+            raise ValueError(f"unknown backend {backend!r}")
+        if backend not in self.backend_models:
+            self.backend_models[backend] = self._try_load_backend(backend)
+        bm = self.backend_models[backend]
+        if bm is None:
+            raise ValueError(f"backend {backend!r} unavailable on this host (needs a CUDA GPU for triton / cuda)")
+        saved = (self.model, self.vocab, self.tokenizer)
+        try:
+            self.model = bm
+            self.vocab = self._vocab_for_backend(backend)
+            yield
+        finally:
+            self.model, self.vocab, self.tokenizer = saved
+
+    def _try_load_backend(self, backend: str) -> Any | None:
+        """Load the named track's model for the default checkpoint; None if it can't run here."""
+        try:
+            ckpt_dir = os.environ.get("AI_DEMO_LEARNING_MODEL", DEFAULT_MODEL_DIR)
+            # Same factory the CLI uses; returns (model, vocab, cfg, tokenizer).
+            model, _vocab, _cfg, _tok = load_learning_model(ckpt_dir, backend=backend)
+            return model
+        except Exception:
+            logger.exception("backend %r not loadable on this host", backend)
+            return None
+
+    def _vocab_for_backend(self, backend: str) -> list[str] | None:
+        """Vocab is checkpoint-side, not backend-side — return the shared one."""
+        return self.vocab
 
     # --- static files ------------------------------------------------------
 
@@ -245,7 +298,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
             "has_moe": cfg.has_moe(),
         }
 
-    def _decode_params(self, body: dict) -> tuple[list[int], float | None, int | None, int, int | None]:
+    def _decode_params(self, body: dict) -> tuple[list[int], float | None, int | None, int, int, str | None]:
         """Shared request parsing; raises ValueError with a user-facing message."""
         if self.vocab is None:
             raise ValueError("this checkpoint has no vocab.json — text input is unavailable (raw token IDs only)")
@@ -254,6 +307,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
         temp = body.get("temperature")
         top_k = body.get("top_k")
         seed = int(body.get("seed", 42))
+        backend = body.get("backend")  # numpy | torch | triton | cuda (allowed)
         if not (1 <= n_tokens <= 512):
             raise ValueError("n_tokens must be in [1, 512]")
         ids, skipped = tokenize_text(text, self.vocab, self.tokenizer)
@@ -261,9 +315,13 @@ class _LearningHandler(BaseHTTPRequestHandler):
             raise ValueError("no in-vocab characters in the input text")
         t: float | None = None if temp is None else float(temp)
         k: int | None = None if top_k is None else int(top_k)
-        return ids, t, k, seed, skipped
+        return ids, t, k, seed, skipped, backend
 
     def _api_inference(self, body: dict) -> dict:
+        with self._per_backend(body.get("backend")):
+            return self._run_inference(body)
+
+    def _run_inference(self, body: dict) -> dict:
         """Quick generation through the track's own generator path.
 
         NumPy track: one O(S) ``forward_prefill`` + O(1) per-token
@@ -285,7 +343,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
         ``last_step`` is the distribution over the token that would come
         AFTER the generated ones (one extra decode position).
         """
-        ids, t, k, seed, skipped = self._decode_params(body)
+        ids, t, k, seed, skipped, backend = self._decode_params(body)
         n = int(body.get("n_tokens", 20))
         vocab = self.vocab
         assert vocab is not None
@@ -342,21 +400,47 @@ class _LearningHandler(BaseHTTPRequestHandler):
         }
 
     def _api_record(self, body: dict) -> dict[str, object]:
+        with self._per_backend(body.get("backend")):
+            return self._run_record(body)
+
+    def _run_record(self, body: dict) -> dict[str, object]:
         """Full inference record via the track's own record adapter.
 
-        Both backends produce the identical JSON shape (the record TypedDicts
-        are shared), so the page consumes either interchangeably.
+        All four tracks produce the identical JSON shape (the record TypedDicts
+        are shared), so the page consumes any of them interchangeably.
+        Dispatch is by model class (the backend the last `_per_backend`
+        swap installed), not by the `backend` request key — the two are kept
+        in sync by `_per_backend`, and using the class keeps this honest
+        even if a call site forgot the swap.
         """
-        ids, t, k, seed, skipped = self._decode_params(body)
+        ids, t, k, seed, skipped, backend = self._decode_params(body)
         n = int(body.get("n_tokens", 20))
-        if isinstance(self.model, NumPyModel):
-            record = generate_with_records(self.model, self.vocab or [], list(ids), n, temp=t, top_k=k, seed=seed)
+        model = self.model
+        if isinstance(model, NumPyModel):
+            record = generate_with_records(model, self.vocab or [], list(ids), n, temp=t, top_k=k, seed=seed)
         else:
-            from impl._torch import learning as torch_learning
+            # Class name shown only for diagnostics; all four records share one schema.
+            cls_name = type(model).__name__
+            if cls_name == "TorchModel":
+                from impl._torch import learning as torch_learning
 
-            record = torch_learning.generate_with_records(
-                self.model, self.vocab or [], list(ids), n, temp=t, top_k=k, seed=seed
-            )
+                record = torch_learning.generate_with_records(
+                    model, self.vocab or [], list(ids), n, temp=t, top_k=k, seed=seed
+                )
+            elif cls_name == "TritonModel":
+                from impl._triton import learning as triton_learning
+
+                record = triton_learning.generate_with_records(
+                    model, self.vocab or [], list(ids), n, temp=t, top_k=k, seed=seed
+                )
+            elif cls_name == "CUDAModel":
+                from impl._cuda import learning as cuda_learning
+
+                record = cuda_learning.generate_with_records(
+                    model, self.vocab or [], list(ids), n, temp=t, top_k=k, seed=seed
+                )
+            else:
+                raise ValueError(f"no record adapter for model class {cls_name!r}")
         record_out: dict[str, object] = dict(record)
         record_out["skipped_chars"] = skipped
         return record_out
@@ -429,6 +513,7 @@ def make_handler(
             "models": models if models is not None else {},
             "vocabs": vocabs if vocabs is not None else {},
             "tokenizers": tokenizers if tokenizers is not None else {},
+            "backend_models": {},  # lazy per-backend caches, populated on first request
         },
     )
 
