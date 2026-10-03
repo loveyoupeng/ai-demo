@@ -1302,6 +1302,11 @@ $("btn-gen").onclick = doGenerate;
 $("btn-rec").onclick = doRecord;
 $("btn-dl").onclick = downloadRecord;
 $("btn-play").onclick = togglePlay;
+// backend switch re-runs whatever is on screen, so the comparison is immediate
+$("backend").onchange = () => {
+  if (RECORD) doRecord();
+  else if ($("gen-text").textContent) doGenerate();
+};
 
 // ---------------------------------------------------------------------------
 // Compare tab — one decode per model at a time (synchronized), then a shared
