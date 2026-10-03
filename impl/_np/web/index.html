@@ -154,6 +154,14 @@
       </div>
       <div><label>Top-k (0 = off)</label><input type="number" id="topk" value="10" min="0" max="50"></div>
       <div><label>Seed</label><input type="number" id="seed" value="42" min="0"></div>
+      <div><label>Backend</label>
+        <select id="backend">
+          <option value="numpy" selected>numpy</option>
+          <option value="torch">torch</option>
+          <option value="triton">triton</option>
+          <option value="cuda">cuda</option>
+        </select>
+      </div>
       <div><button id="btn-gen">Generate</button></div>
       <div><button id="btn-rec" class="secondary">Generate + record</button></div>
       <div><button id="btn-dl" class="secondary" disabled>Download record JSON</button></div>
@@ -257,6 +265,7 @@ function promptParams() {
     temperature: t === "greedy" ? null : parseFloat(t),
     top_k: parseInt($("topk").value || "0", 10),
     seed: parseInt($("seed").value || "42", 10),
+    backend: $("backend").value,
   };
 }
 
@@ -472,7 +481,7 @@ async function doGenerate() {
     if (r.prompt) $("prompt").value = r.prompt.text;
     tokenizePreview(r.prompt.text);
     fillGenerated(r.generated.text, r.generated.tokens, r.last_step?.top_tokens);
-    setStatus(`done (${r.skipped_chars} skipped chars)`);
+    setStatus(`done on ${$("backend").value} (${r.skipped_chars} skipped chars)`);
   } catch (e) {
     setStatus("error: " + e.message);
   }
@@ -495,7 +504,7 @@ async function doRecord() {
     selectStep(CUR_STEP);
     document.getElementById("main").classList.add("record-open");
     $("btn-dl").disabled = false;
-    setStatus("record ready — click modules or inner stages to inspect them");
+    setStatus(`record ready on ${$("backend").value} — click modules or inner stages to inspect them`);
   } catch (e) {
     setStatus("error: " + e.message);
   }
