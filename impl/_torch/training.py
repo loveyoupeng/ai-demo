@@ -64,7 +64,7 @@ def _log_grad_stats(grads: dict[str, torch.Tensor]) -> None:
     """Log per-layer gradient L2 norms for debugging vanishing/exploding gradients.
 
     Extracts layer index from keys matching the ``*.layers.<N>.*`` pattern
-    (e.g. ``stack.layers.0.mha.Wq.weight``).
+    (e.g. ``model.layers.0.self_attn.q_proj.weight``).
 
     Parameters
     ----------
@@ -138,7 +138,8 @@ def train_step(
     loss.backward()
     logger.debug("train_step() backward complete")
 
-    # 4. Clip gradients to stabilize training (especially with Post-Norm)
+    # 4. Clip gradients to stabilize training (the model is pre-norm;
+    #    clipping is a second safety net)
     grads: dict[str, torch.Tensor] = {}
     for name, param in model.named_parameters():
         if param.grad is not None:

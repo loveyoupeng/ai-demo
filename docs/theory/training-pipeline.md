@@ -25,7 +25,7 @@ for x in batch:
 torch-text (`the cat', a.`), which teaches grammar but nothing someone would
 *do* with it.
 
-**Where it lives:** `scripts/train.py` (all backends; `--synth` adds a
+**Where it lives:** `scripts/train.py` (all backends; `--synthetic` adds a
 synthetic generator so (a) and (b) sums can be measured identically).
 
 ## Stage 2 — SFT (Supervised Fine-Tuning)

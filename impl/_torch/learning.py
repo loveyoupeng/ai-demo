@@ -103,9 +103,9 @@ def _attn_record(
     scores, causal mask, softmax weights, and context are recomputed with
     direct torch ops on the model's own weights — the display path for the
     record (the fused SDPA call exposes none of these).
-    # PROD: production path is F.scaled_dot_product_attention inside
-    MultiHeadAttention.forward — the fused call is the default and unchanged.
     """
+    # PROD: production path is F.scaled_dot_product_attention inside
+    # MultiHeadAttention.forward — the fused call is the default and unchanged.
     B, S, _ = ln1_out.shape
     H, G, hd = attn.n_heads, attn.n_groups, attn.head_dim
 
@@ -190,10 +190,10 @@ def _attn_step_record(
     first, so the displayed scores/weights are exactly what produced the
     output. Nothing is masked in decode: every cached row is in the past of
     the new token, so the causal mask is all zeros and the row spans
-    positions 1..t (the whole cache).
-    # PROD: production path is F.scaled_dot_product_attention inside
-    MultiHeadAttention.forward — the fused call is the default and unchanged.
+    positions 0..t−1 (the whole cache).
     """
+    # PROD: production path is F.scaled_dot_product_attention inside
+    # MultiHeadAttention.forward — the fused call is the default and unchanged.
     B = x.shape[0]
     H, G, hd = attn.n_heads, attn.n_groups, attn.head_dim
     positions = torch.tensor([position], dtype=torch.long, device=x.device)  # (1,)

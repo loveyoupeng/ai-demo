@@ -112,14 +112,6 @@ class TestValidation:
         with pytest.raises(AssertionError):
             TransformerConfig(top_k=8)
 
-    def test_invalid_quant_type(self):
-        with pytest.raises(AssertionError):
-            TransformerConfig(quant_type="invalid")
-
-    def test_invalid_kvcache_type(self):
-        with pytest.raises(AssertionError):
-            TransformerConfig(kvcache_type="invalid")
-
     def test_rope_dim_zero_valid(self):
         cfg = TransformerConfig(rope_dim=0)
         assert cfg.rope_dim == 0
@@ -131,7 +123,7 @@ class TestValidation:
 
 
 class TestQueryMethods:
-    """is_gqa, has_moe, has_quantized_cache."""
+    """is_gqa, has_moe."""
 
     def test_is_gqa_true(self):
         cfg = TransformerConfig(n_groups=2, n_heads=8)
@@ -148,22 +140,6 @@ class TestQueryMethods:
     def test_has_moe_false(self):
         cfg = TransformerConfig(n_experts=1, top_k=1)
         assert cfg.has_moe() is False
-
-    def test_has_quantized_cache_none(self):
-        cfg = TransformerConfig(quant_type="none")
-        assert cfg.has_quantized_cache() is False
-
-    def test_has_quantized_cache_1_bit(self):
-        cfg = TransformerConfig(quant_type="1-bit")
-        assert cfg.has_quantized_cache() is True
-
-    def test_has_quantized_cache_2_bit(self):
-        cfg = TransformerConfig(quant_type="2-bit")
-        assert cfg.has_quantized_cache() is True
-
-    def test_has_quantized_cache_4_bit(self):
-        cfg = TransformerConfig(quant_type="4-bit")
-        assert cfg.has_quantized_cache() is True
 
 
 class TestSerialization:
@@ -191,10 +167,6 @@ class TestSerialization:
             "top_k",
             "expert_dim",
             "n_shared_experts",
-            "max_length",
-            "quant_type",
-            "kvcache_type",
-            "load_balance_loss",
             "seed",
             "norm_eps",
         }
@@ -224,6 +196,20 @@ class TestSerialization:
         assert data["head_dim"] == 64
         assert data["k_dim"] == 128
         assert data["v_dim"] == 128
+
+    def test_from_dict_ignores_legacy_knobs(self):
+        """Old config.json files carry quant_type/kvcache_type/max_length/
+        load_balance_loss keys; they must load cleanly after the knobs were
+        removed from TransformerConfig."""
+        data = {
+            "vocab_size": 512,
+            "max_length": 2048,
+            "quant_type": "none",
+            "kvcache_type": "naive",
+            "load_balance_loss": 0.0,
+        }
+        cfg = TransformerConfig.from_dict(data)
+        assert cfg.vocab_size == 512
 
 
 class TestFrozen:

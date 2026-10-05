@@ -15,8 +15,12 @@ difference is the data.
 Usage::
 
     trainer = TorchSFTTrainer(model, device="cpu", lr=1e-3)
-    loss = trainer.train_step(batch)          # one optimizer step
-    # batch: {"input_ids": Tensor, "target_ids": Tensor, "mask": Tensor}
+    loss = trainer.train_step(input_ids, target_ids, response_mask)  # one optimizer step
+    # input_ids (B, S) int64; target_ids (B, S) int64; response_mask (B, S) bool
+
+Note: response masking is baked into ``target_ids`` via ``IGNORE_INDEX``;
+``response_mask`` is carried through for the caller's bookkeeping
+(informational — the loss never reads it).
 """
 
 from __future__ import annotations
@@ -37,9 +41,9 @@ class TorchSFTTrainer:
     makes the contract explicit in code.
     """
 
-    # The dataset starts with the prompt; response costs are masked. The
-    # "baseline" (pre-training) treats every position as a label. SFT sets
-    # them to this constant.
+    # The dataset starts with the prompt; response positions carry the only
+    # graded labels. The "baseline" (pre-training) treats every position as a
+    # label. SFT sets the prompt positions to this constant.
     IGNORE_INDEX = -100
 
     def __init__(self, model: TorchModel, device: str = "cpu", lr: float = 1e-3, weight_decay: float = 0.01) -> None:

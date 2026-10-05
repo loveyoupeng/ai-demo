@@ -68,35 +68,6 @@ def _compute_routing_weights(
     return routing_weights
 
 
-def _top_k_routing(
-    routing_weights: torch.Tensor,
-    k: int,
-) -> torch.Tensor:
-    """Apply top-k selection and renormalization to routing weights.
-
-    Parameters
-    ----------
-    routing_weights : torch.Tensor, shape (batch, seq_len, n_experts)
-        Softmax routing weights.
-    k : int
-        Number of top experts to select per token.
-
-    Returns
-    -------
-    torch.Tensor, shape (batch, seq_len, n_experts)
-        Top-k selected and renormalized routing weights.
-
-    """
-    n_experts = routing_weights.shape[-1]
-    if k < n_experts:
-        top_k_values, _ = torch.topk(routing_weights, k, dim=-1)  # [B, S, k]
-        threshold = top_k_values.min(dim=-1, keepdim=True).values  # [B, S, 1]
-        routing_weights = routing_weights * (routing_weights >= threshold).float()
-        renorm_sum = routing_weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)  # [B, S, 1]
-        routing_weights = routing_weights / renorm_sum
-    return routing_weights
-
-
 def mixture_of_experts(
     x: torch.Tensor,
     W_router: torch.Tensor,
@@ -117,9 +88,9 @@ def mixture_of_experts(
     bias : torch.Tensor, shape (n_experts,)
         Router bias.
     W1 : torch.Tensor, shape (n_experts, embed_dim, ff_dim)
-        First projection weights for each expert.
+        Gate projection weights for each expert (SiLU applies to ``x @ W1``).
     W3 : torch.Tensor, shape (n_experts, embed_dim, ff_dim)
-        Gating projection weights for each expert.
+        Up projection weights for each expert (linear, multiplied by the gate).
     W2 : torch.Tensor, shape (n_experts, ff_dim, embed_dim)
         Output projection weights for each expert.
     k : int, optional

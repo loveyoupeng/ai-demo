@@ -172,7 +172,6 @@ class TestLoadSaveRoundTrip:
             n_experts=4,
             top_k=2,
             expert_dim=0,
-            max_length=2048,
             seed=42,
         )
 
@@ -191,7 +190,6 @@ class TestLoadSaveRoundTrip:
                 "n_experts",
                 "top_k",
                 "expert_dim",
-                "max_length",
                 "seed",
             ]:
                 assert getattr(loaded, attr) == getattr(original, attr)

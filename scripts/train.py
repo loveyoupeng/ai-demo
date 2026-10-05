@@ -10,18 +10,11 @@ Usage:
     # Train PyTorch model with custom architecture
     uv run python scripts/train.py --backend torch --n_layers 2 --embed_dim 128 --n_experts 2
 
-    # Train NumPy from config file
-    uv run python scripts/train.py --config resource/models/config.json --backend numpy
-
     # Train with synthetic data (no dataset download)
     uv run python scripts/train.py --synthetic --backend torch --epochs 3
 
     # Save to custom directory
     uv run python scripts/train.py --backend torch --save_dir /tmp/my_model --seed 42
-
-Environment variables:
-    TORCH_N_LAYERS, TORCH_EMBED_DIM, etc. — override defaults for PyTorch/Triton/CUDA
-    NPY_N_LAYERS, NPY_EMBED_DIM, etc.      — override defaults for NumPy
 """
 
 from __future__ import annotations
@@ -55,24 +48,17 @@ def create_argparser() -> argparse.ArgumentParser:
         description="Train a decoder-only transformer model.",
         epilog="""
 examples:
-  # Train with defaults (reads config.json or env vars)
+  # Train with defaults
   %(prog)s
 
   # Train PyTorch model, custom architecture
   %(prog)s --backend torch --n_layers 2 --embed_dim 128 --n_experts 2
-
-  # Train NumPy from config file + environment only
-  %(prog)s --config resource/models/config.json --backend numpy
 
   # Train on synthetic data (no dataset download)
   %(prog)s --synthetic --backend torch --epochs 3
 
   # Save to custom directory
   %(prog)s --backend torch --save_dir /tmp/my_model --seed 123
-
-  # Environment variable equivalent (no CLI args needed except --backend)
-  export TORCH_EMBED_DIM=256; export TORCH_N_LAYERS=4
-  %(prog)s --backend torch
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -107,7 +93,6 @@ examples:
     parser.add_argument("--n_experts", default=4, type=int, help="Number of MoE experts (default: 4)")
     parser.add_argument("--top_k", default=2, type=int, help="Number of experts activated per token (default: 2)")
     parser.add_argument("--expert_dim", default=0, type=int, help="FFN inner dim — 0=4x embed (default: 0)")
-    parser.add_argument("--max_length", default=512, type=int, help="Max generation length (default: 512)")
 
     # -- Training --
     parser.add_argument("--epochs", default=5, type=int, help="Number of training epochs (default: 5)")
@@ -157,7 +142,6 @@ def build_config(args: argparse.Namespace, backend: str) -> dict:
         "n_experts",
         "top_k",
         "expert_dim",
-        "max_length",
         "seed",
     ]:
         val = getattr(args, key, None)
@@ -198,7 +182,6 @@ def _config_from_dict(config: dict) -> TransformerConfig:
         n_experts=config.get("n_experts", 4),
         top_k=config.get("top_k", 2),
         expert_dim=config.get("expert_dim", 0),
-        max_length=config.get("max_length", 512),
         seed=config.get("seed", 42),
     )
 

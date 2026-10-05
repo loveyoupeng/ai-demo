@@ -10,13 +10,14 @@ Training loop:
         for batch in dataset:
             logits     = model.forward(input)        # (B, S, V)
             loss       = loss_fn.forward(logits, tgt) # scalar
-            grads      = model.backward(logits, tgt, inp)     # dict of params
+            grads      = model.backward(input_ids, targets)   # dict of params
             optimizer.step(params, grads)             # modifies params in-place
 """
 
 from __future__ import annotations
 
 import logging
+import re
 
 import numpy as np
 
@@ -189,8 +190,9 @@ def train_step(
     )
 
     # --- 3.5. Gradient clipping ----------------------------------------------
-    # Clip gradients by global L2 norm to stabilise training (especially
-    # with Post-Norm architecture).  Modified in-place.
+    # Clip gradients by global L2 norm to stabilise training (the model is
+    # pre-norm, which already helps; clipping is a second safety net).
+    # Modified in-place.
     logger.debug("train_step() gradient_clip max_norm=%f", max_norm)
     clip_gradients(grads, max_norm=max_norm)
     grad_norm = compute_gradient_norm(grads)
@@ -318,12 +320,8 @@ def clip_gradients(grads: dict[str, np.ndarray], max_norm: float) -> None:
         max_norm / global_norm,
     )
 
-    # Step 2: Scale all gradients uniformly toward max_norm
     # scaling_factor = max_norm / global_norm  (always < 1.0 here)
     # After scaling: global_norm' = global_norm * scaling_factor = max_norm
-    #
-    # For each gradient tensor g with shape (d₁, ..., dₙ):
-    #   g ← g * scaling_factor  → new shape (d₁, ..., dₙ) with same shape
     scaling_factor = max_norm / global_norm
 
     for grad in grads.values():
@@ -334,18 +332,21 @@ def clip_gradients(grads: dict[str, np.ndarray], max_norm: float) -> None:
 def _log_grad_stats(grads: dict[str, np.ndarray]) -> None:
     """Log per-layer gradient L2 norms for debugging vanishing/exploding gradients.
 
+    Extracts the layer index from keys matching the ``*.layers.<N>.*``
+    pattern (e.g. ``model.layers.0.self_attn.q_proj.weight``).
+
     Parameters
     ----------
     grads : dict[str, np.ndarray]
-        Gradient dictionary.  Keys follow the pattern like
-        ``blocks.0.Wq``, ``blocks.1.ln1_gamma``, etc.  Layer index is the
-        second segment of the dotted key (``key.split(".")[1]``).
+        Gradient dictionary with keys from ``model.get_all_parameters()``
+        (the ``shared.constants.Keys`` flat naming).
     """
     layer_norms: dict[int, float] = {}
+    pattern = re.compile(r"\.layers\.(\d+)\.")
     for key, grad in grads.items():
-        parts = key.split(".")
-        if len(parts) >= 2 and parts[1].isdigit():
-            layer_idx = int(parts[1])
+        match = pattern.search(key)
+        if match:
+            layer_idx = int(match.group(1))
             if layer_idx not in layer_norms:
                 layer_norms[layer_idx] = 0.0
             layer_norms[layer_idx] += float(np.sum(grad**2))

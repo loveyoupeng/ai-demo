@@ -49,14 +49,13 @@ class TestMoERouting:
     def test_top_k_zeros(self):
         """k=2 with 4 experts: exactly 2 weights per token should be non-zero."""
         skip_if_no_gpu()
-        from impl._triton.moe import _compute_routing_weights, _top_k_routing
+        from impl._triton.moe import _compute_routing_weights
 
         B, S, D, E, k = 2, 3, 16, 4, 2
         x = torch.randn(B, S, D, dtype=torch.float64, device="cuda")
         W_router = torch.randn(D, E, dtype=torch.float64, device="cuda")
         bias = torch.zeros(E, dtype=torch.float64, device="cuda")
-        full_weights = _compute_routing_weights(x, W_router, bias)
-        topk_weights = _top_k_routing(full_weights, k)
+        topk_weights = _compute_routing_weights(x, W_router, bias, k)
         # Non-zero count per token
         non_zero = (topk_weights > 1e-8).sum(dim=-1)  # [B, S]
         assert (non_zero == k).all(), f"Expected {k} non-zero per token, got {non_zero}"
@@ -65,14 +64,13 @@ class TestMoERouting:
     def test_top_k_renorm(self):
         """After top-k selection, remaining weights sum to 1."""
         skip_if_no_gpu()
-        from impl._triton.moe import _compute_routing_weights, _top_k_routing
+        from impl._triton.moe import _compute_routing_weights
 
         B, S, D, E, k = 3, 4, 16, 8, 3
         x = torch.randn(B, S, D, dtype=torch.float64, device="cuda")
         W_router = torch.randn(D, E, dtype=torch.float64, device="cuda")
         bias = torch.randn(E, dtype=torch.float64, device="cuda")
-        full_weights = _compute_routing_weights(x, W_router, bias)
-        topk_weights = _top_k_routing(full_weights, k)
+        topk_weights = _compute_routing_weights(x, W_router, bias, k)
         sums = topk_weights.sum(dim=-1)  # [B, S]
         torch.testing.assert_close(sums, torch.ones_like(sums), rtol=1e-10, atol=1e-10)
 

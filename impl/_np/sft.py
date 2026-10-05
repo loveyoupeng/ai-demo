@@ -16,11 +16,10 @@ loss — is *all* the math of SFT. Every other track mirrors this shape.
 
 Typical calls:
     >>> model = NumPyModel(cfg)
-    >>> params = model.get_all_parameters()  # the flat Keys dict
-    >>> nw, _, loss = sft_epoch(model, batches, lr=1e-3, params=params)
+    >>> n_tok, n_pos, loss = sft_epoch(model, batches, lr=1e-3)
 
-    # batches comes from scripts/train_dataset_to_batches() which uses
-    # SFTLoader from shared/sft_data.py.
+    # batches come from the SFTLoader in shared/sft_data.py, driven by
+    # scripts/sft.py.
 """
 
 from __future__ import annotations
@@ -72,7 +71,10 @@ def sft_step(
     # — masked loss only affects which parameters see a nonzero gradient.
     params = model.get_all_parameters()
     optimizer.step(params, grads)
-    model.load_from_numpy_dict(params)  # push updated weights back into the model
+    # get_all_parameters() returns live array references (registry bind), so
+    # optimizer.step() already mutated the model's own memory; this reload is
+    # a self-copy and exists only to keep the parameter contract explicit.
+    model.load_from_numpy_dict(params)
     return float(loss)
 
 
@@ -84,8 +86,8 @@ def sft_epoch(
 ) -> tuple[int, int, float]:
     """Run one full pass over every SFT batch and return progress counters.
 
-    Param updates happen in-place; we return two counters so the caller can
-    log a real number of optimizer step iterations:
+    Param updates happen in-place; we return three values so the caller can
+    log real progress numbers:
 
     Returns
     -------

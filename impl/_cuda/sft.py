@@ -19,7 +19,10 @@ positions).
 Usage::
 
     trainer = CudaSFTTrainer(model, lr=1e-3)
-    loss = trainer.train_step(batch)  # batch: input_ids, target_ids, mask
+    loss = trainer.train_step(input_ids, target_ids, response_mask)
+    # input_ids (B, S) int64; target_ids (B, S) int64; response_mask (B, S) bool
+    # response_mask is informational — the mask lives in target_ids
+    # (IGNORE_INDEX = -100 at prompt positions).
 """
 
 from __future__ import annotations
@@ -51,7 +54,8 @@ class CudaSFTTrainer:
         The model's `forward` is what runs the CUDA kernels; the gradients it
         lands on are the ones attached to the parameter tensors we registered
         above.  ``grad`` accumulation happens on the tensors themselves — we
-        just zero it out before each step.
+        zero them out before each step (``p.grad = None`` below) and again
+        after the update (``optimizer.zero_grad()``).
         """
         for p in self._param_refs:
             p.grad = None

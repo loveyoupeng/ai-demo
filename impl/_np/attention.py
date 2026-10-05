@@ -204,19 +204,21 @@ class MultiHeadAttention:
             Naive (quantize=False): {"k": (B, G, t, hd), "v": (B, G, t, hd)}
                 K/V *per group* (GQA keeps the cache small: G heads, not H).
             TurboQuant (quantize=True):
-                {"bits_k": (B, H, t, hd) int8, "scales_k": (B, H, t, hd) float,
-                 "bits_v": (B, H, t, hd) int8, "scales_v": (B, H, t, hd) float}
-                1-bit compressed K/V *per head* (H heads, after GQA repeat).
+                {"bits_k": (B, H, t, hd) int8, "scales_k": (B, H, t, 1) float,
+                 "bits_v": (B, H, t, hd) int8, "scales_v": (B, H, t, 1) float}
+                1-bit compressed K/V *per head* (H heads, after GQA repeat);
+                each scale is one scalar per (batch, head) per token-write.
             The dict is mutated in place: the new token's K/V are appended
             at the correct position before attention runs.
 
         quantize: if False (default), append the full-precision K/V (naive
-            path, exact). If True, 1-bit quantize the new K/V (sign + per-
-            channel scale), append the (bits, scale) pair, then dequantize
+            path, exact). If True, 1-bit quantize the new K/V (sign bits plus
+            one scalar scale per (batch, head) per token-write), append the (bits, scale) pair, then dequantize
             the full cached tensor before attention — so the step attends
             against the lossy cache. This is the documented TurboQuant
             compression experiment; it degrades outputs (see the parity-
-            budget test) while shrinking the KV memory by ~32x.
+            budget test) while shrinking the KV memory by ≈4x (int8 bits
+            plus one float scale per (batch, head) per token-write).
 
         Returns: out (B, 1, D) — the attention output for the new token.
 
@@ -329,7 +331,8 @@ class MultiHeadAttention:
         x: (B, H, 1, hd) — one token's K or V (after GQA repeat).
         Returns:
             bits: (B, H, 1, hd) int8 — 1 for positive, 0 for non-positive.
-            scale: (B, H, 1, hd) float — per-channel mean(|x|) per (B, H).
+            scale: (B, H, 1, 1) float — one scalar per (batch, head) per
+                token-write: mean(|x|) over the (1, hd) token vector.
         Dequantize: bits.astype(float) * scale.
         """
         absolute_values = np.abs(x)  # (B, H, 1, hd)

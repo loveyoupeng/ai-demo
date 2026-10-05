@@ -13,7 +13,7 @@ Usage:
     uv run python -m scripts.learning --model resource/models/torch_real --port 9000
     uv run python -m scripts.learning --host 0.0.0.0           # allow LAN access
 
-If the default demo checkpoint is missing it is trained first (~100 s).
+If the default demo checkpoint is missing it is trained first (a few minutes).
 """
 
 from __future__ import annotations
@@ -50,11 +50,13 @@ def _port_free(host: str, port: int) -> bool:
 
 
 def _ensure_demo_model(model_dir: str) -> None:
-    """Train the learning-demo checkpoint if it does not exist yet."""
+    """Train the demo-model pipeline (train_demo_model_v2) if the checkpoint
+    does not exist yet — it writes resource/models/{learning_base,
+    learning_sft,learning_tool} in one run."""
     if (Path(model_dir) / "model.npz").is_file():
         return
-    print(f"demo checkpoint not found at {model_dir} — training it first (~100s)...")
-    subprocess.run([sys.executable, "-m", "scripts.train_demo_model"], check=True)
+    print(f"demo checkpoint not found at {model_dir} — training the demo pipeline first (a few minutes)...")
+    subprocess.run([sys.executable, "-m", "scripts.train_demo_model_v2"], check=True)
 
 
 def main() -> int:
@@ -69,7 +71,7 @@ def main() -> int:
         "--host",
         type=str,
         default="0.0.0.0",
-        help="Interface to bind (default 127.0.0.1; 0.0.0.0 allows local-network access)",
+        help="Interface to bind (default 0.0.0.0, all interfaces — allows local-network access)",
     )
     parser.add_argument(
         "--backend",
@@ -82,7 +84,7 @@ def main() -> int:
         "--model",
         type=str,
         default=DEFAULT_MODEL,
-        help="Checkpoint directory (default: the learning demo model)",
+        help="Checkpoint directory (default: the SFT learning_tool checkpoint)",
     )
     parser.add_argument(
         "--compare",

@@ -36,6 +36,43 @@ def forward(self, x: np.ndarray, positions: np.ndarray | None = None) -> np.ndar
     """
 ```
 
+## NumPy-track class docstrings (extension)
+
+NumPy-track operator classes (the math reference) add three teaching elements
+to the numpydoc skeleton — see `impl/_np/rope.py` → `RoPE` for the canonical
+example:
+
+1. A bold-marked **Intuition** paragraph (or an equivalent
+   formula-with-*why* block) right after the summary — the math stated, then
+   one paragraph on why it has the property the model needs.
+2. Custom `Forward` / `Backward` sections (numpydoc-style headers with
+   `-------` underlines) that give the input/output shapes as short prose
+   lines, followed by a "Step shapes:" list — one line per intermediate,
+   `name : shape — meaning`.
+3. Formula references cite the paper inline in the summary
+   (`Su et al., 2021, "RoFormer"`).
+
+```python
+class RoPE:
+    """Rotary Position Embedding (Su et al., 2021, "RoFormer").
+
+    ...formula block + one intuition paragraph...
+
+    Forward
+    -------
+    x : (B, S, H, D)   (query or key tensor)
+
+    Step shapes:
+        freqs   : (D//2,)         — one theta per pair
+        angles  : (B, S, D//2)    — pos * theta per pair
+        output  : re-assembled to (B, S, H, D)
+
+    Backward
+    --------
+    R is orthonormal, so its inverse is its transpose: ...
+    """
+```
+
 ## Shape convention
 
 Every line that performs a matrix operation (projection, matmul, reshape,
@@ -43,16 +80,15 @@ transpose, element-wise op that changes the logical shape) carries a
 trailing comment showing the input and output shapes:
 
 ```python
-# (B, S, D) @ (D, H*hd) → (B, S, H*hd)
-q = x @ self.q_proj
+q = x @ self.q_proj  # (B, S, D) @ (D, H*hd) → (B, S, H*hd)
 # (B, S, H*hd) → (B, H, S, hd)
 q = q.view(B, S, H, hd).permute(0, 2, 1, 3)
 ```
 
-The arrow `→` separates input from output. When the line is a single
-expression, the comment goes above the line. When the line is an
+The arrow `→` separates input from output. When the line is an
 assignment, the comment goes on the same line (trailing) if it fits, or
-above the line if it doesn't.
+above the line if it doesn't. When a single expression is split as a
+statement (not an assignment), the comment goes above the line.
 
 For the NumPy track (the math reference), the shape comments are **required**
 — they are the primary teaching artifact. For the other tracks, they are

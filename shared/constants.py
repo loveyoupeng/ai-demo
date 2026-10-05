@@ -79,8 +79,6 @@ class Keys:
     the key scheme has exactly one definition.
     """
 
-    PREFIX: str = "model"
-
     @staticmethod
     def embed() -> str:
         """Token embedding table key — shape (vocab_size, embed_dim)."""

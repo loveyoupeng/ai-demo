@@ -5,9 +5,10 @@ equivalent backends**: NumPy (pure manual math, the teaching reference),
 PyTorch (the production idiom), Triton (GPU kernels over a PyTorch model),
 and CUDA (bare-metal NVRTC kernels). All four tracks share the same
 architecture, the same key scheme, and the same config — a model trained on
-one track loads and runs on any other. A **learning mode** (NumPy or PyTorch
-backend) adds an interactive web page that visualizes the architecture, shows
-every intermediate tensor of an inference, and exports full inference records.
+one track loads and runs on any other. A **learning mode** adds an
+interactive web page (any of the four backends, selected in-page) that
+visualizes the architecture, shows every intermediate tensor of an
+inference, and exports full inference records.
 
 ## What each track teaches
 
@@ -41,8 +42,8 @@ stages — pre-train on TinyStories (`learning_base`), fine-tune on code
 instructions (`learning_sft`), fine-tune on tool-call JSON (`learning_tool`).
 The web page's compare tab loads all three, so you can watch identical
 architecture + initialization diverge purely from fine-tuning data. A smaller
-char-level MoE demo (`learning_demo`, D=8, V=20) exists for inspecting MoE
-internals; below is the **default** model.
+char-level MoE demo (`learning_demo`, D=8, V=20 — the legacy pre-SFT demo)
+exists for inspecting MoE internals; below is the **default** model.
 
 | Hyperparameter | Value | Choice & why |
 | --- | --- | --- |
@@ -88,7 +89,8 @@ Thick `==>` edges are the residual stream's skip connections; the two norms
 read *copies* (`x̂`, `ĥ`) — the stream itself is never normalized. At
 generation time each block additionally keeps a K/V cache (prefill writes the
 whole prompt, each decode appends one row), but the math above is unchanged —
-see `impl/_np/kv_cache.py`.
+see `NumPyModel.make_cache` / `forward_prefill` / `forward_step` in
+`impl/_np/model.py`.
 
 ### The math and the intuition, per component
 
@@ -129,20 +131,22 @@ vector wherever it sits. Order enters later, inside attention, via RoPE.
   `backward(dout, x) -> (dinput, dparams)`; `check_model_gradients` verifies
   it against finite differences (float64, ~1e-10, MoE top-k kink-aware).
 - **Cross-backend parity**: three-tier tolerance policy (see AGENTS.md rule
-  2); 42 cross-backend tests cover dense/GQA/MoE parity, GPU parity, and a
-  3-way equivalence demo; `scripts.verify_equivalence` runs 6 end-to-end
+  2); 49 cross-backend tests cover dense/GQA/MoE parity, GPU parity, and a
+  3-way equivalence demo; `scripts.verify_equivalence` runs 7 end-to-end
   scenarios.
 - **Checkpoint interchange**: one flat-dict key scheme
   (`shared.constants.Keys`, HF-Llama naming) + a parameter registry
   (`shared/registry.py`) that validates shape and key-set on load
   (stale checkpoints fail fast).
-- **Learning mode** (NumPy or PyTorch backend): `scripts/learning.py
-  [--backend numpy|torch]` hosts a web page (stdlib HTTP server, no
-  dependencies) with prompt + generation, an architecture diagram with
-  flow navigation (click a node to light up its predecessors/successors) and
-  per-block numbers, and downloadable JSON inference records of every
-  intermediate tensor. Both record adapters emit the same JSON shapes, so
-  the page consumes either backend interchangeably.
+- **Learning mode** (all four backends): `scripts/learning.py` hosts a web
+  page (stdlib HTTP server, no dependencies) with prompt + generation, an
+  architecture diagram with flow navigation (click a node to light up its
+  predecessors/successors) and per-block numbers, and downloadable JSON
+  inference records of every intermediate tensor. The page runs records on
+  all four backends via an in-page dropdown; the CLI `--backend numpy|torch`
+  only picks which track the startup load materializes. All record adapters
+  emit the same JSON shapes, so the page consumes any backend
+  interchangeably.
 - **Real-data training**: TinyStories (GPT-2 BPE, vocab 50,257) dataset
   pipeline in `shared/dataset.py`, plus a char-level tokenizer for the tiny
   demo model; unified train/infer scripts for all four backends.
@@ -185,11 +189,12 @@ uv run python -m scripts.infer --model resource/models/torch_real/ --backend tor
 ### Learning mode (web page)
 
 ```bash
-# Serves http://127.0.0.1:8080; auto-trains the demo model first run (~100 s)
+# Serves http://0.0.0.0:8080 by default; a first run with no checkpoints
+# bootstraps them via scripts.train_demo_model_v2
 uv run python -m scripts.learning
 
-# Backend selects which track materializes the model: numpy [default] or
-# torch; port/model overridable
+# The page runs all four backends via its in-page dropdown; --backend only
+# picks the startup load (numpy [default] or torch); port/model overridable
 uv run python -m scripts.learning --backend torch
 uv run python -m scripts.learning --port 9000 --model resource/models/torch_real
 
@@ -198,8 +203,8 @@ uv run python -m scripts.learning --port 9000 --model resource/models/torch_real
 # "The learning-mode example model" above)
 uv run python -m scripts.train_demo_model_v2
 
-# Or build the tiny char-level MoE demo (D=8, H=4, L=3, E=3+1 shared, V=20)
-# and serve it explicitly via --model
+# Or build the legacy char-level MoE demo (D=8, H=4, L=3, E=3 routed +
+# n_shared_experts=1, V=20) and serve it explicitly via --model
 uv run python -m scripts.train_demo_model
 uv run python -m scripts.train_demo_model --backend cuda   # GPU backends too
 uv run python -m scripts.learning --model resource/models/learning_demo
@@ -212,7 +217,7 @@ uv run python -m scripts.learning --model resource/models/learning_demo
 uv run python -m scripts.train --backend numpy|torch|triton|cuda
 
 # Options: --synthetic (no dataset), --n_layers, --embed_dim, --n_experts,
-# --save_dir, --config resource/models/config.json, ...
+# --save_dir, ...
 uv run python -m scripts.train --backend torch --synthetic --epochs 3
 ```
 
@@ -272,37 +277,44 @@ uv run pytest tests/ -q -m "not gpu"
 
 ```text
 impl/
-├── _np/         # NumPy track (math reference; analytic backward; learning mode + web/)
-├── _torch/      # PyTorch track (production idiom; autograd + SDPA)
-├── _triton/     # Triton track (kernels over a PyTorch model; flash_attn.py)
-├── _cuda/       # CUDA track (NVRTC kernels)
+├── _np/         # NumPy track (math reference; analytic backward; sft.py; learning mode + web/)
+├── _torch/      # PyTorch track (production idiom; autograd + SDPA; sft.py; learning.py)
+├── _triton/     # Triton track (kernels over a PyTorch model; attn.py, flash_attn.py, ffn.py, moe.py)
+├── _cuda/       # CUDA track (NVRTC kernels; sft.py; learning.py)
 shared/
 ├── config.py    # TransformerConfig (single source of truth)
 ├── constants.py # Keys scheme + Attn/LayerNorm/Mlp constants
 ├── registry.py  # ParameterRegistry (checkpoint format owner)
 ├── checkpoint.py# save/load (config.json + model.npz)
-├── init.py      # canonical cross-backend weight initialization
+├── generator.py # single deep TextGenerator over the KV-step interface
+├── sft_data.py  # SFT dataset helpers (prompt-masked targets)
 ├── tokenizer.py # GPT-2 BPE + char-level tokenizers
 ├── dataset.py   # TinyStories pipeline
-├── config_utils.py  # CLI > env > config file > defaults
 └── utils/logger_setup.py
 docs/
 ├── specs/architecture-fixes.md   # Spec + progress
+├── theory/transformer-walkthrough.md  # Forward-pass tour
+├── theory/training-pipeline.md   # Pre-train → SFT → tool pipeline
 ├── seam_triton_to_torch.md       # Documented shared seam
 ├── docstring_style.md            # numpydoc + shape convention
 ├── adr/0001-gated-residual-abandonment.md
+├── adr/0002-shared-expert-moe.md
 └── design.md
 scripts/
 ├── train.py               # Training loop (all backends)
 ├── infer.py               # Inference (all backends)
 ├── verify_equivalence.py  # 7-scenario parity check
 ├── learning.py            # learning-mode web page server
+├── sft.py                 # SFT entry point (pre/post/prepost stages)
+├── train_tokenizer.py     # BPE tokenizer trainer
+├── download_sft_data.py   # SFT dataset fetcher
 ├── train_real_tinystories.py
-├── train_demo_model.py    # learning-mode demo model
+├── train_demo_model.py    # legacy char-level MoE demo model
+├── train_demo_model_v2.py # learning_base/_sft/_tool pipeline
 └── download_tinystories.py
 tests/
 ├── unit/           # Per-track unit tests + shared/root tests
-└── cross_backend/  # Parity tests (dense/GQA/MoE, GPU, 3-way; 43 tests)
+└── cross_backend/  # Parity tests (dense/GQA/MoE, GPU, 3-way; 49 tests)
 resource/           # git-ignored: TinyStories data + model checkpoints
 ```
 

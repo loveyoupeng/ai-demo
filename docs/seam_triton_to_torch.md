@@ -14,10 +14,17 @@ family" tracks share the same model skeleton so they cannot drift.
 |---|---|---|
 | `impl._torch.layers.RoPE` | `impl/_triton/transformer.py:20` | RoPE is a simple element-wise rotation; kernelizing it would not buy enough to justify a second implementation. The Triton track reuses the PyTorch reference so the math is bit-identical across the two torch-family tracks. |
 
-That is the *only* cross-track import. Everything else in the Triton track is
-either Triton kernels (`attn.py`, `rope.py`, `layernorm.py`, `activation.py`)
-or plain PyTorch wiring (`transformer.py`, `model.py`, `inference.py`,
-`training.py`).
+That is the *only* runtime cross-track import. Everything else in the Triton
+track is either Triton kernels (`attn.py`, `rope.py`, `layernorm.py`,
+`ffn.py`, `moe.py`, `flash_attn.py`) or plain
+PyTorch wiring (`transformer.py`, `model.py`, `inference.py`, `training.py`,
+`sft.py`, `learning.py`, `cli.py`).
+
+**Documentation-only carve-out:** `impl/_triton/learning.py` has type-only
+(`TYPE_CHECKING`) imports of the NumPy track's record TypedDicts
+(`impl._np.learning`) — they exist so the Triton record adapter documents
+that it emits the same JSON shapes; they are never evaluated at runtime and
+are not runtime coupling.
 
 ## Why a seam and not a shared module
 

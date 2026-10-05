@@ -33,10 +33,3 @@ def test_import_operator_modules_succeeds() -> None:
         assert callable(cls)
     assert callable(xavier_uniform)
     assert callable(CrossEntropyLoss)
-
-
-def test_import_utils_succeeds() -> None:
-    """Verify the impl._np.utils module is importable."""
-    import impl._np.utils
-
-    assert hasattr(impl._np.utils, "initialize_linear")

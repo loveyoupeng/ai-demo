@@ -61,16 +61,19 @@ class Embedding(nn.Module):
 class RMSNorm(nn.Module):
     """Root Mean Square Layer Normalization (Zhang & Sennrich, 2019).
 
-    out = x / sqrt(mean(x^2, dim=-1, keepdim=True) + eps) * gamma
+        out = x / sqrt(mean(x^2, dim=-1, keepdim=True) + eps) * weight
 
-    No mean-centering (unlike LayerNorm); each row is scaled to unit
-    root-mean-square, then scaled per-dimension by the learned gain ``gamma``
-    (D,), initialized to ones.
+    eps sits INSIDE the sqrt, matching the NumPy reference track
+    (impl/_np/layernorm.py) and the Triton/CUDA kernels exactly.
+
+    No mean-centering (unlike LayerNorm); each row is scaled by its
+    root-mean-square, then scaled per-dimension by the learned gain
+    ``weight`` (D,), initialized to ones.
 
     Input: (..., D)  →  Output: (..., D)
     """
 
-    __slots__ = ("gamma", "eps")
+    __slots__ = ("weight", "eps")
 
     def __init__(self, embed_dim: int, eps: float = 1e-6) -> None:
         super().__init__()
@@ -81,7 +84,7 @@ class RMSNorm(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply RMSNorm. x: (..., D) → out: (..., D)."""
         # x**2: (..., D); mean(x**2, dim=-1): (..., 1)
-        rms = torch.sqrt(torch.mean(x * x, dim=-1, keepdim=True)) + self.eps  # (..., 1)
+        rms = torch.sqrt(torch.mean(x * x, dim=-1, keepdim=True) + self.eps)  # (..., 1)
         return x / rms * self.weight  # (..., D)
 
 

@@ -21,8 +21,9 @@ class DecoderStack:
 
     out = block_{n-1}( ... block_1(block_0(x)) ...)
 
-    x: (B, S, D) → out: (B, S, D). Each block gets a distinct seed offset so
-    the layers do not start with identical weights.
+    x: (B, S, D) → out: (B, S, D). Every block draws from the SAME frozen
+    ``config.seed``, so identically-shaped parameters initialize identically
+    across layers; training is what differentiates them.
 
     Backward: run the blocks' backwards in *reverse* order, threading the
     gradient from the last block back to the input.

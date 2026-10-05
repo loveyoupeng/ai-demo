@@ -107,8 +107,8 @@ class AdamW:
             # Initialize moment estimates on first visit
             if name not in self.m:
                 # m[name] and v[name] start at zero arrays of same shape as param
-                # Shape: param.shape — e.g. (embed_dim,) for embeddings,
-                #        (n_layers, n_heads, head_dim) for attention weights, etc.
+                # Shape: param.shape — e.g. (V, D) for the embedding table,
+                #        (D, H·hd) for per-layer attention projections, etc.
                 self.m[name] = np.zeros_like(param, dtype=np.float64)
                 self.v[name] = np.zeros_like(param, dtype=np.float64)
 

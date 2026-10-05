@@ -217,7 +217,6 @@ class TestGenerateSingle:
             "n_experts": 2,
             "top_k": 1,
             "expert_dim": 0,
-            "max_length": 128,
             "rope_dim": 0,
             "seed": 42,
         }
@@ -262,7 +261,6 @@ class TestGenerateSingle:
             "n_experts": 2,
             "top_k": 1,
             "expert_dim": 0,
-            "max_length": 128,
             "rope_dim": 0,
             "seed": 42,
         }
@@ -307,7 +305,6 @@ class TestGenerateSingle:
             "n_experts": 2,
             "top_k": 1,
             "expert_dim": 0,
-            "max_length": 128,
             "rope_dim": 0,
             "seed": 42,
         }
@@ -350,7 +347,6 @@ class TestGenerateSingle:
             "n_experts": 2,
             "top_k": 1,
             "expert_dim": 0,
-            "max_length": 128,
             "rope_dim": 0,
             "seed": 42,
         }

@@ -22,7 +22,7 @@ Training: AdamW, lr=3e-3, gradient clipping 1.0, pre-shifted LM targets.
 Export: the standard checkpoint format (config.json + model.npz via
 shared.checkpoint) plus a ``vocab.json`` sidecar (the token string list) so
 that the learning server can encode user input and decode output. Any backend
-can load the result via `shared.load_checkpoint`.
+can load the result via `shared.checkpoint.load_checkpoint`.
 
 Usage:
     uv run python -m scripts.train_demo_model                 # numpy, CPU

@@ -63,39 +63,5 @@ def main() -> None:
     print(f"Full seq:   {bytes(generated_tokens).decode('utf-8', errors='replace')}")
 
 
-def text_to_tokens(text: str) -> list[int]:
-    """Convert text to token IDs using byte-level encoding.
-
-    Parameters
-    ----------
-    text : str
-        Input text string.
-
-    Returns
-    -------
-    tokens : list[int]
-        List of integer token IDs (one per UTF-8 byte).
-
-    """
-    return [b for b in text.encode("utf-8")]
-
-
-def text_from_tokens(token_ids: list[int]) -> str:
-    """Decode a list of token IDs back to text.
-
-    Parameters
-    ----------
-    token_ids : list[int]
-        List of integer token IDs (byte values 0-255).
-
-    Returns
-    -------
-    text : str
-        Decoded text string.
-
-    """
-    return bytes(token_ids).decode("utf-8", errors="replace")
-
-
 if __name__ == "__main__":
     main()

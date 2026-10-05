@@ -47,7 +47,8 @@ class CuDecoderStack:
     k : int, optional
         Number of top experts to activate per token (default: 2).
     rope_dim : int, optional
-        Number of head dimensions for RoPE (0 = disabled, default: 0).
+        Number of head dimensions for RoPE per ``TransformerConfig``
+        (0 = rotate ALL head dims, i.e. standard RoPE; default: 0).
 
     Attributes
     ----------

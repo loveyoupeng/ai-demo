@@ -306,9 +306,11 @@ class _RmsNormCudaFunction(torch.autograd.Function):
 
         grad_output = grad_outputs[0].view(N, D)
 
-        # RMSNorm gradient (standard derivation):
-        # d_x = gamma * inv_rms * (d_out - mean(d_out * x * inv_rms) * (x * inv_rms))
-        # where x * inv_rms is the normalized (before scaling)
+        # RMSNorm gradient, as implemented here (uses the gamma-SCALED d_out;
+        # this differs from the standard reference derivation — unifying the
+        # numerics with the other tracks is pending a ruling):
+        #   d_x = gamma * inv_rms * (d_out_scaled - mean(d_out_scaled * x_norm) * x_norm)
+        # where d_out_scaled = d_out * gamma and x_norm = x * inv_rms.
         inv_rms = 1.0 / torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + eps)
         x_norm = x * inv_rms  # normalized (before gamma scaling)
 
@@ -318,7 +320,7 @@ class _RmsNormCudaFunction(torch.autograd.Function):
         # mean(d_out_scaled * x_norm) — per-row mean
         mean_val = torch.mean(d_out_scaled * x_norm, dim=-1, keepdim=True)
 
-        # d_x = gamma * inv_rms * (d_out - mean(d_out * x_norm) * x_norm)
+        # d_x = gamma * inv_rms * (d_out_scaled - mean_val * x_norm)
         grad_input = gamma.unsqueeze(0) * inv_rms * (d_out_scaled - mean_val * x_norm)
 
         # Gradient for gamma: sum over all dimensions except last (feature dimension)
@@ -326,10 +328,9 @@ class _RmsNormCudaFunction(torch.autograd.Function):
         # grad_output is reshaped to (N, D) for backward computation
         # We must flatten normalized to match grad_output's (N, D) shape before multiplication
         normalized_flat = normalized.view(N, D)
-        if input.dim() == 2:
-            grad_gamma = torch.sum(grad_output * normalized_flat, dim=0)
-        else:  # input is 3D, sum over batch dimensions to get (D,)
-            grad_gamma = torch.sum(grad_output * normalized_flat, dim=0)
+        # Sum over every row (the reshape already folded any batch dims in);
+        # identical for 2D and 3D inputs.
+        grad_gamma = torch.sum(grad_output * normalized_flat, dim=0)
 
         return grad_input.view(ctx.original_shape) if input.dim() > 2 else grad_input, grad_gamma, None
 

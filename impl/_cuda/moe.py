@@ -235,6 +235,9 @@ def moe_forward(
     The CUDA kernel handles expert scoring (dot products) and weighted sum
     (indexed memory access), while PyTorch handles top-k routing.
 
+    NOTE: exercised by the unit tests only — the production path is
+    ``CuTransformerBlock._moe_forward`` (``impl/_cuda/block.py``).
+
     Parameters
     ----------
     tokens : torch.Tensor, shape (B, S, D)

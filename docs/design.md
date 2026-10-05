@@ -1,6 +1,6 @@
 # Design Document: Decoder-Only Transformer Learning Project
 
-**Date:** 2026-06-26 (last synced: 2026-09-19)
+**Date:** 2026-06-26 (last synced: 2026-10-05)
 **Goal:** Build a fully functional decoder-only transformer LLM in 4 equivalent implementations (NumPy, PyTorch, Triton, CUDA) for educational purposes.
 
 ## Track intent (doctrine)
@@ -30,7 +30,7 @@ Deliberate: every track owns `forward` + `load_from_numpy_dict` +
 track prefix (`NumPyModel`, `TorchModel`, `TritonModel`, `CUDAModel`).
 Known deltas, kept consciously:
 
-- The NumPy `TextGenerator` and `NaiveKVCache` skip the `NumPy…` prefix —
+- The NumPy `TextGenerator` skips the `NumPy…` prefix —
   that track is the reference, so its names are the unadorned canonical
   ones. The torch/triton/cuda generators are thin aliases over
   `shared/generator.py`'s generator (the single deep implementation), not
@@ -50,20 +50,10 @@ Known deltas, kept consciously:
 
 ## Architecture
 
-```text
-                    +----------+
-                    | PyTorch  |
-                    | Triton   |
-                    | CUDA     |
-                      |  |  |
-                      v  v  v
-              +-----------------+
-              |   Shared Config  |  (json + env vars)
-              +-----------------+
-                      |
-                 +----v----+
-                 |  NumPy   |  (reference/benchmark)
-                 +---------+
+```mermaid
+flowchart TD
+    GPU["PyTorch / Triton / CUDA tracks"] --> CFG["Shared Config + TransformerConfig<br/>(shared/config.py)"]
+    CFG --> NP["NumPy track<br/>(reference / benchmark)"]
 ```
 
 ### Weight Flow
@@ -83,43 +73,42 @@ Known deltas, kept consciously:
 project/
 ├── shared/           # Shared across backends: config, constants, checkpoint, data
 │   ├── config.py     # TransformerConfig (frozen dataclass, one per model)
-│   ├── config_utils.py # Unified config reader (CLI > env > file > defaults)
 │   ├── constants.py  # Keys — parameter-name constants (HF-Llama scheme)
 │   ├── registry.py   # ParameterRegistry: owner of the flat-dict checkpoint format
 │   ├── tokenizer.py  # GPT-2 BPE (primary) + char-level tokenizer for demos
 │   ├── dataset.py    # TinyStories loading → (input, target) batches
+│   ├── sft_data.py   # SFT dataset helpers (prompt-masked targets)
+│   ├── generator.py  # one deep TextGenerator over the KV-step interface
+│   │                 #   (torch/triton/cuda consume it; numpy keeps its own
+│   │                 #   teaching generator)
 │   └── checkpoint.py # save/restore helpers (config.json + model.npz + vocab.json)
 ├── impl/
 │   ├── _np/          # NumPy track (reference: hand-rolled math + backward)
 │   │   ├── embedding.py / layernorm.py / rope.py     # single-purpose components
-│   │   ├── attention.py  # MultiHeadAttention (GQA, KV cache, TurboQuant)
+│   │   ├── attention.py  # MultiHeadAttention (GQA, KV cache, inline TurboQuant)
 │   │   ├── ffn.py        # SwiGLU FFN
-│   │   ├── moe.py        # MixtureOfExperts (router + top-k experts)
+│   │   ├── moe.py        # MixtureOfExperts (router + top-k experts + shared experts)
 │   │   ├── block.py      # TransformerBlock (RMSNorm → attn → residual → ...)
 │   │   ├── stack.py      # DecoderStack (N blocks)
-│   │   ├── model.py      # NumPyModel (embedding → stack → final norm → lm_head)
+│   │   ├── model.py      # NumPyModel (embedding → stack → final norm → lm_head;
+│   │   │                 #   make_cache / forward_prefill / forward_step)
 │   │   ├── inference.py  # TextGenerator (greedy / sampled decoding)
-│   │   ├── training.py / optimizer.py / cross_entropy.py / gradcheck.py
+│   │   ├── training.py / optimizer.py / cross_entropy.py / sft.py / gradcheck.py
 │   │   ├── learning.py   # instrumented_forward + generate_with_records (records)
-│   │   ├── learning_server.py # learning-mode HTTP server (numpy/torch backends)
+│   │   ├── learning_server.py # learning-mode HTTP server
 │   │   └── web/          # the learning page (vanilla JS + KaTeX, no framework)
 │   ├── _torch/       # PyTorch track (production ops: F.scaled_dot_product_attention)
 │   │   ├── layers.py     # TorchModel + all nn.Module components
 │   │   ├── learning.py   # torch record adapter (same JSON shapes as the np one)
-│   │   └── inference.py / training.py / cross_entropy.py / turboquant_kv_cache.py
-│   ├── _triton/      # Triton GPU kernels (flash attention, etc.)
+│   │   └── inference.py / training.py / sft.py / cli.py
+│   ├── _triton/      # Triton GPU kernels (attn.py, flash_attn.py online softmax,
+│   │                 #   ffn.py, moe.py; transformer.py + learning.py + sft.py)
 │   ├── _cuda/        # CUDA bare-metal (kernels/, NVRTC compiler, per-track CLI)
 │   └── (per-track) cli.py entry points: uv run python -m impl._<track>.cli
-├── shared/
-│   ├── config.py / constants.py / registry.py  # keys + shape owner; bind()
-│   ├── generator.py  # one deep TextGenerator over the KV-step interface
-│   │                 #   (torch/triton/cuda consume it; numpy keeps its own
-│   │                 #   teaching generator)
-│   └── checkpoint.py / init.py / tokenizer.py / dataset.py
 ├── tests/
 │   ├── unit/         # per-backend unit tests (_np/, _torch/, _triton/, _cuda/) + shared
-│   └── cross_backend/ # parity tests between tracks (3-way, GPU parity)
-└── docs/             # design.md, docstring_style.md, adr/, specs/, task_plan.md
+│   └── cross_backend/ # parity tests between tracks (3-way, GPU parity; 49 tests)
+└── docs/             # design.md, docstring_style.md, adr/, specs/, theory/
 ```
 
 ---
@@ -173,8 +162,8 @@ project/
 ### Training
 
 - **Loss function**: Cross-entropy (label smoothing = 0.0)
-- **Optimizer**: AdamW (β1=0.9, β2=0.999, eps=1e-8)
-- **Scheduler**: Cosine annealing with warmup
+- **Optimizer**: AdamW (β1=0.9, β2=0.999, eps=1e-8), fixed learning rate
+  (no scheduler — learning-rate scheduling is deliberately out of scope)
 - **Gradient clipping**: Norm clipping (max_norm=1.0)
 - **Batch size**: Context-length chunks for next-token prediction (e.g., 32×256)
 - **Data pipeline**: Tokenizer → TokenizedDataset → DataLoader → forward → loss → step
@@ -183,15 +172,10 @@ project/
 
 - **Greedy decoding**: `argmax(logits)` → deterministic, best for testing
 - **Weighted sampling**: Sample from softmax(logits / temperature) → stochastic
-- **KV Cache**: Full caching of past key/value tokens for efficiency
-- **Token buffer**: Circular buffer for fixed window
-- **Multi-level cache**: Supports LRU/LFU for long context caching
-
-### Multi-Level KV Cache
-
-- **Full cache** (L=seq_len): Stores all past K/V — used for training
-- **Partial cache** (L≤L_max): Stores recent K/V tokens — used for long context
-- **Circular buffer** (L≤L_max): Fixed-size circular buffer — used for short context
+- **KV Cache**: Full caching of past key/value tokens; the per-token step
+  path (`forward_prefill` + `forward_step`) is exact, one token per
+  iteration. TurboQuant (1-bit quantized cache) is a documented,
+  parity-budgeted alternative behind `forward_step(quantize=True)`.
 
 ---
 
@@ -200,9 +184,9 @@ project/
 | Component | Value |
 | ----------- | ------- |
 | **Device** | NVIDIA Jetson AGX Orin 64GB |
-| **OS** | Ubuntu 22.04 with JetPack 6.2.2 |
-| **CUDA** | CUDA 12.6 (nvcc 12.6) |
-| **PyTorch** | PyTorch 2.2.0 with CUDA 12.6 |
+| **OS** | JetPack 7.2.1 |
+| **CUDA** | CUDA 13.2 |
+| **PyTorch** | PyTorch 2.13.0+cu132 (pinned `pytorch-cu132` uv index) |
 | **GPU** | 2048 CUDA cores, 64-bit memory, ~20 TFLOPS |
 
 ---
@@ -215,5 +199,8 @@ project/
 4. **Round-trip tests** — Save to NumPy format, load into any backend, verify inference matches
 5. **Flat checkpoint format** — All backends save/load `model.npz` as a flat dict (keys from the shared `Keys` scheme), enabling cross-backend transfer
 6. **Standard additive residual** — the block uses the plain pre-norm skip `out = x + f(ln(x))`, matching LLaMA and every modern reference (the repo-specific "gated residual" was abandoned — see [ADR-0001](adr/0001-gated-residual-abandonment.md))
-7. **Multi-level KV caching** — Configurable cache length for efficient training vs inference
+7. **Config-bounded KV cache** — the cache is the model's dict cache
+   (`make_cache` / `forward_prefill` / `forward_step`) with TurboQuant 1-bit
+   quantization as the documented alternative; LRU/LFU multi-level caching
+   was explicitly rejected as out of scope
 8. **PyTorch nn.Module wrapper** — PyTorch/Triton models are `nn.Module` instances (training via `.parameters()`); `CUDAModel` is a plain class whose tensor attributes carry `requires_grad`

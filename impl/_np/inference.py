@@ -7,21 +7,26 @@ Logging
 -------
 - INFO:  first/last token generation, temperature/sample mode
 - DEBUG: per-token logits (top-5), temperature scaling, top-k masking, softmax probs
-- TRACE: per-token softmax distribution, RNG seed state
 
 Architecture
 -------------
-Generation loop:
+Generation loop (KV-cached, O(1) attention work per new token):
+    cache = model.make_cache(B, quantize=quantize)
+    for i in range(prompt_len - 1):
+        model.forward_step(sequence[:, [i]], i, cache)     # thread the prompt
     for step in range(max_new_tokens):
-        logits   = model.forward(sequence)          # (B, S, V)
-        step_log = logits[:, -1, :]                 # (B, V)
+        step_logits = model.forward_step(sequence[:, [-1]], len-1, cache)  # (B, 1, V)
         if sampled:
-            probs = softmax(step_log / temperature)  # (B, V)
-            if top_k > 0: probs = top_k_filter(probs, top_k)
-            token = np.random.choice(V, p=probs)     # sample
+            probs = softmax(step_logits / temperature)     # (B, V)
+            if top_k > 0: logits = top_k_filter(logits, top_k)
+            token = rng.choice(V, p=probs)                 # sample
         else:
-            token = np.argmax(step_log, axis=-1)     # greedy
-        sequence = concat(sequence, token)           # (B, S+1)
+            token = argmax(step_logits, axis=-1)           # greedy
+        sequence = concat(sequence, token)                 # (B, S+1)
+
+Only the newest token is forwarded each step; the cached K/V of all earlier
+tokens is reused. (``model.forward_prefill`` can fill the same cache from a
+whole prompt in one pass — equivalent to the per-token threading above.)
 """
 
 from __future__ import annotations
@@ -136,7 +141,8 @@ class TextGenerator:
         # Build the KV cache by threading the prompt (all but the last token)
         # one token at a time, then step the last token to get the first
         # generated logits. Each subsequent step appends one new token.
-        # quantize=True uses the 1-bit TurboQuant cache (lossy, ~32x smaller);
+        # quantize=True uses the 1-bit TurboQuant cache (lossy; int8 storage
+        # ≈4x smaller than the float cache);
         # quantize=False uses the full-precision naive cache (exact).
         cache = self.model.make_cache(batch_size, quantize=self.quantize)
 
@@ -231,7 +237,8 @@ class TextGenerator:
         # Build the KV cache by threading the prompt (all but the last token)
         # one token at a time, then step the last token to get the first
         # generated logits. Each subsequent step appends one new token.
-        # quantize=True uses the 1-bit TurboQuant cache (lossy, ~32x smaller);
+        # quantize=True uses the 1-bit TurboQuant cache (lossy; int8 storage
+        # ≈4x smaller than the float cache);
         # quantize=False uses the full-precision naive cache (exact).
         cache = self.model.make_cache(batch_size, quantize=self.quantize)
 
@@ -338,26 +345,3 @@ class TextGenerator:
         """Get top-k probability values as formatted strings for batch 0."""
         top_idx = np.argsort(probs[0], axis=-1)[::-1][:k]
         return [f"{probs[0, i]:.4f}" for i in top_idx]
-
-
-# Backwards-compat module-level functions (used by tests)
-def _validate_prompt(prompt: np.ndarray) -> np.ndarray:
-    """Validate and normalize a prompt."""
-    return module_validate_prompt(prompt)
-
-
-def _apply_top_k_mask(logits: np.ndarray, top_k: int) -> np.ndarray:
-    """Apply top-k masking to logits."""
-    return module_apply_top_k_mask(logits, top_k)
-
-
-@staticmethod
-def module_validate_prompt(prompt: np.ndarray) -> np.ndarray:
-    """Validate and normalize a prompt."""
-    ...
-
-
-@staticmethod
-def module_apply_top_k_mask(logits: np.ndarray, top_k: int) -> np.ndarray:
-    """Apply top-k masking to logits."""
-    ...

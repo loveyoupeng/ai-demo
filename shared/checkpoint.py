@@ -110,7 +110,7 @@ def load_checkpoint(checkpoint_dir: str | Path) -> tuple[dict[str, Any], Transfo
     if not model_path.exists():
         raise FileNotFoundError(
             f"Checkpoint not found at {checkpoint_dir}/model.npz. "
-            f"Run `uv run src/train.py train` first to produce training checkpoints."
+            f"Run `uv run python -m scripts.train --backend <backend>` first to produce a checkpoint."
         )
 
     # Load all arrays from npz

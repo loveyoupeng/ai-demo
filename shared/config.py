@@ -48,14 +48,6 @@ class TransformerConfig:
     # experts: out = mean(E_shared(x)) + Σ wⱼ·E_j(x). See docs/adr/0002.
     n_shared_experts: int = 0
 
-    # Inference
-    max_length: int = 2048  # Max generation length
-
-    # KV Cache
-    quant_type: str = "none"  # "none"/"1-bit"/"2-bit"/"4-bit"
-    kvcache_type: str = "naive"  # "naive" or "turboquant"
-    load_balance_loss: float = 0.0  # MoE load balancing weight
-
     # Training
     seed: int = 42
     norm_eps: float = 1e-6  # Epsilon for RMSNorm (one value for all tracks)
@@ -83,12 +75,6 @@ class TransformerConfig:
         assert self.n_shared_experts == 0 or self.n_experts > 1, (
             "n_shared_experts requires MoE (n_experts > 1); with one expert there is no routing to complement"
         )
-        assert self.quant_type in ("none", "1-bit", "2-bit", "4-bit"), (
-            f"quant_type must be 'none'/'1-bit'/'2-bit'/'4-bit', got {self.quant_type}"
-        )
-        assert self.kvcache_type in ("naive", "turboquant"), (
-            f"kvcache_type must be 'naive' or 'turboquant', got {self.kvcache_type}"
-        )
 
         head_dim = self.embed_dim // self.n_heads
         assert self.rope_dim == 0 or (self.rope_dim <= head_dim and self.rope_dim % 2 == 0), (
@@ -114,10 +100,6 @@ class TransformerConfig:
         """MoE active when n_experts > 1."""
         return self.n_experts > 1
 
-    def has_quantized_cache(self) -> bool:
-        """True when quant_type != 'none'."""
-        return self.quant_type != "none"
-
     def to_dict(self) -> dict[str, Any]:
         """Serialize, excluding derived fields head_dim/k_dim/v_dim."""
         skip = {"head_dim", "k_dim", "v_dim"}
@@ -125,7 +107,18 @@ class TransformerConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TransformerConfig:
-        """Deserialize, ignoring derived fields and metadata (model_type, etc.)."""
-        skip = {"head_dim", "k_dim", "v_dim", "model_type"}
+        """Deserialize, ignoring derived fields, metadata (model_type), and
+        legacy keys (removed config knobs) so old config.json files load."""
+        skip = {
+            "head_dim",
+            "k_dim",
+            "v_dim",
+            "model_type",
+            # legacy keys from pre-cleanup configs, ignored on load
+            "max_length",
+            "quant_type",
+            "kvcache_type",
+            "load_balance_loss",
+        }
         filtered = {k: v for k, v in data.items() if k not in skip}
         return cls(**filtered)

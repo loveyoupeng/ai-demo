@@ -20,19 +20,21 @@ Frequency schedule
 θ_m = 10000^(-2m/d) for m = 0, 1, ..., d/2-1
 
 This geometric progression creates a range of frequencies:
-  θ_0   = 10000^0     ≈ 1       (slowest rotation, period ~2π)
+  θ_0   = 10000^0     ≈ 1       (fastest rotation, period ≈ 2π)
   θ_1   = 10000^(-2/d)
   ...
-  θ_{d/2-1} = 10000^(-(d-2)/d) ≈ 10000^{-1} (fastest rotation, period ~2π/10000)
+  θ_{d/2-1} = 10000^(-(d-2)/d) ≈ 10000^{-1} (slowest rotation, period ≈ 2π·10000)
 
 Each pair (x_{2m}, x_{2m+1}) rotates at a different angular frequency,
 creating a multi-scale positional signal. Larger position gaps → larger
 angle differences → more distinguishable positions.
 
 Why pair odd/even dimensions?
-  The (odd, even) pairing means position 0 affects pair (d0, d1),
-  position 1 affects pair (d2, d3), etc. The odd-dim encodes cos,
-  the even-dim encodes sin. This creates the 2D rotation structure.
+  Every position p affects every pair: pair m is rotated by angle
+  p·θ_m, so the pair (x_{2m}, x_{2m+1}) acts as the 2D coordinate
+  block of a rotation matrix — the even dim multiplies cos, the odd
+  dim multiplies sin — which is what makes q·k depend only on the
+  relative distance between two tokens.
 
 Memory access pattern
 ---------------------
@@ -193,12 +195,12 @@ def _rope_kernel(
         x_ptr + inner_offset,  # Even: 2*m within row
         mask=pair_mask,
         other=0.0,
-    ).to(tl.float32)  # (BLOCK_SIZE,) — odd dimension values
+    ).to(tl.float32)  # (BLOCK_SIZE,) — even dimension values
     x_m1 = tl.load(
         x_ptr + inner_offset + 1,  # Odd: 2*m+1 within row
         mask=pair_mask,
         other=0.0,
-    ).to(tl.float32)  # (BLOCK_SIZE,) — even dimension values
+    ).to(tl.float32)  # (BLOCK_SIZE,) — odd dimension values
 
     # Load cos/sin for this token's position and pair block
     # Cos/sin table layout: (num_tokens, num_pairs)
@@ -531,7 +533,9 @@ def _compute_rope_frequencies(
     """Compute RoPE frequencies and cos/sin tables.
 
     Generates the geometric frequency schedule and precomputes cos/sin
-    values for all positions. This is done ONCE per model, not per-forward.
+    values for all positions. NOTE: ``apply_rope`` calls this on every
+    forward (recomputed per call). PROD: cache the (max_position,
+    head_dim) table on the module instead.
 
     Parameters
     ----------
@@ -556,8 +560,9 @@ def _compute_rope_frequencies(
     Frequency formula: θ_m = 10000^(-2m / head_dim) for m = 0..D/2-1
 
     The 10000 base is empirically chosen — it creates a range of
-    frequencies from period 2π (slowest) to period 2π/10000 (fastest),
-    allowing the model to detect both local and distant position relations.
+    frequencies from θ=1 (fastest, period ≈ 2π) down to 10⁻⁴
+    (slowest, period ≈ 2π·10⁴), allowing the model to detect both
+    local and distant position relations.
 
     """
     if head_dim < 2 or head_dim % 2 != 0:

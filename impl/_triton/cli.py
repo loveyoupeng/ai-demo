@@ -96,15 +96,15 @@ def main() -> None:
     print(f"Full seq:   {text_from_tokens(generated_tokens)}")
 
 
-if __name__ == "__main__":
-    main()
-
-
 def text_to_tokens(text: str) -> list[int]:
-    """Convert text to token IDs using byte-level encoding."""
+    """Convert text to token IDs: one ID per Unicode codepoint (``ord(c)``)."""
     return [ord(c) for c in text]
 
 
 def text_from_tokens(token_ids: list[int]) -> str:
-    """Decode a list of token IDs back to text."""
+    """Decode token IDs back to text (bytes 0-255, UTF-8 with replacement)."""
     return bytes(token_ids).decode("utf-8", errors="replace")
+
+
+if __name__ == "__main__":
+    main()

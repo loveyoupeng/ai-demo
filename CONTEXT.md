@@ -47,7 +47,9 @@ docs, and tests.
   (D → E) followed by softmax + top-k mask + renormalize.
 
 - **Shared expert** (a.k.a. global expert): an always-active expert that
-  processes every token without routing — `out = E_shared(x) + Σ_j wⱼ·E_j(x)`.
+  processes every token without routing —
+  `out = (Σ_s E_shared_s(x)) / N_s + Σ_j wⱼ·E_j(x)` (the N_s shared-expert
+  outputs are *averaged*, per ADR 0002).
   Ungated by the router (DeepSeek-V2/V3 style), so it captures common
   features while routed experts specialize. Enabled with `n_shared_experts`;
   0 disables it (pure top-k routing). See `docs/adr/0002-shared-expert-moe.md`.
@@ -153,10 +155,17 @@ docs, and tests.
 - **Top-k filtering**: keep only the k largest logits; set the rest to -inf
   before softmax. Constrains the sampling distribution to the top-k tokens.
 
-- **TurboQuant**: the 1-bit quantized KV cache. Stores K/V as (sign,
-  per-channel scale) pairs; dequantizes before attention. Lossy but ~32x
-  smaller than the full-precision cache. See
-  `impl/_np/turboquant_kv_cache.py` and the parity-budget test.
+- **TurboQuant**: the 1-bit quantized KV path. On each token write, the new
+  K/V vector is stored as int8 sign bits plus **one scale scalar per
+  (batch, head)** — `scale = mean(|x|)` over the token vector
+  (`impl/_np/attention.py` → `_quantize_turbo`, mean over `(-2, -1)`); the
+  cache is dequantized (`bits * scale`) before attention. Lossy, but the
+  live path stores int8 signs → ~4x smaller than the float32 cache (plus
+  the per-token scales). Wired behind the same
+  `forward_step(quantize=True)` interface with a parity-budget test. The
+  cache itself is the model's plain dict cache produced by
+  `make_cache`/`forward_prefill`/`forward_step` — not a separate cache
+  class.
 
 ## Learning Mode
 
@@ -164,9 +173,11 @@ docs, and tests.
   architecture diagram, the actual numbers at every step with
   click-to-inspect detail, and downloadable inference records. Served by the
   standalone entry point `scripts/learning.py` on top of
-  `impl/_np/learning_server.py`; backend-agnostic (NumPy default, PyTorch
-  via `--backend`), since a record is the same JSON shape from either
-  adapter. Off by default; it has no impact on any track.
+  `impl/_np/learning_server.py`; backend-agnostic — the page runs all four
+  backends (NumPy/PyTorch/Triton/CUDA) via its in-page dropdown, while the
+  CLI `--backend` (`numpy`|`torch`) only picks the *startup* load. A record
+  is the same JSON shape from every adapter. Off by default; it has no
+  impact on any track.
 
 - **Inference record**: the per-token capture of every forward intermediate — embedding through each block's
   attention/FFN (or MoE) tensors, final norm, logits, and the sampled token — serialized as JSON for the page and

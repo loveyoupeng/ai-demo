@@ -10,9 +10,17 @@ All pointers are in the NumPy track (`impl/_np/`) — the reference implementati
 hand-rolled math and analytic backward. The PyTorch/Triton/CUDA tracks compute the
 same thing with production ops (`F.scaled_dot_product_attention`, fused kernels).
 
-```text
-tokens → Embedding → [ RMSNorm → Attention → + → RMSNorm → FFN/MoE → + ] × L
-       → final RMSNorm → lm_head → logits → (softmax → next token)
+```mermaid
+flowchart LR
+    TOK["tokens (B, S)"] --> EMB["Embedding (B, S, D)"] --> BLK["block × L:<br/>RMSNorm → Attention → +<br/>RMSNorm → FFN/MoE → +"]
+    BLK --> FN["final RMSNorm"] --> LM["lm_head → logits (B, S, V)"] --> SM["softmax → next token"]
+```
+
+The shape chain, at a glance:
+
+```mermaid
+flowchart LR
+    T["tokens (B, S)"] --> E["embedding (B, S, D)"] --> L["decoder block × L<br/>(B, S, D) in and out"] --> N["final RMSNorm (B, S, D)"] --> H["lm_head (B, S, V)"]
 ```
 
 ---
@@ -160,7 +168,18 @@ w_i = \frac{p_i}{\sum_{j \in \mathrm{top}\text{-}k} p_j} \cdot \mathbb{1}[i \in 
 Total parameters grow with `E`, but each token only pays for `k` experts —
 decoupling model *capacity* from per-token *FLOPs*.
 
-- Code: `impl/_np/moe.py` → `MixtureOfExperts` (router, top-k selection, weighted sum)
+**Shared experts (ADR 0002):** with `n_shared_experts = N_s > 0`, an
+ungated, always-on branch runs in parallel with the routed experts and its
+`N_s` outputs are *averaged* before being added to the routed sum:
+
+$$\mathrm{out} = \frac{1}{N_s}\textstyle\sum_{s} \mathrm{E\_shared}_s(h) \;+\; \textstyle\sum_i w_i \, \mathrm{Expert}_i(h)$$
+
+The shared branch captures common features while the routed experts
+specialize (DeepSeek-V2/V3 style) — see
+[ADR-0002](../adr/0002-shared-expert-moe.md).
+
+- Code: `impl/_np/moe.py` → `MixtureOfExperts` (router, top-k selection,
+  optional shared experts averaged over `N_s`, weighted sum)
 - PROD note: the reference computes **all** experts and masks with zeros;
   production gathers tokens per expert and runs only the selected top-k.
 - Paper: Fedus et al., *Switch Transformers* (2021), arXiv:2101.03961; *Mixtral of Experts* (2023), arXiv:2401.04624.
@@ -189,8 +208,10 @@ each step recomputes only the new token's K/V (one row appended per block):
 - **Decode** — per step, embed only the new token, append its K/V, attend to the
   whole cache. No causal mask is needed: every cached row is in the past.
 
-- Code: `impl/_np/kv_cache.py` → `NaiveKVCache`; `impl/_np/model.py` →
-  `forward_prefill` / `forward_step`; sampling in `impl/_np/inference.py` → `TextGenerator`.
+- Code: the cache is the model's plain dict cache — `impl/_np/model.py` →
+  `NumPyModel.make_cache` / `forward_prefill` / `forward_step`; the 1-bit
+  TurboQuant quantization is inline in `impl/_np/attention.py` →
+  `_quantize_turbo`; sampling in `impl/_np/inference.py` → `TextGenerator`.
 - Note: with a finite context window, the reference keeps the *full history* in the
   cache and only the last `context_length` tokens in the softmax window at prefill;
   the learning page documents this window → full-history semantics explicitly.

@@ -10,7 +10,11 @@ through them.
 Usage::
 
     trainer = TritonSFTTrainer(model, lr=1e-3)
-    loss = trainer.train_step(batch)  # batch: input_ids, target_ids, mask
+    loss = trainer.train_step(input_ids, target_ids, response_mask)
+    # input_ids (B, S) int64; target_ids (B, S) int64; response_mask (B, S) bool
+
+As in the PyTorch track, response masking is baked into ``target_ids`` via
+``IGNORE_INDEX``; ``response_mask`` is informational (the loss never reads it).
 """
 
 from __future__ import annotations

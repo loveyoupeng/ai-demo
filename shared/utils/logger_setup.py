@@ -6,8 +6,8 @@ a human-friendly format so users can trace runtime behaviour easily.
 
 Default format:  ``{timestamp} [{levelname:7s}] {name} {message}``
   - ``INFO`` = epoch/batch/token-level summaries (default)
-  - ``DEBUG`` = tensor shapes, intermediate values
-  - ``TRACE`` = per-operation detail (attention entropy, activation stats)
+  - ``DEBUG`` = tensor shapes, intermediate values, per-operation detail
+    (attention entropy, activation stats)
 
 Usage
 -----
@@ -19,20 +19,9 @@ from __future__ import annotations
 
 import logging
 import sys
-from datetime import datetime, timezone
-
-logger = logging.getLogger(__name__)
 
 _DEFAULT_FORMAT = "%(asctime)s [%(levelname)-7s] %(name)s %(message)s"
 _DEFAULT_DATEfmt = "%Y-%m-%d %H:%M:%S"
-
-
-class _TimestampFilter(logging.Filter):
-    """Inject a formatted ``ts`` attribute for formatting."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        record.ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        return True
 
 
 # ------------------------------------------------------------------
@@ -95,38 +84,3 @@ def setup_logging(
         file_handler.setLevel(level)
         file_handler.setFormatter(logging.Formatter(fmt, datefmt=_DEFAULT_DATEfmt))
         root.addHandler(file_handler)
-
-
-def set_level(logger_name: str, level: str) -> None:
-    """Override the log level for a specific logger *after* ``setup_logging()``.
-
-    Useful for selectively increasing verbosity of only a few modules
-    while keeping the rest at INFO.
-
-    Parameters
-    ----------
-    logger_name : str
-        Dotted logger name, e.g. ``impl._np.model``.
-    level : str
-        New logging level as a string.
-
-    """
-    logging.getLogger(logger_name).setLevel(level)
-
-
-def log(*args: object) -> None:
-    """Log a message at TRACE level using this module's logger.
-
-    Use the ``trace`` convenience function instead in documentation examples.
-
-    TRACE is a custom level between DEBUG and INFO.  Messages logged
-    at this level are only visible when the logger is set to DEBUG.
-
-    Usage
-    -----
-    .. code-block:: python
-
-        from shared.utils.logger_setup import log
-        log("attn_entropy head=0 pos=5 h=3.20")
-    """
-    logger.debug("[%s] %s", log.__name__, " ".join(str(a) for a in args))

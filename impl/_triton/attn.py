@@ -214,7 +214,8 @@ def scaled_dot_product_attention(
     -------------
     Gradients are computed via PyTorch's F.scaled_dot_product_attention,
     which has a CUDA-optimized backward kernel. The forward pass saves
-    (dq, dk, dv) for gradient computation during backward.
+    (q, k, v) and the backward RECOMPUTES the attention through
+    ``F.scaled_dot_product_attention`` and lets autograd differentiate it.
 
     Example
     -------
@@ -253,7 +254,7 @@ class _ScaledDotProductAttentionTF(torch.autograd.Function):
     Backward pass: recompute attention through PyTorch's well-tested
     ``F.scaled_dot_product_attention`` and let autograd differentiate it with
     the *actual* incoming gradient. (The attention gradients are linear in
-    ``grad_output`` — e.g. ``dk = softmax(QK^T/sqrt(D))^T @ grad_output`` —
+    ``grad_output`` — e.g. ``dv = softmax(QK^T/sqrt(D))^T @ grad_output`` —
     so precomputing them for a constant upstream gradient and scaling
     elementwise is mathematically wrong.)
 

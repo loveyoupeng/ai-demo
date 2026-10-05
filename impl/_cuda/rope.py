@@ -550,8 +550,10 @@ def apply_rope(
     positions : torch.Tensor, shape (S,)
         Position indices for each sequence element (0 to S-1).
     rope_dim : int, optional
-        Number of head dimensions to rotate. 0 = rotate all D dims.
-        Must be divisible by 2.
+        Number of head dimensions to rotate. Accepted for signature parity
+        with the other tracks but CURRENTLY IGNORED: the kernel always
+        rotates all D dims (rope_dim is not wired through). Wiring partial
+        rotation awaits a numerics ruling on the kernel.
 
     Returns
     -------
@@ -564,7 +566,6 @@ def apply_rope(
     - Each pair rotates at a different frequency determined by the pair index
     - Position p controls the rotation angle for that pair
     - The rotation preserves vector norms (orthogonal transformation)
-    - Non-rotated dimensions (if rope_dim < D) pass through unchanged (future)
 
     Example
     -------

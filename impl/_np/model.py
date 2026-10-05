@@ -217,8 +217,8 @@ class NumPyModel:
         Naive cache (quantize=False): each layer gets
             {"k": (B, G, 0, hd), "v": (B, G, 0, hd)}
         TurboQuant cache (quantize=True): each layer gets
-            {"bits_k": (B, H, 0, hd) int8, "scales_k": (B, H, 0, hd) float,
-             "bits_v": (B, H, 0, hd) int8, "scales_v": (B, H, 0, hd) float}
+            {"bits_k": (B, H, 0, hd) int8, "scales_k": (B, H, 0, 1) float,
+             "bits_v": (B, H, 0, hd) int8, "scales_v": (B, H, 0, 1) float}
 
         G = the K/V head count (config.kv_heads) and hd = the head dim — the
         naive cache stores K/V *per group*, so GQA caches are H // G times
@@ -316,7 +316,8 @@ class NumPyModel:
         cache: the per-layer cache; the token's K/V are *appended* to each
             layer's cache before attention runs.
         quantize: if True, append the new K/V to the cache in 1-bit
-            TurboQuant form (bits + per-channel scale) and dequantize the
+            TurboQuant form (bits + one scalar scale per (batch, head) per
+            token-write) and dequantize the
             full cached tensor before attention, so the step attends against
             the (lossy) quantized cache. If False, append the full-precision
             K/V (the default naive path).

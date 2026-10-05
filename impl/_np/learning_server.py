@@ -5,10 +5,14 @@ JSON API on top of a loaded model — either the NumPy track (``NumPyModel``)
 or the PyTorch track (``TorchModel``; the page consumes both backends'
 records interchangeably because the record shapes are identical):
 
-- ``GET  /``            → the page (and other static assets)
-- ``GET  /api/model``   → model config + vocab + backend (for the page)
+- ``GET  /``             → the page (and other static assets)
+- ``GET  /api/model``    → model config + vocab + backend (for the page)
+- ``GET  /api/tokenize`` → tokenize-or-detokenize via the model's tokenizer
+- ``POST /api/inference`` → run generation with per-layer activation records
+- ``POST /api/record``    → a single recorded forward/step
+- ``POST /api/compare``   → run two backends on the same prompt for diffing
 
-Request body for both POSTs:
+Request body for the POST inference/record/compare endpoints:
     {"text": "the she", "n_tokens": 20, "temperature": 0.8|null,
      "top_k": 10|null, "seed": 42}
 
@@ -60,7 +64,7 @@ def load_learning_model(
     """
     params, cfg = load_checkpoint(model_dir)
     if cfg is None:
-        raise ValueError(f"checkpoint {model_dir} failed registry validation")
+        raise ValueError(f"checkpoint {model_dir} is missing config.json")
     if backend == "numpy":
         model: NumPyModel | TorchModel | Any = NumPyModel(cfg)
         model.load_from_numpy_dict({k: v.copy() for k, v in params.items()})
@@ -70,7 +74,6 @@ def load_learning_model(
         torch_model = _TorchModel(cfg).double()
         torch_model.load_from_numpy_dict({k: v.copy() for k, v in params.items()})
         torch_model.eval()
-        torch_model = torch_model
         model = torch_model
     elif backend == "triton":
         from impl._triton.model import TritonModel
@@ -333,9 +336,11 @@ class _LearningHandler(BaseHTTPRequestHandler):
         beyond that the cache keeps the full history instead of dropping
         the oldest tokens).
 
-        PyTorch track: the track's production decode — a full-window forward
-        per step (the torch track has no per-token step; its flash-attention
-        production path makes the recompute cheap in practice).
+        PyTorch/Triton/CUDA tracks: a full-window forward per step.
+        PROD: every backend has a KV cache (``make_cache`` /
+        ``forward_prefill`` / ``forward_step`` in ``layers.py``); this
+        display path deliberately re-forwards the window per step for
+        simplicity instead of threading per-track caches.
 
         Response shape (unchanged):
             {"prompt": {...}, "skipped_chars": n, "generated": {...},

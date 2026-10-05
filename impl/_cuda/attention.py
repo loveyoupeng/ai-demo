@@ -9,16 +9,18 @@ Why not all CUDA?
 ------------------
 The attention operation has two very different parts:
 
-  1. Matrix multiplication (QK^T and output@V) — use cuBLAS:
+  1. Matrix multiplication QK^T — use cuBLAS:
      - Hand-optimized assembly for every GPU architecture
      - Memory bandwidth is the bottleneck, not compute
      - Any custom kernel would be slower than cuBLAS for large matrices
 
-  2. Stable softmax + weighted sum — use CUDA kernels:
+  2. Stable softmax — use an nvrtc-compiled CUDA kernel:
      - Softmax requires warp reduction (max, sum) — CUDA-native
-     - Weighted sum is memory-bound but needs per-row normalization
 
-  3. The hybrid approach preserves learning (reduction, coalesced access,
+  3. Weighted sum (attn @ V) — use an nvrtc-compiled GEMV-like CUDA
+     kernel (per (batch, head)); memory-bound but simple coalesced access.
+
+  4. The hybrid approach preserves learning (reduction, coalesced access,
      grid/block configuration) while achieving good throughput.
 
 Stable softmax
@@ -456,12 +458,9 @@ class _CUDASDPACudaFunction(torch.autograd.Function):
 
         Notes
         -----
-        The backward pass of SDPA is complex to derive manually:
-          dQ = (attn_weights * (dOut @ V^T) - dOut @ V @ atn^T) / sqrt(D)
-          dK = (Q^T @ dOut * attn_weights - Q^T @ dOut) / sqrt(D)
-          dV = attn^T @ dOut
-
-        PyTorch handles this correctly, so we reuse it.
+        The SDPA backward formulas are complex to derive manually; torch
+        autograd owns the backward here: this method recomputes the forward
+        via ``F.scaled_dot_product_attention`` and differentiates it.
         """
         q, k, v, scores = ctx.saved_tensors
         grad_output = grad_outputs[0]
@@ -541,7 +540,7 @@ def scaled_dot_product_attention(
     -----
     - Tensor dtype must be float16, bfloat16, or float32
     - All tensors must be on the same CUDA device
-    - No causal mask is applied — use a pre-masked K if needed
+    - ``is_causal=True`` applies the causal mask (position i → keys j <= i)
 
     Reference
     ---------

@@ -164,11 +164,12 @@ def train_step(
     loss = loss_fn(logits_flat, target_flat)
     logger.info("train_step() loss=%.6f", float(loss))
 
-    # 3. Backward pass: autograd computes all gradients through Triton kernels
+    # 4. Backward pass: autograd computes all gradients through Triton kernels
     loss.backward()
     logger.debug("train_step() backward complete")
 
-    # 4. Clip gradients to stabilize training (especially with Post-Norm)
+    # 5. Clip gradients to stabilize training (the model is pre-norm;
+    #    clipping is a second safety net)
     grads: dict[str, torch.Tensor] = {}
     for name, param in model.named_parameters():
         if param.grad is not None:
@@ -179,11 +180,11 @@ def train_step(
     logger.debug("train_step() post_clip_grad_norm=%.6f", grad_norm)
     _log_grad_stats(grads)
 
-    # 5. Optimizer step: apply gradients
+    # 6. Optimizer step: apply gradients
     logger.debug("train_step() optimizer_step n_params=%d", len(grads))
     optimizer.step()
 
-    # 6. Clear gradients for next step
+    # 7. Clear gradients for next step
     optimizer.zero_grad()
 
     return loss.item()

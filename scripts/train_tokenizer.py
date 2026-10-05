@@ -3,11 +3,12 @@
 
 Pipeline::
 
-    1. Read the datasets the project teaches from:
-       - ``resource/tinystories/*.json``    (pre-training corpus)
+    1. Read the code/SFT datasets the tokenizer must merge well for:
+       - ``resource/corpus_python.json``    (real Python functions)
        - ``resource/code_instructions.json`` (SFT coding)
        - ``resource/tool_calls.json``        (SFT tool calling)
-    2. Concatenate every text field into one character stream.
+    2. Concatenate every text field into one character stream
+       (casing, indentation, and whitespace kept verbatim).
     3. Train a byte-pair-encoding tokenizer on that stream
        (Hugging Face ``tokenizers`` lib — merges the most frequent byte
        pairs until ``vocab_size`` tokens).
@@ -46,14 +47,6 @@ SPECIAL_TOKENS = [
 ]
 
 
-def _unicode_fold(text: str) -> str:
-    """Kept for old-checkpoint compat; NOT used for training — the coding-agent
-    model must see real casing, code indentation, and whitespace verbatim."""
-    import re as _re
-
-    return _re.sub(r"\s+", " ", text.lower().strip())
-
-
 def _python_texts() -> list[str]:
     """Real Python functions + SFT instructions + tool calls — verbatim."""
     parts: list[str] = []
@@ -73,39 +66,6 @@ def _python_texts() -> list[str]:
             for tool in row.get("tools", []):
                 parts.append(json.dumps(tool, ensure_ascii=False))
     return parts
-
-
-def _tool_row_texts(row: dict) -> list[str]:
-    """Flatten one tool_calls row to its text (content + tool JSON blobs)."""
-    texts = []
-    for msg in row["messages"]:
-        if msg.get("content"):
-            texts.append(msg["content"])
-        for tc in msg.get("tool_calls") or []:
-            texts.append(json.dumps(tc["function"], ensure_ascii=False))
-    texts.extend(json.dumps(t["function"], ensure_ascii=False) for t in row["tools"])
-    return texts
-
-
-def collect_text() -> str:
-    """All training text: tinystories corpus + SFT instructions + snippets."""
-    parts = []
-
-    ts_all = RESOURCE_DIR / "tinystories_train.json"
-    if ts_all.exists():
-        parts.extend(json.loads(ts_all.read_text()))
-
-    code_file = RESOURCE_DIR / "code_instructions.json"
-    if code_file.exists():
-        for row in json.loads(code_file.read_text()):
-            parts.append(" ".join([row["instruction"], row["output"]]))
-
-    tool_file = RESOURCE_DIR / "tool_calls.json"
-    if tool_file.exists():
-        for row in json.loads(tool_file.read_text()):
-            parts.extend(_tool_row_texts(row))
-
-    return "\n".join(parts)
 
 
 def train(tokenizer_path: Path | None = None, vocab_size: int = DEFAULT_VOCAB) -> None:
