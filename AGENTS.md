@@ -59,8 +59,12 @@ records" / inference records), so the page consumes either backend
 interchangeably. `impl/_np/learning_server.py` serves the web page
 (`impl/_np/web/`) plus a small JSON API (`/api/model`, `/api/inference`,
 `/api/record`) via stdlib `http.server`, with a `--backend` flag selecting the
-materialized track. The default demo model is a tiny char-level MoE LM
-(`D=8, H=4, L=3, E=3, V=20`).
+materialized track. The default served checkpoint is `learning_tool`
+(BPE-512 vocab, `D=64, L=3, H=4`, dense SwiGLU — built by
+`scripts/train_demo_model_v2.py` in a 3-stage pretrain→SFT→tool pipeline;
+compare tab: `learning_base`, `learning_sft`). A smaller char-level MoE demo
+(`learning_demo`, `D=8, H=4, L=3, E=3+1 shared, V=20`,
+`scripts/train_demo_model.py`) can be served via `--model`.
 
 ## Key Directories
 
