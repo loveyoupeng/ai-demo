@@ -187,7 +187,7 @@
       <div class="steps" id="rec-steps"></div>
       <div class="row" style="margin-top:6px">
         <div><button id="btn-play" class="secondary">▶ play</button></div>
-        <div class="note">Click a module or inner stage in the diagram — the inspector on the right explains what it does, then shows the math and the actual numbers.</div>
+        <div class="note">Click a module or inner stage in the diagram — the inspector on the right explains it and shows the math FIRST, then the actual input tensors, and finally the outputs.</div>
       </div>
     </section>
   </section>
@@ -877,19 +877,19 @@ function selectNode(id) {
 }
 
 // ---------------------------------------------------------------------------
-// Inspector — input → formula → output, shapes + raw numbers per tensor
+// Inspector — explanation & formula first, then inputs, outputs last; shapes + raw numbers per tensor
 // ---------------------------------------------------------------------------
 function drop(el) { el.innerHTML = ""; return el; }
 
 function normView(rec, { xIn, label }) {
   const rms = rec.rms[0].map((v) => (Array.isArray(v) ? v[0] : v));
   return (body) => {
-    tensorBlock(body, "in", `input ${label} x`, xIn, { cell: 12, rowLabels: xIn.map((_, i) => i), names: ["S", "D"] });
     body.appendChild(formula(
       "\\hat{x}_d = \\dfrac{x_d}{\\sqrt{\\tfrac{1}{D}\\textstyle\\sum_{d} x_d^2 + \\varepsilon}}, \\qquad y_d = \\gamma_d \\cdot \\hat{x}_d",
-      `rms (per row, sqrt(mean(x²)+eps)): [${rms.map((v) => v.toFixed(3)).join(", ")}]`
+      `divide by the row's root-mean-square — rms per row, sqrt(mean(x²)+eps): [${rms.map((v) => v.toFixed(3)).join(", ")}] — forcing every row to unit RMS length; γ then re-scales each channel independently (D learned numbers, one γ per norm; no mean subtraction, no bias)`
     ));
-    body.appendChild(matLabel("γ — the per-channel learned scale, (D,)"));
+    tensorBlock(body, "in", `input ${label} x`, xIn, { cell: 12, rowLabels: xIn.map((_, i) => i), names: ["S", "D"] });
+    body.appendChild(matLabel("γ — the learned per-channel gain (D,); a parameter of the norm, not data"));
     body.appendChild(barChart(rec.gamma, rec.gamma.map((_, i) => i)));
     tensorBlock(body, "out", "output y = γ·x/rms", rec.out, { cell: 12, rowLabels: rec.out[0].map((_, i) => i), names: ["S", "D"] });
   };
@@ -914,12 +914,12 @@ function attnSubView(sub, bIdx, bt) {
   const H = MODEL.config.n_heads, hd = MODEL.config.embed_dim / H;
   if (sub === "attn") {
     return (body) => {
-      tensorBlock(body, "in", "input x (LN1 output)", bt.y1, { cell: 12, names: ["S", "D"] });
       body.appendChild(formula(
         "q = x W_q,\\; k = x W_k,\\; v = x W_v \\;\\Rightarrow\\; s_{ij} = \\dfrac{q_i \\cdot k_j}{\\sqrt{d}} \\;\\text{(causal: } j>i \\Rightarrow -\\infty)",
-        "click an inner stage (Q, K, V, RoPE, QKᵀ/√d, mask, softmax, A·V) for its numbers"
+        "three projections of the SAME input give each position three roles; the √d divisor keeps pre-softmax scores near unit variance — click an inner stage (Q, K, V, RoPE, QKᵀ/√d, mask, softmax, A·V) for its numbers"
       ));
-      body.appendChild(formula("A = \\text{softmax}(s),\\qquad \\text{ctx} = A\\,v,\\qquad \\text{out} = \\text{ctx}\\,W_o", "per head: (S, d) each"));
+      body.appendChild(formula("A = \\text{softmax}(s),\\qquad \\text{ctx} = A\\,v,\\qquad \\text{out} = \\text{ctx}\\,W_o", "per head: (S, d) each; A's rows are mixing recipes (sum to 1), ctx is the mixed content, W_o merges all heads back to width D"));
+      tensorBlock(body, "in", "input x (LN1 output)", bt.y1, { cell: 12, names: ["S", "D"] });
       headSel(body);
       const q = a.q[0][HEAD], k = a.k[0][HEAD], sm = a.scores_masked[0][HEAD], aw = a.attn_weights[0][HEAD];
       body.appendChild(matLabel(`q post-RoPE, head ${HEAD} (S, d=${hd})`));
@@ -952,8 +952,8 @@ function attnSubView(sub, bIdx, bt) {
   if (sub === "q" || sub === "k" || sub === "v") {
     return (body) => {
       const nm = sub.toUpperCase();
+      body.appendChild(formula(`${nm} = x W_${nm[0]}`, `a learned linear projection of every position's normed vector: (S, D) @ (D, ${H * hd}) → (S, ${H * hd}); the columns are then split into ${H} heads of width ${hd}`));
       tensorBlock(body, "in", "input x (LN1 output)", bt.y1, { cell: 12, names: ["S", "D"] });
-      body.appendChild(formula(`${nm} = x W_${nm[0]}`, `projection, (S, ${H * hd})`));
       tensorBlock(body, "out", `${nm}_pre (before head split${sub !== "v" ? " / RoPE" : ""})`, a[sub + "_pre"], { cell: 12, names: ["S", `H·d`] });
       if (sub !== "v") {
         headSel(body);
@@ -967,46 +967,49 @@ function attnSubView(sub, bIdx, bt) {
         "\\theta_{\\text{pair}} = 10000^{-2i/d},\\qquad \\text{angle} = \\text{pos} \\cdot \\theta, \\qquad (x_0, x_1) \\mapsto (x_0\\cos\\theta - x_1\\sin\\theta,\\; x_0\\sin\\theta + x_1\\cos\\theta)",
         "the position enters the model ONLY through these rotations of q and k — applied after the Q/K projection, inside attention (no learned position embedding)"
       ));
-      body.appendChild(matLabel(`positions: ${fwd().positions.join(", ")}`));
+      body.appendChild(matLabel(`positions: ${fwd().positions.join(", ")} — the inputs the angles are built from`));
       body.appendChild(matLabel(`per-pair freqs (d/2 = ${hd / 2}): ${a.rope.freqs.map((v) => v.toFixed(4)).join(", ")}`));
       headSel(body);
-      tensorBlock(body, "in", `q_rope_in, head ${HEAD} (pre-RoPE)`, a.q[0][HEAD], { cell: 14, names: ["S", "d"] });
+      const qpre = a.q_pre[0].map((row) => row.slice(HEAD * hd, (HEAD + 1) * hd));
+      const kpre = a.k_pre[0].map((row) => row.slice(HEAD * hd, (HEAD + 1) * hd));
+      tensorBlock(body, "in", `q head ${HEAD} pre-RoPE (q_pre column slice)`, qpre, { cell: 14, names: ["S", "d"] });
+      tensorBlock(body, "in", `k head ${HEAD} pre-RoPE (k_pre column slice)`, kpre, { cell: 14, names: ["S", "d"] });
       tensorBlock(body, "out", `q post-RoPE, head ${HEAD}`, a.q[0][HEAD], { cell: 14, names: ["S", "d"] });
       tensorBlock(body, "out", `k post-RoPE, head ${HEAD}`, a.k[0][HEAD], { cell: 14, names: ["S", "d"] });
     };
   }
   if (sub === "scores") {
     return (body) => {
-      headSel(body);
       const S_q = a.q[0][HEAD].length, kc = a.k_cache[0][HEAD], S_c = kc.length;
+      body.appendChild(formula("s_{ij} = \\dfrac{q_i \\cdot k_j}{\\sqrt{d}}", "dot product = alignment: large when the query direction matches the key direction; " + (S_q === 1 ? "decode: the single new q scores EVERY cached k — the whole cache is in the past, so nothing needs masking" : "prefill: the cache is the prompt's K — before the causal mask")));
+      headSel(body);
       tensorBlock(body, "in", `q (new rows this step), head ${HEAD} (S=${S_q}, d)`, a.q[0][HEAD], { cell: 12, names: ["S", "d"] });
       tensorBlock(body, "in", `k = the whole K cache, head ${HEAD} (S_cache=${S_c}, d)`, kc, { cell: 12, names: ["S", "d"] });
-      body.appendChild(formula("s_{ij} = \\dfrac{q_i \\cdot k_j}{\\sqrt{d}}", S_q === 1 ? "decode: the single new q scores EVERY cached k — the whole cache is in the past, so nothing needs masking" : "prefill: the cache is the prompt's K — before the causal mask"));
       tensorBlock(body, "out", `raw scores (S=${S_q}, S_cache=${S_c})`, a.scores[0][HEAD], { cell: 12, names: ["S", "S"] });
     };
   }
   if (sub === "mask") {
     return (body) => {
-      headSel(body);
       const S_q = a.scores[0][HEAD].length, S_c = a.scores[0][HEAD][0].length;
+      body.appendChild(formula("\\text{mask}_{ij} = [j > i] \\;\\Rightarrow\\; s_{ij} = -\\infty \\;\\Rightarrow\\; A_{ij} = 0", "after softmax an entry of −∞ becomes probability 0, so position i literally cannot read position j>i — training and generation stay consistent (" + (S_q === 1 ? "decode: the new row is the last position, so its mask is all zero — nothing in the cache is in the future)" : "prefill: each position sees only itself and the past)")));
+      headSel(body);
       tensorBlock(body, "in", `raw scores (S=${S_q}, S_cache=${S_c})`, a.scores[0][HEAD], { cell: 12, names: ["S", "S"] });
-      body.appendChild(formula("\\text{mask}_{ij} = [j > i]", S_q === 1 ? "decode: the new row is the last position, so its mask is all zero — nothing in the cache is in the future" : "causality: a position can only attend to itself and the past (non-linear mask)"));
       tensorBlock(body, "out", "causal mask (1 = masked)", a.causal_mask, { cell: 12, names: ["S", "S"] });
       tensorBlock(body, "out", "masked scores (j>i → −∞)", a.scores_masked[0][HEAD], { cell: 12, names: ["S", "S"] });
     };
   }
   if (sub === "softmax") {
     return (body) => {
+      body.appendChild(formula("A_{ij} = \\dfrac{e^{s_{ij}}}{\\sum_{j'\\le i} e^{s_{ij'}}}", "non-linear softmax; exponentiating emphasizes the best matches, dividing by the row sum turns scores into a mixing recipe — each row sums to 1 over the causal prefix"));
       headSel(body);
       tensorBlock(body, "in", `masked scores, head ${HEAD} (S, S)`, a.scores_masked[0][HEAD], { cell: 12, names: ["S", "S"] });
-      body.appendChild(formula("A_{ij} = \\dfrac{e^{s_{ij}}}{\\sum_{j'\\le i} e^{s_{ij'}}}", "non-linear softmax; rows sum to 1 over the causal prefix"));
       tensorBlock(body, "out", `attention weights A, head ${HEAD}`, a.attn_weights[0][HEAD], { cell: 12, names: ["S", "S"] });
     };
   }
   if (sub === "o") {
     return (body) => {
+      body.appendChild(formula("\\text{ctx}_i = \\sum_j A_{ij}\\, v_j, \\qquad \\text{out} = \\text{ctx}\\,W_o", "ctx is the weighted mix of value rows (heads merged side by side); W_o projects the H head answers back to the model width (S, H·d) @ (H·d, D) → (S, D)"));
       tensorBlock(body, "in", "ctx = A·v (S, H·d) — heads merged", a.ctx, { cell: 12, names: ["S", "H·d"] });
-      body.appendChild(formula("\\text{out} = \\text{ctx}\\,W_o", "projects back to the model width"));
       tensorBlock(body, "out", "attn_out (S, D) — goes into the residual", a.attn_out, { cell: 14, names: ["S", "D"] });
     };
   }
@@ -1018,38 +1021,38 @@ function ffnSubView(sub, bIdx, bt) {
   if (!bt.moe) {
     if (sub === "ffn") {
       return (body) => {
+        body.appendChild(formula("\\text{gate} = \\text{SiLU}(x W_g),\\; \\text{up} = x W_u,\\; \\text{out} = (\\text{gate}\\odot\\text{up})W_d", `widen D → FF, gate the content, narrow FF → D; SiLU(z)=z·σ(z) is the non-linearity; FF width = ${m.ff_dim} (4·D)`));
         tensorBlock(body, "in", "input x (LN2 output)", bt.y2, { cell: 12, names: ["S", "D"] });
-        body.appendChild(formula("\\text{gate} = \\text{SiLU}(x W_g),\\; \\text{up} = x W_u,\\; \\text{out} = (\\text{gate}\\odot\\text{up})W_d", `SiLU(z)=z·σ(z) (non-linear); FF width = ${m.ff_dim} (4·D)`));
         tensorBlock(body, "out", "out (S, D)", m.out, { cell: 14, names: ["S", "D"] });
       };
     }
     if (sub === "gate") {
       return (body) => {
+        body.appendChild(formula("\\text{pre} = x W_g, \\qquad \\text{gate} = \\text{SiLU}(\\text{pre}) = \\text{pre}\\cdot\\sigma(\\text{pre})", "SiLU self-gates: σ squashes pre to (0,1) and multiplies it back — smooth at 0, so gradients flow without ReLU's dead zone"));
         tensorBlock(body, "in", "input x (LN2 output)", bt.y2, { cell: 12, names: ["S", "D"] });
-        body.appendChild(formula("\\text{pre} = x W_g, \\qquad \\text{gate} = \\text{SiLU}(\\text{pre}) = \\text{pre}\\cdot\\sigma(\\text{pre})", "non-linear gate"));
         tensorBlock(body, "out", "pre_gate (S, FF)", m.pre_gate, { cell: 10, names: ["S", "FF"] });
         tensorBlock(body, "out", "gate (S, FF)", m.gate, { cell: 10, names: ["S", "FF"] });
       };
     }
     if (sub === "up") {
       return (body) => {
+        body.appendChild(formula("\\text{up} = x W_u", "the content projection, same width as the gate — the gate will modulate it element-wise"));
         tensorBlock(body, "in", "input x (LN2 output)", bt.y2, { cell: 12, names: ["S", "D"] });
-        body.appendChild(formula("\\text{up} = x W_u", "the un-gated projection, same width as the gate"));
         tensorBlock(body, "out", "up (S, FF)", m.up, { cell: 10, names: ["S", "FF"] });
       };
     }
     if (sub === "mul") {
       return (body) => {
+        body.appendChild(formula("\\text{gated} = \\text{gate} \\odot \\text{up}", "element-wise product: the gate switches channels of the content on/off per position — this multiplicative interaction is what makes SwiGLU non-linear enough to rival two plain linear layers"));
         tensorBlock(body, "in", "gate (S, FF)", m.gate, { cell: 10, names: ["S", "FF"] });
         tensorBlock(body, "in", "up (S, FF)", m.up, { cell: 10, names: ["S", "FF"] });
-        body.appendChild(formula("\\text{gated} = \\text{gate} \\odot \\text{up}", "element-wise: the SiLU gate modulates the up-projection"));
         tensorBlock(body, "out", "gated (S, FF)", m.gated, { cell: 10, names: ["S", "FF"] });
       };
     }
     if (sub === "down") {
       return (body) => {
+        body.appendChild(formula("\\text{out} = \\text{gated}\\, W_d", "(S, FF) @ (FF, D) → (S, D): the widened, gated content is projected back to the model width, ready to be added to the residual stream"));
         tensorBlock(body, "in", "gated (S, FF)", m.gated, { cell: 10, names: ["S", "FF"] });
-        body.appendChild(formula("\\text{out} = \\text{gated}\\, W_d", "projects back from FF to D"));
         tensorBlock(body, "out", "out (S, D)", m.out, { cell: 14, names: ["S", "D"] });
       };
     }
@@ -1058,41 +1061,40 @@ function ffnSubView(sub, bIdx, bt) {
   // MoE
   if (sub === "ffn") {
     return (body) => {
-      tensorBlock(body, "in", "input x (LN2 output)", bt.y2, { cell: 12, names: ["S", "D"] });
       body.appendChild(formula(
         "p = \\text{softmax}(x W_{\\text{gate}}),\\; \\hat{p} = \\dfrac{\\text{top-k}(p)}{\\sum \\text{top-k}(p)},\\; \\text{out} = \\sum_{j\\in\\text{top-k}} \\hat{p}_j E_j(x)",
-        `router picks top-${m.top_k} of ${m.n_experts} experts (non-linear selection); selected probabilities are renormalized into mixing weights`
+        `a small router scores every expert per token and picks top-${m.top_k} of ${m.n_experts} (non-linear selection); selected probabilities are renormalized into mixing weights — so the model HOLDS ${m.n_experts} experts but each token pays for only ${m.top_k}`
       ));
+      tensorBlock(body, "in", "input x (LN2 output)", bt.y2, { cell: 12, names: ["S", "D"] });
       tensorBlock(body, "out", "out (S, D)", m.out, { cell: 14, names: ["S", "D"] });
     };
   }
   if (sub === "router") {
     return (body) => {
+      body.appendChild(formula("s = x W_{\\text{gate}} \\in \\mathbb{R}^{E}, \\qquad p = \\text{softmax}(s)", "one small matrix (D×E) scores every expert for every position; softmax turns the scores into a probability distribution over experts (non-linear)"));
       tensorBlock(body, "in", "input x (LN2 output)", bt.y2, { cell: 12, names: ["S", "D"] });
-      body.appendChild(formula("s = x W_{\\text{gate}} \\in \\mathbb{R}^{E}, \\qquad p = \\text{softmax}(s)", "one router matrix scores every expert for every position (non-linear softmax)"));
       tensorBlock(body, "out", "router scores (S, E)", m.scores, { cell: 16, names: ["S", "E"] });
     };
   }
   if (sub === "topk") {
     return (body) => {
+      body.appendChild(formula("\\text{topk} = \\arg\\text{top-}\\kappa(p)", `each position keeps its ${m.top_k} highest-probability expert(s); this hard pick is the non-linearity that makes the model sparse — scale up by adding experts, not compute per token`));
       tensorBlock(body, "in", "router probs (S, E)", m.scores, { cell: 16, names: ["S", "E"] });
-      body.appendChild(formula("\\text{topk} = \\arg\\text{top-}\\kappa(p)", `each position keeps its ${m.top_k} highest-probability expert(s) (non-linear selection)`));
       tensorBlock(body, "out", "selected experts (S, k)", m.topk_idx, { cell: 18, names: ["S", "k"] });
     };
   }
   if (sub === "weights") {
     return (body) => {
+      body.appendChild(formula("\\hat{p}_j = \\dfrac{p_j \\cdot \\mathbb{1}[j\\in\\text{topk}]}{\\sum_{j'} p_{j'} \\mathbb{1}[j'\\in\\text{topk}]} \\;\\Rightarrow\\; \\sum_j \\hat{p}_j = 1", "non-selected experts get weight 0; the selected ones are renormalized to sum to 1, so the mixed output's magnitude does not depend on how many experts were picked"));
       tensorBlock(body, "in", "router probs (S, E)", m.scores, { cell: 16, names: ["S", "E"] });
-      body.appendChild(formula("\\hat{p}_j = \\dfrac{p_j \\cdot \\mathbb{1}[j\\in\\text{topk}]}{\\sum_{j'} p_{j'} \\mathbb{1}[j'\\in\\text{topk}]} \\;\\Rightarrow\\; \\sum_j \\hat{p}_j = 1", "zero for non-selected experts, renormalized over the selected ones (non-linear)"));
       tensorBlock(body, "out", "weights (S, E)", m.weights, { cell: 16, names: ["S", "E"] });
     };
   }
   if (sub === "experts") {
     return (body) => {
+      body.appendChild(formula("E_j(x) = (\\text{SiLU}(x W_{g,j}) \\odot x W_{u,j})\\, W_{d,j}", "each expert is a full SwiGLU FFN with its own three matrices; every expert evaluates every token here, but only the top-k selected ones enter the output sum"));
       tensorBlock(body, "in", "input x (LN2 output) — every expert evaluates it", bt.y2, { cell: 12, names: ["S", "D"] });
-      body.appendChild(formula("E_j(x): each expert is a full SwiGLU FFN", "only the selected experts contribute to the sum"));
       m.expert_outs.forEach((eo, j) => {
-        const blk = document.createElement("div");
         body.appendChild(matLabel(`expert ${j} output (S, D)`));
         body.appendChild(heatGrid(eo, { cell: 11, title: "E" + j }));
         body.appendChild(numsTable(eo));
@@ -1101,11 +1103,11 @@ function ffnSubView(sub, bIdx, bt) {
   }
   if (sub === "shared") {
     return (body) => {
-      tensorBlock(body, "in", "input x (LN2 output) — the same input the routed experts see", bt.y2, { cell: 12, names: ["S", "D"] });
       body.appendChild(formula(
         "\\text{out} = \\sum_j \\hat{p}_j E_j(x) \\;+\\; \\tfrac{1}{N_s}\\textstyle\\sum_s E^{\\text{sh}}_s(x)",
-        "the shared expert runs UNGATED — every token passes through it; the '/' shows the mean over shared experts (ADR 0002)"
+        "the shared expert runs UNGATED — every token passes through it, paying its compute at every step; its output (mean if several) is added on top of the routed sum (DeepSeek-V2/V3 idea, ADR 0002): universal patterns live here so routed experts can specialize"
       ));
+      tensorBlock(body, "in", "input x (LN2 output) — the same input the routed experts see", bt.y2, { cell: 12, names: ["S", "D"] });
       (m.shared_outs || []).forEach((so, s) => {
         body.appendChild(matLabel(`shared expert ${s} output (S, D)`));
         body.appendChild(heatGrid(so, { cell: 11, title: "E_sh" + s }));
@@ -1115,13 +1117,13 @@ function ffnSubView(sub, bIdx, bt) {
   }
   if (sub === "sum") {
     return (body) => {
-      body.appendChild(matLabel("weights (S, E)"));
+      body.appendChild(formula("\\text{out}_i = \\sum_j \\hat{p}_{ij} \\, E_j(x_i)", "each position's output is the weighted sum of its selected experts' outputs — the router's confidence becomes the mixing ratio"));
+      body.appendChild(matLabel("weights (S, E) — the mixing ratios"));
       body.appendChild(heatGrid(m.weights, { cell: 16, title: "w" }));
       m.expert_outs.forEach((eo, j) => {
-        body.appendChild(matLabel(`expert ${j} output (S, D)`));
+        body.appendChild(matLabel(`expert ${j} output (S, D) — enters the sum with weight = column ${j} of the row`));
         body.appendChild(heatGrid(eo, { cell: 11, title: "E" + j }));
       });
-      body.appendChild(formula("\\text{out} = \\sum_j \\hat{p}_j \\, E_j(x)", "weighted sum of the selected experts' outputs"));
       tensorBlock(body, "out", "out (S, D)", m.out, { cell: 14, names: ["S", "D"] });
     };
   }
@@ -1134,8 +1136,8 @@ function ffnSubView(sub, bIdx, bt) {
 const EXPLAIN = {
   emb: { what: "Looks up each token id in the embedding table — a pure table gather, one D-vector per token.", why: "Positions play no role here: the same id gets the same vector wherever it sits. Order information enters later, via RoPE inside attention." },
   pos: { what: "Positions 0…S−1 become angle tables (cos/sin) consumed by RoPE inside every attention block.", why: "This model has no learned position embedding — the dashed edge shows the only route position information takes into the network." },
-  ln1: { what: "RMSNorm before attention: rescales each row to unit root-mean-square, then applies the learned gain γ.", why: "Pre-norm keeps activations at a stable scale across depth, which is what makes deep stacks trainable without careful initialization tricks." },
-  ln2: { what: "RMSNorm before the feed-forward — same operation as LN1, own γ.", why: "Normalizing the residual stream (not the raw block input) keeps the attention result h well-scaled before the FFN reads it." },
+  ln1: { what: "RMSNorm #1: rescales each position's vector to unit root-mean-square length, then applies a learned per-channel gain γ — and this normed COPY is the only input attention ever sees.", why: "Why two norms per block? Because two sublayers read the stream at different points: attention reads x, the FFN later reads h = x + attn. Attention is scale-sensitive (q·k grows quadratically with magnitude, and softmax saturates on big scores), so each block re-calibrates before attention — while the stream x itself stays unnormalized, keeping the identity path intact (pre-norm)." },
+  ln2: { what: "RMSNorm #2: the same operation with its own γ, applied to h = x + attn_out — the normed copy the feed-forward reads.", why: "A separate norm because h has a different scale than x (attention just added its delta). Two independent γs let each sublayer see inputs in the range its weights were trained for. The unnormalized h keeps flowing to the second residual add untouched — the norm never rewrites the stream." },
   attn: { what: "Attention: each position scores every earlier position, then mixes their value vectors by match strength.", why: "This is the only stage where tokens exchange information. Everything else (norms, FFN) processes each position independently." },
   "attn.q": { what: "q = xW_q — the query: what this position is looking for.", why: "q, k and v come from the SAME input through three different matrices — one input, three roles." },
   "attn.k": { what: "k = xW_k — the key: what this position advertises.", why: "A key is meant to be matched against queries; RoPE will rotate it so position shows up in the match score." },
@@ -1145,7 +1147,8 @@ const EXPLAIN = {
   "attn.mask": { what: "Sets the strict upper triangle of the scores to −∞.", why: "Causality: without the mask, position t would peek at the future it is supposed to predict." },
   "attn.softmax": { what: "Row-wise softmax over scores → attention weights (each row sums to 1).", why: "Exponentiating emphasizes the best match; normalization turns scores into a mixing recipe." },
   "attn.o": { what: "ctx = A·V (weighted value mix, heads merged), then out = ctx·W_o projects back to width D.", why: "W_o is where the H per-head answers are combined into one D-vector for the residual stream." },
-  h: { what: "h = x + attn_out — a plain element-wise add.", why: "The residual connection is the gradient highway: it lets each block be a small correction instead of a rewrite, which is what makes depth trainable." },
+  h: { what: "h = x + attn_out — a plain element-wise add: x passes through unchanged, attention only ADDS a correction.", why: "The residual connection is the gradient highway: ∂h/∂x = I + ∂attn/∂x — the identity term carries gradients to earlier blocks unshrunk, so stacking blocks stays trainable. It also means each block is a small correction, not a rewrite: features learned early are never erased." },
+  out: { what: "out = h + ffn_out — the block's second residual add; out becomes the next block's input x.", why: "Both sublayers follow the same contract: read the stream through its own RMSNorm, compute a delta, add it back. After L blocks the hidden state is x plus the sum of every block's two deltas — nothing is overwritten anywhere, which is what makes deep stacks optimizable end to end." },
   ffn: { what: "Feed-forward: per-position widen → non-linearity → narrow (SwiGLU), or MoE (router + experts).", why: "Attention routes information between tokens; the FFN is where each token's content is actually processed. Most of the parameters live here." },
   "ffn.gate": { what: "gate = SiLU(xW_g), with SiLU(z) = z·σ(z) — a smooth self-gating non-linearity.", why: "Unlike ReLU it is smooth at 0, so gradients flow through the gate without dead zones." },
   "ffn.up": { what: "up = xW_u — the raw content projection (same width as the gate).", why: "The gate modulates this projection element-wise: the network can switch parts of the width on or off per position." },
@@ -1178,10 +1181,8 @@ function renderInspector() {
     title.textContent = "Token embedding";
     const toks = RECORD.steps[CUR_STEP].input_tokens;
     view = (body) => {
-      body.appendChild(matLabel(`input tokens (step ${CUR_STEP}): ${toks.join(", ")}`));
-      body.appendChild(heatGrid([toks.map((t) => t)], { cell: 22, title: "token id", rowLabels: toks.map((_, i) => i) }));
-      body.appendChild(numsTable([toks.map((t) => t)]));
-      body.appendChild(formula("x_{\\text{emb}}[s, d] = E[\\text{token}_s, d]", "a pure table lookup — (V, D) row gather, no arithmetic; positions are NOT involved here"));
+      body.appendChild(formula("x_{\\text{emb}}[s, :] = E[\\text{token}_s, :]", "a pure table lookup — row token_s of the (V, D) matrix E, no arithmetic; the same id always gets the same D-vector, and positions are NOT involved here (order enters later, via RoPE inside attention)"));
+      tensorBlock(body, "in", `input token ids (S,) — step ${CUR_STEP}`, toks.map((t) => [t]), { cell: 22, rowLabels: toks.map((_, i) => i), names: ["S", ""] });
       tensorBlock(body, "out", "embedding x (S, D) — row r = token r", f.embedding, { cell: 14, rowLabels: toks.map((t) => vocab()[t] ?? `#${t}`), names: ["S", "D"] });
     };
   } else if (id === "pos") {
@@ -1257,14 +1258,14 @@ function renderInspector() {
         title.textContent = `block ${b} — ${isH ? "residual after attention" : "block output"}`;
         view = (body) => {
           if (isH) {
+            body.appendChild(formula("h = x + \\text{attn}(\\text{LN1}(x))", "the skip connection: x flows through unchanged, attention only ADDS a correction — mathematically ∂h/∂x = I + ∂attn/∂x, so gradients reach earlier blocks unshrunk (verify: cell-wise, out = left + right below)"));
             tensorBlock(body, "in", "residual x (block input)", bt.xIn, { cell: 12, names: ["S", "D"] });
             tensorBlock(body, "in", "attn_out (from attention)", bt.attn.attn_out, { cell: 12, names: ["S", "D"] });
-            body.appendChild(formula("h = x + \\text{attn}(x)", "the skip connection that makes depth stable"));
             tensorBlock(body, "out", "h (S, D)", [bt.h], { cell: 14, names: ["S", "D"] });
           } else {
+            body.appendChild(formula("\\text{out} = h + \\text{ffn}(\\text{LN2}(h))", "the block's second skip connection — the stream accumulates: out = x + attn + ffn, nothing is overwritten; out becomes the next block's input (verify cell-wise: bottom = top + middle)"));
             tensorBlock(body, "in", "residual h", [bt.h], { cell: 12, names: ["S", "D"] });
             tensorBlock(body, "in", "ffn output", [bt.moe ? bt.moe.out : bt.ffn.out], { cell: 12, names: ["S", "D"] });
-            body.appendChild(formula("\\text{out} = h + \\text{ffn}(h)", "block output — becomes the next block's input"));
             tensorBlock(body, "out", "out (S, D)", [bt.out], { cell: 14, names: ["S", "D"] });
           }
         };
