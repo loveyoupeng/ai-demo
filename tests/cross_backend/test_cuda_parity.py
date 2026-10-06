@@ -113,6 +113,34 @@ class TestCUDAStepParity:
             cuda_last = cuda_model.forward_step(x[:, [-1]], 3, c_cache)
         assert th.allclose(torch_last, cuda_last, rtol=1e-3, atol=1e-3), "torch and CUDA step logits must agree"
 
+    def test_partial_rope_forward_parity_torch_cuda(self) -> None:
+        """True partial RoPE (rope_dim=8 < head_dim=16): torch and CUDA produce
+        equal logits — the CUDA track must rotate only the first rope_dim dims."""
+        from impl._cuda.model import CUDAModel
+        from impl._torch.layers import TorchModel
+
+        cfg = TransformerConfig.from_dict(
+            {
+                "vocab_size": 64,
+                "embed_dim": 32,
+                "n_layers": 2,
+                "n_heads": 2,  # head_dim = 16
+                "rope_dim": 8,  # partial: rotate first 8 of 16 head dims
+                "seed": 42,
+            }
+        )
+        torch_model = TorchModel(cfg).cuda().eval()
+        cuda_model = CUDAModel(cfg)
+        cuda_model.load_from_numpy_dict(torch_model.save_as_numpy())
+
+        x = th.randint(0, 64, (1, 6), dtype=th.int64, device="cuda")
+        with th.no_grad():
+            torch_logits = torch_model(x)
+            cuda_logits = cuda_model.forward(x)
+        assert th.allclose(torch_logits, cuda_logits, rtol=1e-3, atol=1e-3), (
+            "torch and CUDA logits must agree under partial RoPE (rope_dim=8, head_dim=16)"
+        )
+
     def test_forward_1layer_shape(self) -> None:
         """1-layer forward output has correct shape."""
         from impl._cuda.model import CUDAModel

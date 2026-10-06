@@ -55,8 +55,8 @@ def _validate_prompt(prompt: torch.Tensor) -> torch.Tensor:
     """Assert the prompt is a 2-D int tensor; return it unchanged."""
     if prompt.dim() != 2:
         raise ValueError(f"prompt must be 2-D (batch, seq_len), got {prompt.dim()}-D")
-    if not torch.is_floating_point(prompt) and prompt.dtype not in (torch.int32, torch.int64, torch.long):
-        raise ValueError(f"prompt must be integer token IDs, got {prompt.dtype}")
+    if prompt.dtype not in (torch.int32, torch.int64):
+        raise ValueError(f"prompt must be integer token IDs (int32/int64), got {prompt.dtype}")
     return prompt
 
 
@@ -150,6 +150,10 @@ class TextGenerator:
         cache = self.model.make_cache(batch_size)
 
         logits, cache = self.model.forward_prefill(sequence)
+        # Tracks may relocate inputs (the CUDA track owns device placement) —
+        # the sequence follows the model's emitted logits so torch.cat keeps
+        # one device downstream.
+        sequence = sequence.to(logits.device)
         next_logits = logits[:, -1, :]  # (B, V)
 
         # Repetition guard — same rule as every other sampler in the repo

@@ -156,9 +156,8 @@ class _RoPEKernels:
 
 
 def _compute_rope_tables(
-    head_dim: int,
+    d_rot: int,
     max_position: int,
-    rope_dim: int,
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -169,12 +168,12 @@ def _compute_rope_tables(
 
     Parameters
     ----------
-    head_dim : int
-        Head dimension (D, must be even).
+    d_rot : int
+        Number of dimensions actually rotated (must be even) — the rotated
+        width, which is the frequency schedule denominator (matches the
+        NumPy/Torch tracks: theta_m = 10000**(-2m / d_rot)).
     max_position : int
         Maximum position index (context length).
-    rope_dim : int
-        Number of dimensions to rotate (must be even, <= head_dim).
     device : torch.device
         CUDA device.
     dtype : torch.dtype
@@ -182,23 +181,23 @@ def _compute_rope_tables(
 
     Returns
     -------
-    cos : torch.Tensor, shape (max_position, rope_dim // 2)
+    cos : torch.Tensor, shape (max_position, d_rot // 2)
         Per-position cosine values for each dimension pair.
-    sin : torch.Tensor, shape (max_position, rope_dim // 2)
+    sin : torch.Tensor, shape (max_position, d_rot // 2)
         Per-position sine values for each dimension pair.
 
     Notes
     -----
-    Frequency formula: θ_m = 10000^(-2m / head_dim) for m = 0..D/2-1
+    Frequency formula: theta_m = 10000^(-2m / d_rot) for m = 0..d_rot/2-1
 
-    The 10000 base creates a range of frequencies from period 2π (slowest)
-    to period 2π/10000 (fastest), allowing the model to detect both
-    local and distant position relations.
+    The 10000 base creates a range of frequencies from period 2*pi
+    (fastest per-step phase change) to period ~2*pi*10000 (slowest),
+    allowing the model to detect both local and distant position relations.
     """
-    pair_dim = rope_dim // 2
+    pair_dim = d_rot // 2
 
     # freqs: (pair_dim,)
-    freqs = 1.0 / (10000.0 ** (torch.arange(pair_dim, device=device, dtype=dtype) * 2.0 / head_dim))
+    freqs = 1.0 / (10000.0 ** (torch.arange(pair_dim, device=device, dtype=dtype) * 2.0 / d_rot))
 
     # positions: (max_position,)
     positions = torch.arange(max_position, device=device, dtype=dtype)
@@ -357,6 +356,7 @@ class _RoPECudaFunction(torch.autograd.Function):
         ctx: Any,
         x: torch.Tensor,
         positions: torch.Tensor,
+        rope_dim: int = 0,
     ) -> torch.Tensor:
         """Forward pass: apply RoPE rotation to input tensor.
 
@@ -368,6 +368,11 @@ class _RoPECudaFunction(torch.autograd.Function):
             Input tensor on device, shape (B, S, H, D).
         positions : torch.Tensor
             Position indices, shape (S,) or (B, S) — flattened to (S).
+        rope_dim : int, optional
+            Number of head dimensions to rotate (must be even, <= D).
+            0 (default) rotates ALL dims (standard RoPE); a value in
+            (0, D) rotates the first rope_dim dims and passes the tail
+            through unchanged (partial RoPE, matches NumPy/Torch tracks).
 
         Returns
         -------
@@ -393,16 +398,20 @@ class _RoPECudaFunction(torch.autograd.Function):
         # Per-token position vector (B*S*H,) for the kernel (one entry per head)
         pos_flat = _flatten_positions(positions, x.shape[0], x.shape[1], x.shape[2], x.device)
 
-        rope_dim = x.shape[-1]  # All dimensions are rotated
+        # Effective rotated width: 0 or D means standard full-head RoPE;
+        # 0 < rope_dim < D rotates only the first rope_dim dims (partial RoPE).
+        D = x.shape[-1]
+        d_rot = rope_dim if 0 < rope_dim < D else D
+        ctx.d_rot = d_rot
 
-        # Compute cos/sin tables
+        # Compute cos/sin tables — frequency denominator is d_rot, matching
+        # the NumPy/Torch tracks (theta_m = 10000**(-2m / d_rot)).
         max_pos = int(positions.max()) + 1
         cos_table, sin_table = _compute_rope_tables(
-            head_dim=x.shape[-1],
-            max_position=max_pos,
-            rope_dim=rope_dim,
-            device=x.device,
-            dtype=x.dtype,
+            d_rot,
+            max_pos,
+            x.device,
+            x.dtype,
         )
 
         # Create output tensor
@@ -418,8 +427,8 @@ class _RoPECudaFunction(torch.autograd.Function):
                 output_flat,
                 n_tokens,
                 pos_flat,
-                x.shape[-1],  # D
-                rope_dim,
+                D,
+                d_rot,
             )
         else:
             _launch_rope_kernel(
@@ -430,8 +439,8 @@ class _RoPECudaFunction(torch.autograd.Function):
                 output_flat,
                 n_tokens,
                 pos_flat,
-                x.shape[-1],  # D
-                rope_dim,
+                D,
+                d_rot,
             )
 
         return output_flat.view(original_shape)
@@ -456,13 +465,15 @@ class _RoPECudaFunction(torch.autograd.Function):
         Returns
         -------
         tuple
-            (grad_x, None, None) — only x has requires_grad, positions doesn't.
+            (grad_x, None, None) — only x has requires_grad; positions and
+            rope_dim are not differentiable.
         """
         input_tensor, positions = ctx.saved_tensors
-        rope_dim = input_tensor.shape[-1]
+        D = input_tensor.shape[-1]
+        d_rot = getattr(ctx, "d_rot", D)  # rotated width used in forward
 
         # Flatten gradient
-        grad_flat = grad_outputs[0].reshape(-1, input_tensor.shape[-1])
+        grad_flat = grad_outputs[0].reshape(-1, D)
         n_tokens = grad_flat.shape[0]
         pos_flat = _flatten_positions(
             positions,
@@ -472,14 +483,14 @@ class _RoPECudaFunction(torch.autograd.Function):
             input_tensor.device,
         )
 
-        # Compute cos/sin tables (same as forward)
+        # Compute cos/sin tables (same d_rot as forward; the suffix pass-
+        # through gradient is the identity, handled by the kernel's tail copy)
         max_pos = int(positions.max()) + 1
         cos_table, sin_table = _compute_rope_tables(
-            head_dim=input_tensor.shape[-1],
-            max_position=max_pos,
-            rope_dim=rope_dim,
-            device=input_tensor.device,
-            dtype=input_tensor.dtype,
+            d_rot,
+            max_pos,
+            input_tensor.device,
+            input_tensor.dtype,
         )
 
         # Create output for gradient
@@ -495,8 +506,8 @@ class _RoPECudaFunction(torch.autograd.Function):
                 grad_x_flat,
                 n_tokens,
                 pos_flat,
-                input_tensor.shape[-1],  # D
-                rope_dim,
+                D,
+                d_rot,
             )
         else:
             _launch_rope_kernel(
@@ -507,11 +518,11 @@ class _RoPECudaFunction(torch.autograd.Function):
                 grad_x_flat,
                 n_tokens,
                 pos_flat,
-                input_tensor.shape[-1],  # D
-                rope_dim,
+                D,
+                d_rot,
             )
 
-        return grad_x_flat.reshape(input_tensor.shape), None
+        return grad_x_flat.reshape(input_tensor.shape), None, None
 
 
 # ---------------------------------------------------------------------------
@@ -550,10 +561,11 @@ def apply_rope(
     positions : torch.Tensor, shape (S,)
         Position indices for each sequence element (0 to S-1).
     rope_dim : int, optional
-        Number of head dimensions to rotate. Accepted for signature parity
-        with the other tracks but CURRENTLY IGNORED: the kernel always
-        rotates all D dims (rope_dim is not wired through). Wiring partial
-        rotation awaits a numerics ruling on the kernel.
+        Number of head dimensions to rotate (must be even, <= D).
+        0 (default) rotates ALL dims (standard RoPE); a value in (0, D)
+        rotates the first rope_dim dims and leaves the tail untouched
+        (partial RoPE — same semantics as the NumPy/Torch tracks; the
+        frequency schedule denominator is the rotated width d_rot).
 
     Returns
     -------
@@ -583,4 +595,4 @@ def apply_rope(
     Su et al. "RoFormer: Enhanced Transformer with Rotary Position Embedding"
     https://arxiv.org/abs/2104.09864
     """
-    return _RoPECudaFunction.apply(x, positions)
+    return _RoPECudaFunction.apply(x, positions, rope_dim)

@@ -38,7 +38,7 @@ class TestValidatePrompt:
         from shared.generator import _validate_prompt
 
         with pytest.raises(ValueError, match="integer"):
-            _validate_prompt(torch.tensor([1.0, 2.0, 3.0]))
+            _validate_prompt(torch.tensor([[1.0, 2.0, 3.0]]))
 
     def test_3d_rejected(self) -> None:
         """3D+ tensors raise ValueError."""

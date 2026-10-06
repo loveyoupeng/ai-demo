@@ -204,10 +204,13 @@ class TestRMSNormCUDA:
 
 class TestRoPECUDA:
     @pytest.mark.timeout(30)
-    def test_rope_matches_torch_float32(self):
-        """Same float32 input → same output as torch RoPE (rtol=1e-4, atol=1e-4)."""
+    def test_rope_matches_numpy_reference_float32(self):
+        """Full rotation: CUDA float32 matches the NumPy reference (rtol=1e-4)."""
         skip_if_no_gpu()
+        import numpy as np
+
         from impl._cuda.rope import apply_rope
+        from impl._np.rope import RoPE
 
         B, S, H, D = 2, 4, 2, 8
         torch.manual_seed(42)
@@ -215,15 +218,24 @@ class TestRoPECUDA:
         positions = torch.arange(S, dtype=torch.int64, device="cuda")
 
         y_cuda = apply_rope(x, positions)
-        y_torch = apply_rope(x, positions)
+        y_ref = RoPE().forward(x.cpu().numpy(), positions.cpu().numpy(), rope_dim=0)
 
-        torch.testing.assert_close(y_cuda, y_torch, rtol=1e-4, atol=1e-4, msg="CUDA RoPE != torch RoPE float32")
+        torch.testing.assert_close(
+            y_cuda,
+            torch.tensor(np.asarray(y_ref), dtype=torch.float32, device="cuda"),
+            rtol=1e-4,
+            atol=1e-4,
+            msg="CUDA RoPE (full) != NumPy reference float32",
+        )
 
     @pytest.mark.timeout(30)
-    def test_rope_matches_torch_float64(self):
-        """Same float64 input → same output as torch RoPE (rtol=1e-4, atol=1e-4)."""
+    def test_rope_matches_numpy_reference_float64(self):
+        """Full rotation: CUDA float64 matches the NumPy reference tightly."""
         skip_if_no_gpu()
+        import numpy as np
+
         from impl._cuda.rope import apply_rope
+        from impl._np.rope import RoPE
 
         B, S, H, D = 2, 4, 2, 8
         torch.manual_seed(42)
@@ -231,9 +243,90 @@ class TestRoPECUDA:
         positions = torch.arange(S, dtype=torch.int64, device="cuda")
 
         y_cuda = apply_rope(x, positions)
-        y_torch = apply_rope(x, positions)
+        y_ref = RoPE().forward(x.cpu().numpy(), positions.cpu().numpy(), rope_dim=0)
 
-        torch.testing.assert_close(y_cuda, y_torch, rtol=1e-4, atol=1e-4, msg="CUDA RoPE != torch RoPE float64")
+        torch.testing.assert_close(
+            y_cuda,
+            torch.tensor(np.asarray(y_ref), dtype=torch.float64, device="cuda"),
+            rtol=1e-6,
+            atol=1e-6,
+            msg="CUDA RoPE (full) != NumPy reference float64",
+        )
+
+    @pytest.mark.timeout(30)
+    def test_rope_partial_rotation_matches_numpy(self):
+        """Partial RoPE (rope_dim=D//2): prefix rotated like the NumPy reference,
+        suffix dims pass through unchanged."""
+        skip_if_no_gpu()
+        import numpy as np
+
+        from impl._cuda.rope import apply_rope
+        from impl._np.rope import RoPE
+
+        B, S, H, D = 2, 5, 2, 16
+        rope_dim = 8  # true partial: 8 < head_dim 16
+        torch.manual_seed(7)
+        x = torch.randn(B, S, H, D, dtype=torch.float64, device="cuda")
+        positions = torch.arange(S, dtype=torch.int64, device="cuda")
+
+        y_cuda = apply_rope(x, positions, rope_dim=rope_dim)
+        y_ref = RoPE().forward(x.cpu().numpy(), positions.cpu().numpy(), rope_dim=rope_dim)
+
+        # Suffix dims must pass through untouched (identity, not rotation)
+        torch.testing.assert_close(
+            y_cuda[..., rope_dim:], x[..., rope_dim:], rtol=0, atol=0, msg="partial RoPE rotated the suffix dims"
+        )
+        # Full result matches the NumPy reference (rotated prefix included)
+        torch.testing.assert_close(
+            y_cuda,
+            torch.tensor(np.asarray(y_ref), dtype=torch.float64, device="cuda"),
+            rtol=1e-6,
+            atol=1e-6,
+            msg="CUDA partial RoPE != NumPy reference — rope_dim must be wired through",
+        )
+
+    @pytest.mark.timeout(30)
+    def test_rope_partial_backward_matches_numpy(self):
+        """Partial RoPE backward: CUDA autograd gradient matches the NumPy
+        analytic backward; suffix gradient passes through unchanged."""
+        skip_if_no_gpu()
+        import numpy as np
+
+        from impl._cuda.rope import apply_rope
+        from impl._np.rope import RoPE
+
+        B, S, H, D = 2, 5, 2, 16
+        rope_dim = 8
+        torch.manual_seed(11)
+        x_np = np.random.RandomState(11).randn(B, S, H, D)
+        dout_np = np.random.RandomState(13).randn(B, S, H, D)
+        pos_np = np.arange(S, dtype=np.int64)
+
+        # CUDA autograd path
+        x = torch.tensor(x_np, dtype=torch.float64, device="cuda", requires_grad=True)
+        positions = torch.tensor(pos_np, device="cuda")
+        y = apply_rope(x, positions, rope_dim=rope_dim)
+        y.backward(torch.tensor(dout_np, dtype=torch.float64, device="cuda"))
+        dx_cuda = x.grad
+
+        # NumPy analytic backward (verified reference)
+        dx_ref = RoPE().backward(dout_np, x_np, pos_np.astype(np.int32), rope_dim=rope_dim)
+
+        torch.testing.assert_close(
+            dx_cuda,
+            torch.tensor(dx_ref, dtype=torch.float64, device="cuda"),
+            rtol=1e-6,
+            atol=1e-6,
+            msg="CUDA partial RoPE backward != NumPy reference",
+        )
+        # Suffix gradient is the identity path
+        torch.testing.assert_close(
+            dx_cuda[..., rope_dim:],
+            torch.tensor(dout_np, dtype=torch.float64, device="cuda")[..., rope_dim:],
+            rtol=1e-9,
+            atol=1e-12,
+            msg="suffix gradient must pass through unchanged",
+        )
 
     @pytest.mark.timeout(30)
     def test_rope_shapes(self):

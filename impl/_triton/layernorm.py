@@ -1,9 +1,10 @@
 """Layer normalization kernel — RMSNorm via Triton.
 
 RMSNorm (Root Mean Square Layer Normalization) is used in modern LLMs
-(Transformer-XL, GPT-2, LLaMA) instead of standard LayerNorm because
+(LLaMA, Gemma, Mistral, Qwen) instead of standard LayerNorm because
 it removes the mean-shift operation, reducing computational cost while
-maintaining comparable accuracy.
+maintaining comparable accuracy. (Transformer-XL and GPT-2 use standard
+LayerNorm — RMSNorm enters the mainstream with LLaMA.)
 
 Algorithm
 ---------
@@ -11,9 +12,9 @@ Standard LayerNorm:  y = (x - mean(x)) /sqrt(var(x) + eps) * gamma
 RMSNorm:            y = x / sqrt(mean(x^2) + eps) * gamma
 
 RMSNorm skips the mean subtraction step, computing normalization
-from the root-mean-square of activations only. This is mathematically
-equivalent when activations are zero-centered, which they tend to be
-after residual connections.
+from the root-mean-square of activations only. It is not equivalent to
+LayerNorm — it is the deliberately cheaper variant that LLaMA showed
+trains just as well.
 
 Mathematical derivation
 -----------------------
@@ -30,12 +31,14 @@ Memory access pattern
 ---------------------
 Two-pass algorithm over the feature dimension:
 
-  Pass 1 (lines 51-58): Load x^2 per block, accumulate to scalar sum.
+  Pass 1 (``_rmsnorm_kernel``, accumulation loop): load x^2 per block,
+  accumulate to a scalar sum.
     - Each program handles one row (one token position)
     - Within-row, features are split into BLOCK_SIZE chunks
     - Uses tl.sum() to reduce block to scalar
 
-  Pass 2 (lines 64-70): Normalize each element and scale by gamma.
+  Pass 2 (same kernel, after the loop): normalize each element and scale
+  by gamma.
     - Re-load x and gamma per block
     - Element-wise divide by pre-computed RMS scalar
     - Multiply by gamma, store result
@@ -194,10 +197,10 @@ def _rmsnorm_kernel(
             other=0.0,  # Default value for masked elements
         ).to(tl.float32)  # (BLOCK_SIZE,) — element-wise float32 conversion
 
-        # Square each element: x^2
+        # Square each element and ACCUMULATE: x_sq_acc += x^2 on this block
         x_sq_acc = tl.where(
             feature_mask,  # Condition per element
-            x_block * x_block,  # True: use x^2
+            x_sq_acc + x_block * x_block,  # True: accumulate x^2
             x_sq_acc,  # False: keep accumulated value
         )
 
@@ -262,21 +265,18 @@ class _RmsNormTriton(torch.autograd.Function):
 
     Backward formula derivation
     ---------------------------
-    Given: y_i = x_i / r * gamma_i, where r = sqrt(1/D * sum(x_j^2) + eps)
+    Given: y_i = x_hat_i * gamma_i, x_hat = x / r, r = sqrt(1/D * sum(x_j^2) + eps)
 
-    dL/dgamma = sum_i(y_i * dL/dy_i)  →  (D,)  (simple accumulation)
+    dL/dgamma_i = sum over rows of (dL/dy_i * x_hat_i)  →  (D,)
 
-    dL/dx_i:
-        Let d_i = dL/dy_i
-        dr/dx_i = x_i / (r * D)
-        dy_i/dx_i = 1/r - x_i * gamma_i / (r^2 * D)
-        dy_i/dr = -x_i * gamma_i / (r^2)
+    dL/dx_i (chain rule through r — the Jacobian of x/r is a scaled
+    projection, so the radial component is deflated):
+        u_j = dL/dy_j * gamma_j
+        dL/dx_i = (1/r) * (u_i - x_hat_i * mean_j(u_j * x_hat_j))
 
-        Summing via chain rule:
-        dL/dx_i = (1/r) * gamma_i * (d_i - mean(d_j * y_j) * y_i)
-
-    The key insight: dx can be computed from the OUTPUT y, not from x
-    directly. This is why we must save x to recompute y in backward.
+    The key insight: dx needs x_hat = x / r, not the final y; we save x
+    in forward and recompute x_hat in backward. Matches the verified
+    NumPy reference (impl/_np/layernorm.py, RMSNorm.backward).
 
     Parameters
     ----------
@@ -383,22 +383,23 @@ class _RmsNormTriton(torch.autograd.Function):
     def backward(ctx: Any, grad_output: torch.Tensor) -> tuple[torch.Tensor | None, ...]:  # pyright: ignore[reportIncompatibleMethodOverride]
         """Backward pass: compute dL/dx and dL/dgamma.
 
-        RMSNorm backward derivation:
+        RMSNorm backward (reference form, impl/_np/layernorm.py):
         ─────────────────────────
-        Forward: y = x / r * gamma,  where r = sqrt(mean(x^2) + eps)
+        Forward: y = x_hat * gamma, x_hat = x / r, r = sqrt(mean(x^2) + eps)
 
         dL/dgamma:
-          = sum(output * grad_output) over batch/seq  → shape (D,)
+          = sum(x_hat * grad_output) over batch/seq rows  → shape (D,)
 
         dL/dx:
-          = (1/r) * gamma * (grad_output - mean(grad_output * y) * y)
+          u = grad_output * gamma
+          = (1/r) * (u - x_hat * mean(u * x_hat, dim=-1))
           → shape (batch, seq, D)
 
         where mean is taken over the feature dimension D.
 
-        Key insight: the gradient computation uses the FORWARD output y,
-        not the input x. This means we must save x during forward to
-        recompute y = x / r * gamma in the backward pass.
+        Key insight: the gradient needs x_hat = x / r (the normalized
+        input), not the final y. We save x during forward and recompute
+        x_hat in the backward pass.
 
         Parameters
         ----------
@@ -421,33 +422,29 @@ class _RmsNormTriton(torch.autograd.Function):
         eps = ctx.eps
         D = ctx.n_features
 
-        # Flatten to 2D: (n_rows, D) for per-row reduction
+        # ── Reconstruct x_hat = x / r from the saved input ─────────
+        # r = sqrt(mean(x^2) + eps)  (n_rows, 1)
         x_flat = x.view(-1, D)  # (n_rows, D)
         grad_out_flat = grad_output.contiguous().view(-1, D)  # (n_rows, D)
 
         n_rows, D_actual = x_flat.shape
         assert D_actual == D
 
-        # ── Compute dgamma: element-wise product + sum ────────────
-        # Reconstruct y from saved x: y = (x / r) * gamma
-        # where r = sqrt(mean(x^2) + eps)
         mean_x_sq = torch.mean(x_flat**2, dim=-1, keepdim=True)  # (n_rows, 1)
         rms_x = torch.sqrt(mean_x_sq + eps)  # (n_rows, 1)
-        y = (x_flat / rms_x) * gamma  # (n_rows, D) — forward output
+        x_hat = x_flat / rms_x  # (n_rows, D) — normalized input (pre-gamma)
 
-        # dgamma = sum(y * grad_output) — accumulate per-feature
-        dgamma = torch.sum(y * grad_out_flat, dim=0)  # (D,)
+        # ── dgamma = sum over rows of (dout ⊙ x_hat) → (D,) ────────
+        # out = x_hat * gamma, so ∂out/∂gamma is x_hat, not the final y.
+        dgamma = torch.sum(grad_out_flat * x_hat, dim=0)  # (D,)
 
-        # ── Compute dx: chain rule through RMSNorm ────────────────
-        # mean(dy_y) = sum_j(grad_out_ij * y_ij) / D → (n_rows, 1)
-        # This is the projection of grad_output onto the output direction,
-        # captured for each row independently.
-        mean_dy_y = torch.sum(grad_out_flat * y, dim=-1, keepdim=True) / D  # (n_rows, 1)
-
-        # dx = (1/r) * gamma * (grad_out - mean(dy_y) * y)
-        # This formula is derived from the chain rule through the
-        # RMS normalization — see the class docstring for derivation.
-        dx = (1.0 / rms_x) * gamma * (grad_out_flat - mean_dy_y * y)  # (n_rows, D)
+        # ── dx = (1/r) * (u − x_hat * mean(u ⊙ x_hat)),  u = dout * gamma ──
+        # Chain rule through r: the Jacobian of x/r is a scaled projection —
+        # the mean term removes the radial (scale-changing) component.
+        # Matches impl/_np/layernorm.py (RMSNorm.backward) exactly.
+        u = grad_out_flat * gamma  # (n_rows, D) — dout scaled by the gain
+        mean_u_xhat = torch.sum(u * x_hat, dim=-1, keepdim=True) / D  # (n_rows, 1)
+        dx = (u - x_hat * mean_u_xhat) / rms_x  # (n_rows, D)
 
         # Reshape gradients back to original input shape
         return dx.view_as(x), dgamma, None, None

@@ -275,8 +275,12 @@ class _RmsNormCudaFunction(torch.autograd.Function):
     def backward(ctx: Any, *grad_outputs: torch.Tensor) -> tuple[torch.Tensor | None, ...]:
         """Backward pass for RMSNorm.
 
-        Gradient computation:
-            d_input = gamma * inv_rms * (d_output - mean(d_output * normalized_input) * normalized_input)
+        Gradient computation (matches the NumPy reference,
+        impl/_np/layernorm.py):
+            u       = d_output * gamma
+            d_input = inv_rms * (u - mean(u * x_norm) * x_norm)
+            d_gamma = sum(d_output * x_norm) over batch/seq rows
+            with x_norm = x * inv_rms, inv_rms = 1/sqrt(mean(x^2, -1) + eps)
 
         Parameters
         ----------
@@ -306,22 +310,21 @@ class _RmsNormCudaFunction(torch.autograd.Function):
 
         grad_output = grad_outputs[0].view(N, D)
 
-        # RMSNorm gradient, as implemented here (uses the gamma-SCALED d_out;
-        # this differs from the standard reference derivation — unifying the
-        # numerics with the other tracks is pending a ruling):
-        #   d_x = gamma * inv_rms * (d_out_scaled - mean(d_out_scaled * x_norm) * x_norm)
-        # where d_out_scaled = d_out * gamma and x_norm = x * inv_rms.
+        # RMSNorm gradient, reference form (matches impl/_np/layernorm.py
+        # RMSNorm.backward and the Triton track exactly):
+        #   u = d_out * gamma
+        #   d_x = inv_rms * (u - mean(u * x_norm) * x_norm)
         inv_rms = 1.0 / torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + eps)
         x_norm = x * inv_rms  # normalized (before gamma scaling)
 
-        # d_out_scaled = d_out * gamma
-        d_out_scaled = grad_output * gamma.unsqueeze(0)
+        u = grad_output * gamma.unsqueeze(0)  # d_out scaled by the gain
 
-        # mean(d_out_scaled * x_norm) — per-row mean
-        mean_val = torch.mean(d_out_scaled * x_norm, dim=-1, keepdim=True)
+        # mean(u * x_norm) — per-row mean over the feature dim
+        mean_val = torch.mean(u * x_norm, dim=-1, keepdim=True)
 
-        # d_x = gamma * inv_rms * (d_out_scaled - mean_val * x_norm)
-        grad_input = gamma.unsqueeze(0) * inv_rms * (d_out_scaled - mean_val * x_norm)
+        # The Jacobian of x/rms is a scaled projection: the mean term
+        # removes the radial (scale-changing) component of u.
+        grad_input = inv_rms * (u - mean_val * x_norm)
 
         # Gradient for gamma: sum over all dimensions except last (feature dimension)
         # normalized has same shape as input (B, S, D) or (N, D)

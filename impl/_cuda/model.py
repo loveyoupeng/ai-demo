@@ -105,7 +105,11 @@ class CUDAModel:
             → RMSNorm: (B, S, D)
             → lm_head @: (B, S, V)
         """
-        device = x.device
+        # (B, S) int token IDs; moved to the model's device — the blocks
+        # launch CUDA kernels unconditionally, so a CPU input would pass a
+        # host pointer into a kernel (illegal address).
+        device = self.device
+        x = x.to(device)
         # (B, S) → (B, S, D)
         x = self.embedding_weights.to(device)[x]
         # (B, S, D) → (B, S, D)
@@ -115,6 +119,17 @@ class CUDAModel:
         # (B, S, D) @ (D, V) → (B, S, V)
         logits = x @ self.lm_head_weight.to(device)
         return logits  # (B, S, V)
+
+    @property
+    def device(self) -> torch.device:
+        """The model's compute device. The blocks launch CUDA kernels
+        unconditionally, so the only valid placement is CUDA — inputs are
+        moved here at every entry point, and the cache is created here.
+        (Weights themselves live on CPU and are staged per call via
+        ``.to(device)``; that's the documented follow-the-input idiom of
+        this track, not a reason to follow a CPU input to a CPU "device".)
+        """
+        return torch.device("cuda")
 
     def make_cache(self, batch_size: int) -> list[dict[str, torch.Tensor]]:
         """Create an empty per-layer KV cache for the per-token step path.
@@ -128,7 +143,7 @@ class CUDAModel:
         B = batch_size
         G = self.config.kv_heads
         hd = self.config.head_dim
-        device = self.lm_head_weight.device
+        device = self.device
         dtype = self.lm_head_weight.dtype
         return [
             {
@@ -156,7 +171,11 @@ class CUDAModel:
         B, S = input_ids.shape
         if cache is None:
             cache = self.make_cache(B)
-        device = input_ids.device
+        # Inputs are placed on the model's device (the only placement the
+        # CUDA kernels support); a CPU prompt is moved, never dereferenced
+        # as a device pointer.
+        device = self.device
+        input_ids = input_ids.to(device)
         positions = torch.arange(S, device=device, dtype=torch.long)
         states: list[dict[str, torch.Tensor]] = []
         x = self.embedding_weights.to(device)[input_ids]  # (B, S, D)
@@ -189,9 +208,10 @@ class CUDAModel:
 
         Returns: logits (B, 1, V).
         """
-        device = input_ids.device
-        # Adapt the cache to the input's device (the CUDA track's contract:
-        # the model adapts to the caller's placement).
+        # The CUDA track's contract: inputs are placed on the model's device
+        # (kernels are CUDA-only); the cache follows the same placement.
+        device = self.device
+        input_ids = input_ids.to(device)
         cache = [{"k": c["k"].to(device), "v": c["v"].to(device)} for c in cache]
         x = self.embedding_weights.to(device)[input_ids]  # (B, 1, D)
         stack_out = self.stacking.forward_step(x, position, cache)  # (B, 1, D)
