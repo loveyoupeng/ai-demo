@@ -92,7 +92,19 @@ examples:
     parser.add_argument(
         "--greedy", action="store_true", default=False, help="Use greedy decoding (argmax, deterministic)"
     )
-
+    parser.add_argument(
+        "--spec",
+        type=str,
+        default="plain",
+        choices=["plain", "mtp", "dspark"],
+        help="Decoding mode: plain, or speculative with the MTP/DSpark sidecar drafter (default: plain)",
+    )
+    parser.add_argument(
+        "--spec-k",
+        type=int,
+        default=None,
+        help="Draft block size override for --spec (default: the drafter's trained k)",
+    )
     return parser
 
 
@@ -250,6 +262,62 @@ def generate_single(
     }
 
 
+def generate_speculative(
+    model, model_path: str, prompt_text: str, max_new_tokens: int, spec: str, k: int | None
+) -> dict:
+    """Speculative generation via the sidecar drafters (ADR 0003).
+
+    Loads the ``draft_<spec>`` sidecar beside the checkpoint, runs the
+    track's spec engine (the NumPy engine for the NumPy backend, the
+    shared torch-family engine otherwise), and returns the plain-style
+    result plus the spec stats block (acceptance, rounds, timings).
+    Greedy verification — output is token-identical to plain greedy.
+    """
+    import torch
+
+    from impl._np.model import NumPyModel
+    from shared.draft import load_drafter, sidecar_dir
+
+    vocab_size = model.config.vocab_size
+    prompt_tokens = encode_prompt(prompt_text, vocab_size)[: model.config.context_length]
+    meta, params = load_drafter(sidecar_dir(model_path, spec))
+    if isinstance(model, NumPyModel):
+        from impl._np.drafters import DSparkDrafter as NpDSpark
+        from impl._np.drafters import MTPDrafter as NpMTP
+        from impl._np.spec import SpeculativeGenerator
+
+        cls = NpMTP if meta.family == "mtp" else NpDSpark
+        drafter = cls(meta, model.embedding.weight, model.lm_head_weight)
+        drafter.load_from_numpy_dict(params)
+        seq, stats = SpeculativeGenerator(model, drafter).generate_greedy(
+            np.array([prompt_tokens], dtype=np.int32), max_new_tokens, k=k
+        )
+        all_tokens = seq[0].tolist()
+    else:
+        from impl._torch.drafters import drafter_from_sidecar
+        from shared.spec_engine import SpeculativeGenerator as TorchSpecGen
+
+        with torch.no_grad():
+            emb = model.embed_tokens.weight.detach().clone().float()
+            lm = model.lm_head.weight.detach().clone().float()
+            drafter = drafter_from_sidecar(meta, params, emb, lm)
+            drafter.eval()
+            seq, stats = TorchSpecGen(model, drafter).generate_greedy(
+                torch.tensor([prompt_tokens], dtype=torch.int64), max_new_tokens, k=k
+            )
+        all_tokens = seq[0].detach().cpu().tolist() if hasattr(seq, "detach") else seq[0].tolist()
+    generated = all_tokens[len(prompt_tokens) :] if len(all_tokens) > len(prompt_tokens) else []
+    return {
+        "input_tokens": prompt_tokens,
+        "generated_tokens": generated,
+        "full_tokens": all_tokens,
+        "prompt_text": prompt_text,
+        "generated_text": decode_tokens(generated, vocab_size),
+        "full_text": decode_tokens(all_tokens, vocab_size),
+        "spec_stats": stats,
+    }
+
+
 def main() -> int:
     """Entry point for the inference script.
 
@@ -303,6 +371,20 @@ def main() -> int:
                 args.temperature if not args.greedy else 0.0,
                 args.top_k,
             )
+            if args.spec != "plain":
+                result = generate_speculative(
+                    model, model_path, args.prompt, args.max_new_tokens, args.spec, args.spec_k
+                )
+                _st = result.get("spec_stats", {})
+                print(
+                    f"[spec={args.spec}] rounds={_st.get('n_rounds')} "
+                    f"accepted={_st.get('n_accepted')}/{_st.get('n_draft_tokens')} "
+                    f"tokens-per-target-forward={_st.get('tokens_per_target_forward')}"
+                )
+                print(f"Prompt:     {result['prompt_text']}")
+                print(f"Generated:  {result['generated_text']}")
+                print(f"Full seq:   {result['full_text']}")
+                return 0
             result = generate_single(model, config, args.prompt, args.max_new_tokens, temp, top_k_val, backend)
             logger.info(
                 "run_inference() generation_complete prompt_len=%d gen_len=%d",
@@ -323,6 +405,15 @@ def main() -> int:
                 if not line:
                     continue
                 logger.info("run_inference() interactive input prompt=%r", line)
+                if args.spec != "plain":
+                    result = generate_speculative(model, model_path, line, args.max_new_tokens, args.spec, args.spec_k)
+                    _st = result.get("spec_stats", {})
+                    print(f"[spec={args.spec}] rounds={_st.get('n_rounds')} accepted={_st.get('n_accepted')}")
+                    print(f"Prompt:     {result['prompt_text']}")
+                    print(f"Generated:  {result['generated_text']}")
+                    print(f"Full seq:   {result['full_text']}")
+                    print()
+                    continue
                 result = generate_single(model, config, line, args.max_new_tokens, temp, top_k_val, backend)
                 logger.info(
                     "run_inference() interactive output prompt_len=%d gen_len=%d",

@@ -197,6 +197,65 @@ class TritonMultiHeadAttention(nn.Module):
         ctx = ctx.permute(0, 2, 1, 3).reshape(B, 1, H * hd)
         return self.o_proj(ctx)  # (B, 1, D)
 
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Process a CHUNK of c tokens against the cached K/V (verification path).
+
+        Mirrors ``impl._torch.layers.MultiHeadAttention.forward_chunk`` (which
+        mirrors ``impl._np.attention.MultiHeadAttention.forward_chunk``) — the
+        speculative-decoding verification pass (ADR 0003): one call appends
+        all c tokens' K/V and scores every chunk position through the Triton
+        SDPA kernel. Naive cache only.
+
+        x: (B, c, D) the chunk's embeddings, c >= 1.
+        position: the absolute index of the chunk's FIRST token (0-based).
+        cache: this layer's dict {"k": (B, G, t, hd), "v": (B, G, t, hd)};
+            mutated in place — the chunk's K/V are appended before attention.
+
+        Returns: out (B, c, D).
+
+        Masking: the Triton kernel's causal mask is row-absolute
+        (``k_idx <= q_idx``), which over-blocks a chunk whose queries sit at
+        rows 0..c-1 while its keys extend to t+c. The exact fix mirrors the
+        torch shape math: left-pad the queries with t masked dummy rows so
+        row-absolute causality IS the block-causal mask (dummy rows attend
+        to nothing — their whole row is -inf), run the kernel, and crop.
+        """
+        self._move_to_device(x)
+        B, c, _ = x.shape
+        H, G, hd = self.n_heads, self.n_groups, self.head_dim
+
+        positions = torch.arange(position, position + c, device=x.device, dtype=torch.long)
+
+        q = self.q_proj(x).view(B, c, H, hd).permute(0, 2, 1, 3)  # (B, H, c, hd)
+        k = self.k_proj(x).view(B, c, G, hd).permute(0, 2, 1, 3)  # (B, G, c, hd)
+        v = self.v_proj(x).view(B, c, G, hd).permute(0, 2, 1, 3)  # (B, G, c, hd)
+
+        # RoPE the whole chunk at once (RoPE's contract: (B, S, H, hd)).
+        q = self.rope(q.permute(0, 2, 1, 3), positions, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
+        k = self.rope(k.permute(0, 2, 1, 3), positions, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
+
+        # Append the chunk's per-group K/V to the cache.
+        cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+c, hd)
+        cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+c, hd)
+
+        # GQA: broadcast each cached K/V group to its H // G query heads.
+        k_full, v_full = cache["k"], cache["v"]
+        if G != H:
+            k_full = k_full.repeat_interleave(H // G, dim=1)  # (B, H, t+c, hd)
+            v_full = v_full.repeat_interleave(H // G, dim=1)  # (B, H, t+c, hd)
+
+        t = k_full.shape[2] - c
+        # Left-pad the queries with t dummy rows (zeros → -inf scores after
+        # the causal mask; softmax rows are uniform garbage but discarded).
+        q_pad = torch.zeros((B, H, t + c, hd), device=x.device, dtype=q.dtype)
+        q_pad[:, :, t:, :] = q
+        ctx = scaled_dot_product_attention(q_pad, k_full, v_full, is_causal=True)  # (B, H, t+c, hd)
+        ctx = ctx[:, :, t:, :]  # (B, H, c, hd) — crop the dummy rows
+
+        # Merge heads: (B, H, c, hd) → (B, c, H*hd) → project to (B, c, D)
+        ctx = ctx.permute(0, 2, 1, 3).reshape(B, c, H * hd)
+        return self.o_proj(ctx)  # (B, c, D)
+
 
 class TritonSwiGLUFFN(nn.Module):
     """Dense SwiGLU feed-forward, computed by the triton ``swiglu_ffn`` kernel.
@@ -415,6 +474,26 @@ class TritonTransformerBlock(nn.Module):
         ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, 1, D)
         return h + ff_out  # (B, 1, D)
 
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Process a CHUNK of c tokens through this block (KV-cached path).
+
+        Mirrors ``impl._torch.layers.TransformerBlock.forward_chunk`` (which
+        mirrors ``impl._np.block.TransformerBlock.forward_chunk``): the
+        chunk's K/V are appended to ``cache`` in one pass and every chunk
+        position is scored in parallel (causal within the chunk).
+
+        x: (B, c, D) the chunk's vectors. position: the absolute index of
+        the chunk's first token. cache: this layer's attention cache,
+        mutated in place.
+
+        Returns: out (B, c, D).
+        """
+        self._move_to_device(x)
+        attn_out = self.self_attn.forward_chunk(self.input_layernorm(x), position, cache)  # (B, c, D)
+        h = x + attn_out  # (B, c, D)
+        ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, c, D)
+        return h + ff_out  # (B, c, D)
+
     def _move_to_device(self, x: torch.Tensor) -> None:
         """Move all block parameters to x's device/dtype."""
         device = x.device
@@ -493,6 +572,26 @@ class TritonDecoderStack(nn.Module):
         out = x
         for i, block in enumerate(self.blocks):
             out = block.forward_step(out, position, cache[i])
+        return out
+
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
+        """Process a CHUNK of c tokens through all blocks (KV-cached path).
+
+        Mirrors ``impl._torch.layers.DecoderStack.forward_chunk`` (which
+        mirrors ``impl._np.stack.DecoderStack.forward_chunk``): each block
+        appends the chunk's K/V to its cache entry (``cache[i]`` mutated
+        in place) and scores all chunk positions in parallel.
+
+        x: (B, c, D) the chunk's vectors. position: the absolute index of
+        the chunk's first token. cache: one dict per block, from the
+        model's ``make_cache``.
+
+        Returns: out (B, c, D).
+        """
+        self._move_to_device(x)
+        out = x
+        for i, block in enumerate(self.blocks):
+            out = block.forward_chunk(out, position, cache[i])
         return out
 
     def _move_to_device(self, x: torch.Tensor) -> None:

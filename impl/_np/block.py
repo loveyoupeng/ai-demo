@@ -208,3 +208,42 @@ class TransformerBlock:
                 }
             )
         return out
+
+    def forward_chunk(self, x: np.ndarray, position: int, cache: dict, record: dict | None = None) -> np.ndarray:
+        """Process a CHUNK of c tokens through this block (KV-cached path).
+
+        The speculative-decoding verification path (see ADR 0003): identical
+        structure to ``forward_step`` but with ``MultiHeadAttention.
+        forward_chunk`` — the whole chunk's K/V are appended in one pass and
+        every chunk position is scored in parallel (causal within the chunk).
+        Naive cache only; the FFN is chunk-positionwise so it needs no chunk form.
+
+        x: (B, c, D) the chunk's vectors. position: the absolute index of the
+        chunk's first token. cache: per-layer attention cache, mutated in
+        place. record: optional dict filled with the block's intermediates
+        (same keys as ``forward_step``'s record).
+
+        Returns: (B, c, D) the block output for the chunk.
+        """
+        ln1_out = self.input_layernorm.forward(x)  # (B, c, D)
+        attn_state: dict | None = {} if record is not None else None
+        attn_out = self.self_attn.forward_chunk(ln1_out, position, cache, state=attn_state)
+        h = x + attn_out  # (B, c, D)
+        ln2_out = self.post_attention_layernorm.forward(h)  # (B, c, D)
+        ff_out, ff_state = self.mlp._forward_state(ln2_out)  # (B, c, D)
+        out = h + ff_out  # (B, c, D)
+        if record is not None:
+            record.update(
+                {
+                    "x": x,
+                    "ln1_out": ln1_out,
+                    "attn": attn_state,
+                    "attn_out": attn_out,
+                    "h": h,
+                    "ln2_out": ln2_out,
+                    "ff": ff_state,
+                    "mlp_out": ff_out,
+                    "out": out,
+                }
+            )
+        return out

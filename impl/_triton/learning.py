@@ -18,6 +18,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from impl._torch.learning import _generate_with_spec_records  # shared-seam: torch-family logic consumed by this track
 from impl._triton.transformer import TritonMixtureOfExperts, TritonMultiHeadAttention, TritonSwiGLUFFN
 from shared.constants import REP_PENALTY
 
@@ -374,6 +375,9 @@ def generate_with_records(
     temp: float | None = None,
     top_k: int | None = None,
     seed: int = 42,
+    spec: str | None = None,
+    k: int | None = None,
+    drafter: object = None,
 ) -> GenerationRecord:
     """Generate ``n_tokens`` with a real KV cache, recording every step.
 
@@ -390,21 +394,35 @@ def generate_with_records(
     formula as the NumPy track so identically distributed steps draw the
     same token).
 
+    **Speculative mode** (``spec in ("mtp", "dspark")``, ADR 0003): the
+    record runs the shared torch-family spec engine
+    (``shared.spec_engine.SpeculativeGenerator``) with the supplied
+    ``drafter`` to produce the OUTPUT tokens (greedy verification), then
+    records the VERIFICATION passes — one step per round, a recompute-style
+    ``instrumented_forward`` over the windowed [prefix + draft] sequence
+    (its last rows are the verification positions; chunk parity). The
+    record gains one top-level ``"spec"`` key (the engine's stats block +
+    ``mode``/``k``). With ``spec=None`` the classic record is produced,
+    byte-identical in shape to the pre-spec schema (no ``spec`` key).
+
     Returns:
       {
         "config": {...}, "vocab": [...],
         "prompt": {"tokens": [...], "text": "..."},
-        "steps": [ {"step": i, "kind": "prefill"|"decode", "position": int,
+        "steps": [ {"step": i, "kind": "prefill"|"decode"|"verify", "position": int,
                      "input_tokens": [...], "forward": {...},
                      "top_tokens": [[id, prob]...], "token": id, "text": str}, ... ],
         "generated": {"tokens": [...], "text": "..."},
+        "spec": {...},            # only when spec == "mtp"|"dspark"
       }
     """
-    rng = np.random.default_rng(seed)
+    if spec in ("mtp", "dspark"):
+        return _generate_with_spec_records(model, vocab, prompt_ids, n_tokens, temp, top_k, seed, spec, k, drafter)
     ctx = model.config.context_length
     seq = list(prompt_ids)
     steps: list[StepRecord] = []
 
+    rng = np.random.default_rng(seed)
     emitted: list[int] = []  # generated tokens so far (repeat guard, cf. NumPy track)
 
     def _pick(p_last: np.ndarray) -> int:

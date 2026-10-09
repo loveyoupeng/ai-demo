@@ -70,6 +70,26 @@ class DecoderStack:
             )
         return out
 
+    def forward_chunk(
+        self, x: np.ndarray, position: int, cache: list[dict], record: list[dict] | None = None
+    ) -> np.ndarray:
+        """Process a CHUNK of c tokens through all blocks (KV-cached path).
+
+        Mirrors ``forward_step`` with the attention core swapped for the
+        chunk form: one pass appends every chunk token's K/V per layer and
+        scores all chunk positions in parallel — the verification pass.
+
+        x: (B, c, D). position: absolute index of the chunk's first token.
+        cache: the per-layer cache list (mutated in place). record: optional
+        per-block record list (same as ``forward_step``'s).
+
+        Returns: (B, c, D).
+        """
+        out = x
+        for i, block in enumerate(self.layers):
+            out = block.forward_chunk(out, position, cache[i], record=record[i] if record is not None else None)
+        return out
+
     def backward(
         self, dout: np.ndarray, x: np.ndarray, positions: np.ndarray | None = None
     ) -> tuple[np.ndarray, list[dict]]:

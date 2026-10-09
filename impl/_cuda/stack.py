@@ -149,3 +149,22 @@ class CuDecoderStack:
         for i, block in enumerate(self.blocks):
             out = block.forward_step(out, position, cache[i])
         return out
+
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
+        """Process a CHUNK of c tokens through all blocks (KV-cached path).
+
+        Mirrors ``impl._torch.layers.DecoderStack.forward_chunk`` (which
+        mirrors ``impl._np.stack.DecoderStack.forward_chunk``): each block
+        appends the chunk's K/V to its cache entry (``cache[i]`` mutated
+        in place) and scores all chunk positions in parallel.
+
+        x: (B, c, D) the chunk's vectors. position: the absolute index of
+        the chunk's first token. cache: one dict per block, from the
+        model's ``make_cache``.
+
+        Returns: out (B, c, D).
+        """
+        out = x
+        for i, block in enumerate(self.blocks):
+            out = block.forward_chunk(out, position, cache[i])
+        return out

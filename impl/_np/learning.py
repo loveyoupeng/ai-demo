@@ -154,14 +154,20 @@ class TokenSpan(TypedDict):
     text: str
 
 
-class GenerationRecord(TypedDict):
-    """The complete inference record the page displays and exports."""
+class GenerationRecord(TypedDict, total=False):
+    """The complete inference record the page displays and exports.
+
+    Optional top-level key (speculative decoding, ADR 0003): ``spec`` —
+    present ONLY when the request picked a drafter family (mtp/dspark);
+    spec-off records keep the exact classic shape (byte-identical schema).
+    """
 
     config: dict
     vocab: list
     prompt: TokenSpan
     steps: list
     generated: TokenSpan
+    spec: dict
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +340,9 @@ def generate_with_records(
     temp: float | None = None,
     top_k: int | None = None,
     seed: int = 42,
+    spec: str | None = None,
+    k: int | None = None,
+    drafter: object = None,
 ) -> GenerationRecord:
     """Generate ``n_tokens`` with a real KV cache, recording every step.
 
@@ -356,16 +365,31 @@ def generate_with_records(
     ``temp is None`` → greedy (argmax); otherwise sample with temperature
     scaling and optional top-k filtering (seeded).
 
+    **Speculative mode** (``spec in ("mtp", "dspark")``, ADR 0003): the
+    record runs the track's spec engine (``impl._np.spec``) with the
+    supplied ``drafter`` to produce the OUTPUT tokens, then records the
+    VERIFICATION passes — one step per round, each the target's real
+    ``forward_chunk`` over that round's draft block, captured with
+    ``record=`` like any other step. The output tokens are the engine's
+    (token-identical to plain greedy; the sampled engine when ``temp`` is
+    set). The record gains one top-level ``"spec"`` key: the engine's
+    stats block (rounds included) plus ``mode``/``k`` — the page's spec
+    panel. With ``spec=None`` (or unknown) the classic record is produced,
+    byte-identical in shape to the pre-spec schema (no ``spec`` key).
+
     Returns:
       {
         "config": {...}, "vocab": [...],
         "prompt": {"tokens": [...], "text": "..."},
-        "steps": [ {"step": i, "kind": "prefill"|"decode", "position": int,
+        "steps": [ {"step": i, "kind": "prefill"|"decode"|"verify", "position": int,
                      "input_tokens": [...], "forward": {...},
                      "top_tokens": [[id, prob]...], "token": id, "text": str}, ... ],
         "generated": {"tokens": [...], "text": "..."},
+        "spec": {...},            # only when spec == "mtp"|"dspark"
       }
     """
+    if spec in ("mtp", "dspark"):
+        return _generate_with_spec_records(model, vocab, prompt_ids, n_tokens, temp, top_k, seed, spec, k, drafter)
     rng = np.random.default_rng(seed)
     ctx = model.config.context_length
     seq = list(prompt_ids)
@@ -452,4 +476,125 @@ def generate_with_records(
         "prompt": {"tokens": list(prompt_ids), "text": "".join(vocab[t] for t in prompt_ids)},
         "steps": steps,
         "generated": {"tokens": seq[len(prompt_ids) :], "text": "".join(vocab[t] for t in seq[len(prompt_ids) :])},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Speculative mode — record the verification passes (ADR 0003)
+# ---------------------------------------------------------------------------
+
+
+def _generate_with_spec_records(
+    model: NumPyModel,
+    vocab: list[str],
+    prompt_ids: list[int],
+    n_tokens: int,
+    temp: float | None,
+    top_k: int | None,
+    seed: int,
+    spec: str,
+    k: int | None,
+    drafter: object,
+) -> GenerationRecord:
+    """Spec-mode record: the spec engine makes the tokens; the record shows
+    the VERIFICATION passes — one captured ``forward_chunk`` per round.
+
+    The OUTPUT comes from the NumPy spec engine (``impl._np.spec``) with the
+    supplied ``drafter`` (the server's sidecar-loaded one) — greedy
+    verification when ``temp is None`` (the lossless rule), the engine's
+    sampled (rejection-sampling) path otherwise. The steps are then a
+    replay: each engine round is one step record whose ``forward`` is the
+    target's REAL chunk pass over that round's draft block (a chunk pass
+    over the same cache state is deterministic, so the captured tensors are
+    the verification pass's own). Step 0 is the prefill (identical to the
+    classic record — it IS a chunk pass at position 0), so the whole
+    sequence of step records reads: prefill, then verify, verify, ….
+
+    The top-level ``spec`` key carries the engine's stats block — same
+    field names as /api/inference's spec block, full rounds included —
+    plus ``mode`` and ``k``. Teaching-first: nothing else about the record
+    schema changes.
+    """
+    from impl._np.spec import SpeculativeGenerator
+
+    if drafter is None:
+        raise ValueError("speculative records need a drafter (load a sidecar via shared.draft)")
+
+    gen = SpeculativeGenerator(model, drafter)
+    prompt = np.array([list(prompt_ids)], dtype=np.int32)
+    if temp is None:
+        _seq, stats = gen.generate_greedy(prompt, n_tokens, k=k)
+    else:
+        _seq, stats = gen.generate_sampled(prompt, n_tokens, temperature=temp, k=k, seed=seed)
+    out_tokens = [int(x) for x in np.asarray(_seq)[0][len(prompt_ids) :]]
+
+    steps: list[StepRecord] = []
+
+    # ---- Step 0: the prefill (one full chunk pass over the prompt window).
+    # The engine prefills on its own cache; the record replays the same
+    # deterministic pass on a fresh recording cache (with record=).
+    P = len(prompt_ids)
+    P0 = min(model.config.context_length, P)
+    window = list(prompt_ids[P - P0 :])
+    x = np.array([window], dtype=np.int32)  # (1, P0)
+    cache = model.make_cache(1)
+    raw: dict = {}
+    logits, _x_final = model.forward_chunk(x, 0, cache, record=raw)
+    rec = _forward_record(model, raw, x)
+    # The step's "picked" token: the first committed token (what the
+    # verification walk at position P-1 accepted/corrected to).
+    tok0 = out_tokens[0] if out_tokens else int(np.argmax(logits[0, -1]))
+    steps.append(
+        {
+            "step": 0,
+            "kind": "prefill",
+            "position": int(P0 - 1) + (P - P0),  # last prompt position (absolute)
+            "input_tokens": window,
+            "forward": rec,
+            "top_tokens": rec["top_tokens"],
+            "token": tok0,
+            "text": vocab[tok0],
+        }
+    )
+
+    # ---- Steps 1..r: one VERIFICATION record per engine round.
+    # Each round's step is a real forward_chunk over that round's draft
+    # block on the SAME anchor-relative cache layout the engine used: the
+    # prefix (prompt + committed-so-far) replayed, then the chunk.
+    pos = P  # absolute position of the next round's draft block
+    for r_idx, r in enumerate(stats["rounds"], start=1):
+        draft = [int(t) for t in r["draft_tokens"]]
+        # Replay the prefix (prompt + tokens committed before this round) on
+        # a fresh cache, then record the chunk pass — the verification view.
+        prefix = list(prompt_ids) + out_tokens[: pos - P]
+        pfx_cache = model.make_cache(1)
+        if prefix:
+            model.forward_chunk(np.array([prefix[-model.config.context_length :]], dtype=np.int32), 0, pfx_cache)
+        raw = {}
+        model.forward_chunk(np.array([draft], dtype=np.int32), len(prefix), pfx_cache, record=raw)
+        rec = _forward_record(model, raw, np.array([draft], dtype=np.int32))
+        tok = r["committed"][-1] if r["committed"] else draft[0]
+        steps.append(
+            {
+                "step": r_idx,
+                "kind": "verify",
+                "position": len(prefix),
+                "input_tokens": draft,
+                "forward": rec,
+                "top_tokens": rec["top_tokens"],
+                "token": int(tok),
+                "text": vocab[int(tok)],
+            }
+        )
+        pos += len(r["committed"])
+
+    spec_block = {"mode": spec, "k": k, **stats}
+    spec_block.pop("spec", None)  # the engine tags its family; mode covers it
+    return {
+        "config": model.config.to_dict(),
+        "vocab": list(vocab),
+        "prompt": {"tokens": list(prompt_ids), "text": "".join(vocab[t] for t in prompt_ids)},
+        "steps": steps,
+        "generated": {"tokens": out_tokens, "text": "".join(vocab[t] for t in out_tokens)},
+        "spec": spec_block,
     }

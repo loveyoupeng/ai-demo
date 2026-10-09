@@ -59,6 +59,30 @@ def _ensure_demo_model(model_dir: str) -> None:
     subprocess.run([sys.executable, "-m", "scripts.train_demo_model_v2"], check=True)
 
 
+def _ensure_drafters(model_dir: str) -> None:
+    """Bootstrap the speculative-decoding drafter sidecars on first run
+    (ADR 0003): the learning page ships with MTP active by default, so the
+    sidecars are part of the demo — trained by distillation from the frozen
+    target (a few minutes on GPU)."""
+    from shared.draft import DSHARK, MTP, sidecar_dir
+
+    if all((sidecar_dir(model_dir, f) / "draft.npz").is_file() for f in (MTP, DSHARK)):
+        return
+    print("drafter sidecars not found — distilling MTP + DSpark first (a few minutes)...")
+    subprocess.run([sys.executable, "-m", "scripts.train_drafters", "--model", model_dir], check=True)
+
+
+def _resolve_spec(model_dir: str, cli_spec: str) -> str:
+    """Resolve the startup spec mode: an explicit --spec wins; ``auto``
+    picks mtp when the sidecars exist, plain otherwise (the trained demo
+    ships speculative; plain is the comparison mode)."""
+    if cli_spec != "auto":
+        return cli_spec
+    from shared.draft import MTP, sidecar_dir
+
+    return "mtp" if (sidecar_dir(model_dir, MTP) / "draft.npz").is_file() else "plain"
+
+
 def main() -> int:
     """Entry point — parse arguments, load the model, serve forever."""
     setup_logging()
@@ -87,6 +111,13 @@ def main() -> int:
         help="Checkpoint directory (default: the SFT learning_tool checkpoint)",
     )
     parser.add_argument(
+        "--spec",
+        type=str,
+        default="auto",
+        choices=["auto", "plain", "mtp", "dspark"],
+        help="Decoding mode the page starts in (auto: mtp when drafter sidecars exist, else plain)",
+    )
+    parser.add_argument(
         "--compare",
         action="append",
         metavar="label=path",
@@ -109,6 +140,8 @@ def main() -> int:
 
     if args.model == DEFAULT_MODEL:
         _ensure_demo_model(args.model)
+    _ensure_drafters(args.model)
+    spec = _resolve_spec(args.model, args.spec)
     if not _port_free(args.host, args.port):
         print(f"error: port {args.port} is already in use (override with --port)", file=sys.stderr)
         return 1
@@ -137,8 +170,13 @@ def main() -> int:
         vocabs=compare_vocabs,
         tokenizer=_tok,
         tokenizers=compare_tokens,
+        model_dir=args.model,
+        default_spec=spec,
     )
-    print(f"Learning mode: listening on {args.host}:{args.port}  (model: {args.model}, backend: {args.backend})")
+    print(
+        f"Learning mode: listening on {args.host}:{args.port}  "
+        f"(model: {args.model}, backend: {args.backend}, spec: {spec})"
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

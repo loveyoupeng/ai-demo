@@ -210,13 +210,55 @@ class CUDAModel:
         """
         # The CUDA track's contract: inputs are placed on the model's device
         # (kernels are CUDA-only); the cache follows the same placement.
+        # The per-layer dicts are mutated in place (not rebound) so the
+        # caller's cache list keeps the appended K/V — the same contract
+        # every other track carries.
         device = self.device
         input_ids = input_ids.to(device)
-        cache = [{"k": c["k"].to(device), "v": c["v"].to(device)} for c in cache]
+        for entry in cache:
+            entry["k"] = entry["k"].to(device)
+            entry["v"] = entry["v"].to(device)
         x = self.embedding_weights.to(device)[input_ids]  # (B, 1, D)
         stack_out = self.stacking.forward_step(x, position, cache)  # (B, 1, D)
         x_final = _rmsnorm(stack_out, self.final_norm_gamma.to(device), eps=self.config.norm_eps)  # (B, 1, D)
         return x_final @ self.lm_head_weight.to(device)  # (B, 1, V)
+
+    def forward_chunk(
+        self,
+        input_ids: torch.Tensor,
+        position: int,
+        cache: list[dict[str, torch.Tensor]],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Process a CHUNK of c tokens against the cached K/V (verification path).
+
+        Mirrors ``impl._torch.layers.TorchModel.forward_chunk`` (which
+        mirrors ``impl._np.model.NumPyModel.forward_chunk``) — the target
+        side of speculative decoding (ADR 0003): one call runs a draft block
+        of c tokens through the whole stack, appending every token's K/V in
+        a single pass and scoring all c positions in parallel. Naive cache
+        only (the lossless verification contract needs full precision).
+
+        input_ids: (B, c) int token IDs, c >= 1.
+        position: the absolute token index of the chunk's FIRST token (0-based).
+        cache: the per-layer cache; the chunk's K/V are appended to each
+            layer's cache before attention runs.
+
+        Returns (logits (B, c, V), x_final (B, c, D)) — the final-norm
+        hidden stream rides along because the drafter conditions on it at
+        the next anchor.
+        """
+        # The CUDA track's contract: inputs are placed on the model's device
+        # (kernels are CUDA-only); the cache follows the same placement.
+        device = self.device
+        input_ids = input_ids.to(device)
+        for entry in cache:
+            entry["k"] = entry["k"].to(device)  # same dicts, mutated in place
+            entry["v"] = entry["v"].to(device)
+        x = self.embedding_weights.to(device)[input_ids]  # (B, c, D)
+        stack_out = self.stacking.forward_chunk(x, position, cache)  # (B, c, D)
+        x_final = _rmsnorm(stack_out, self.final_norm_gamma.to(device), eps=self.config.norm_eps)  # (B, c, D)
+        logits = x_final @ self.lm_head_weight.to(device)  # (B, c, V)
+        return logits, x_final
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         """Make the model callable — delegates to forward."""

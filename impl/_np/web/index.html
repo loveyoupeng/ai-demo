@@ -123,12 +123,42 @@
   .sw.node { background: var(--panel2); border: 1.5px solid var(--line); }
   .sw.hilo { background: linear-gradient(90deg, #df1b8e, #176ac8); }
   .nbadge { width: 14px; height: 14px; border-radius: 50%; background: #1c2c42; border: 1px solid #3a4252; color: var(--accent); font-size: .6rem; display: flex; align-items: center; justify-content: center; flex: none; }
+  /* speculative decoding: header control, per-round rows, comparison panel */
+  #spec-ctl { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  #spec-ctl label { margin: 0; }
+  #spec-ctl select { width: auto; padding: 4px 8px; }
+  #spec-k-wrap { display: none; align-items: center; gap: 6px; }
+  #spec-k-wrap.on { display: inline-flex; }
+  #spec-k { width: 90px; accent-color: var(--accent); }
+  #spec-k-val { min-width: 3ch; margin: 0; }
+  .round-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 5px 0; border-top: 1px solid var(--line); font-size: .85rem; }
+  .round-row .rlab { color: var(--dim); font-family: ui-monospace, monospace; font-size: .72rem; min-width: 150px; }
+  .dr { border: 1px solid var(--line); border-radius: 6px; padding: 2px 7px; font-family: ui-monospace, monospace; background: var(--panel2); }
+  .dr.ok { border-color: var(--accent2); color: var(--accent2); }
+  .dr.no { opacity: .55; text-decoration: line-through; }
+  .dr .mk { font-size: .75rem; margin-left: 3px; }
+  .dr.com { background: #15231a; border-color: var(--accent2); box-shadow: 0 0 0 1px var(--accent2); }
+  .sched { width: 100%; color: var(--dim); font-family: ui-monospace, monospace; font-size: .72rem; margin-top: 2px; }
+  .specgrid { width: 100%; border-collapse: collapse; font-size: .85rem; margin-top: 6px; }
+  .specgrid th, .specgrid td { padding: 4px 8px; border-bottom: 1px solid var(--line); text-align: right; font-family: ui-monospace, monospace; }
+  .specgrid th { color: var(--dim); font-weight: 600; font-family: system-ui, sans-serif; }
+  .specgrid td:first-child, .specgrid th:first-child { text-align: left; color: var(--dim); font-family: system-ui, sans-serif; }
+  .specgrid tr.hl td { color: var(--accent2); font-weight: 700; }
 </style>
 </head>
 <body>
 <header>
   <h1>Learning Mode</h1>
   <div class="badges" id="badges"><span class="badge">loading model…</span></div>
+  <div id="spec-ctl" title="speculative decoding mode (ADR 0003)">
+    <label for="spec">decoding</label>
+    <select id="spec"><option value="plain">plain</option></select>
+    <span id="spec-k-wrap">
+      <label for="spec-k">k</label>
+      <input type="range" id="spec-k" min="1" max="4" value="4">
+      <span class="kv" id="spec-k-val">4</span>
+    </span>
+  </div>
 </header>
 <main id="main">
   <div id="tab-row" style="grid-column: 1 / -1; display:flex; gap:6px; margin-bottom:4px">
@@ -137,6 +167,10 @@
   </div>
 
   <section id="prompt-panel">
+    <div class="explain" id="spec-explainer">
+      <div class="ex-what"><b>Speculative decoding</b> (header dropdown, ADR 0003): a small drafter proposes the next <i>k</i> tokens; the target then verifies the whole block in ONE parallel forward and commits only the prefix it agrees with. <b>MTP</b> drafts sequentially — DeepSeek-V3 style: one tiny block fed the target's hidden state plus the next token's embedding, one token at a time. <b>DSpark</b> drafts the whole block in one semi-autoregressive parallel pass, and the engine picks each round's verify length from online prefix-survival statistics (confidence-scheduled verification, survival target 0.8).</div>
+      <div class="ex-why">The lossless contract: greedy verification commits a token only when it is exactly what plain greedy decoding would have picked — the output text is token-identical either way. Speculation only changes how many tokens one target pass confirms, never what the model says. The panel below the output measures this run's tokens/sec next to a same-prompt plain run, so the comparison is honest.</div>
+    </div>
     <h2>Prompt &amp; run</h2>
     <label>Input text (chars outside the vocab are skipped and marked)</label>
     <input type="text" id="prompt" value="Write a Python function to reverse a list." spellcheck="false">
@@ -170,7 +204,9 @@
     <section style="background:var(--panel2); margin-top:12px; border-color:var(--line)">
       <h2>Generated</h2>
       <div class="big-text" id="gen-text"></div>
+      <div id="spec-rounds" style="display:none"></div>
       <div class="chips" id="gen-chips"></div>
+      <div id="spec-panel" style="display:none"></div>
       <div class="tokmap" id="gen-tokmap" style="display:none">
         <div class="tm-label">input prompt → generated output (position index = row in the embedding matrix)</div>
         <div class="chips" id="gen-tokmap-chips"></div>
@@ -259,6 +295,7 @@ async function api(path, body) {
 
 function promptParams() {
   const t = $("temp").value;
+  const spec = $("spec").value;
   return {
     text: $("prompt").value,
     n_tokens: Math.max(1, Math.min(32, parseInt($("ntokens").value || "8", 10))),
@@ -266,6 +303,8 @@ function promptParams() {
     top_k: parseInt($("topk").value || "0", 10),
     seed: parseInt($("seed").value || "42", 10),
     backend: $("backend").value,
+    spec,
+    ...(spec === "plain" ? {} : { k: parseInt($("spec-k").value || "1", 10) }),
   };
 }
 
@@ -445,6 +484,7 @@ async function init() {
   badges.push([`${MODEL.n_params.toLocaleString()}`, "parameters"]);
   $("badges").innerHTML = badges.map(([v, t]) => `<span class="badge" title="${t}"><b>${v}</b> ${t}</span>`).join("");
   if (!MODEL.has_vocab) setStatus("This checkpoint has no vocab.json — text input unavailable.");
+  specCtlInit();
   $("prompt").addEventListener("input", () => tokenizePreview($("prompt").value));
   tokenizePreview($("prompt").value);
 }
@@ -481,10 +521,156 @@ async function doGenerate() {
     if (r.prompt) $("prompt").value = r.prompt.text;
     tokenizePreview(r.prompt.text);
     fillGenerated(r.generated.text, r.generated.tokens, r.last_step?.top_tokens);
-    setStatus(`done on ${$("backend").value} (${r.skipped_chars} skipped chars)`);
+    if (!r.last_step) $("gen-top").innerHTML = "";
+    renderSpec(r);
+    const extra = r.spec ? ` — ${r.spec.mode}, k=${r.spec.k ?? "trained"}, ${r.spec.tokens_per_sec} tok/s vs plain ${r.plain_baseline?.tokens_per_sec ?? "?"} tok/s` : "";
+    setStatus(`done on ${$("backend").value} (${r.skipped_chars} skipped chars)${extra}`);
   } catch (e) {
     setStatus("error: " + e.message);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Speculative decoding UI — header mode/k controls, per-round rows, spec-vs-plain panel
+// ---------------------------------------------------------------------------
+function specCtlInit() {
+  const sel = $("spec");
+  const avail = MODEL.spec_available || [];
+  sel.innerHTML =
+    `<option value="plain">plain</option>` +
+    (avail.includes("mtp") ? `<option value="mtp">MTP</option>` : "") +
+    (avail.includes("dspark") ? `<option value="dspark">DSpark</option>` : "");
+  const def = MODEL.default_spec || "plain";
+  sel.value = [...sel.options].some((o) => o.value === def) ? def : "plain";
+  const cap = (mode) => (MODEL.spec_block_size || {})[mode] || (mode === "dspark" ? 8 : 4);
+  const sync = () => {
+    const mode = sel.value;
+    const wrap = $("spec-k-wrap");
+    if (mode === "plain") {
+      wrap.classList.remove("on");
+      return;
+    }
+    wrap.classList.add("on");
+    const k = $("spec-k");
+    k.min = 1;
+    k.max = cap(mode);
+    k.value = cap(mode); // trained block size is the useful default; drag down for suffix decay
+    $("spec-k-val").textContent = k.value;
+  };
+  sel.onchange = () => {
+    sync();
+    if (!RECORD && $("gen-text").textContent) doGenerate();
+  };
+  $("spec-k").oninput = () => { $("spec-k-val").textContent = $("spec-k").value; };
+  $("spec-k").onchange = () => { if (!RECORD && $("gen-text").textContent) doGenerate(); };
+  sync();
+}
+
+function tokChar(t) { return MODEL.vocab?.[t] ?? String(t); }
+
+// one verification round: draft chips with per-position ✓/✗, then the committed tokens
+function roundRow(rd) {
+  const row = document.createElement("div");
+  row.className = "round-row";
+  const lab = document.createElement("span");
+  lab.className = "rlab";
+  lab.textContent = `r${rd.round} · ${rd.draft_ms}ms draft · ${rd.verify_ms}ms verify · +${rd.new_tokens}`;
+  row.appendChild(lab);
+  (rd.draft_tokens || []).forEach((t, i) => {
+    const ok = rd.accept_mask?.[i];
+    const c = document.createElement("span");
+    c.className = "dr " + (ok ? "ok" : "no");
+    c.title = `draft[${i}] = token ${t} — ${ok ? "accepted (target's argmax agrees)" : "rejected (target disagrees here; tail discarded)"}`;
+    c.innerHTML = `${esc(tokChar(t))}<span class="mk">${ok ? "✓" : "✗"}</span>`;
+    row.appendChild(c);
+  });
+  const arrow = document.createElement("span");
+  arrow.className = "note";
+  arrow.textContent = "→";
+  row.appendChild(arrow);
+  (rd.committed || []).forEach((t, i) => {
+    const c = document.createElement("span");
+    c.className = "dr com";
+    c.title = i < rd.accepted ? `committed draft token ${t}` : `correction/bonus token ${t} — the target's own pick`;
+    c.textContent = tokChar(t);
+    row.appendChild(c);
+  });
+  if (rd.schedule) {
+    const s = rd.schedule;
+    const sv = document.createElement("div");
+    sv.className = "sched";
+    sv.textContent =
+      `verify_len ${s.verify_len} · target ${s.target} · survival (prefix len 1…): ` +
+      (s.survival || []).slice(1, 9).map((v) => String(Math.round(v * 100) / 100)).join(", ");
+    row.appendChild(sv);
+  }
+  return row;
+}
+
+// the side-by-side spec-vs-plain panel (measured on this machine, same prompt)
+function specTable(spec, plain) {
+  const wrap = document.createElement("div");
+  const tpsS = spec.tokens_per_sec, tpsP = plain?.tokens_per_sec;
+  const speedup = tpsS && tpsP ? tpsS / tpsP : null;
+  const dash = "—";
+  const rows = [
+    ["mode", spec.mode + (spec.mode === "dspark" ? " (scheduled)" : " (sequential drafter)"), "plain"],
+    ["k (draft block size)", spec.k ?? "trained", dash],
+    ["rounds", spec.n_rounds, dash],
+    ["target forwards", spec.n_target_forwards, plain ? plain.tokens.length : dash],
+    ["accepted / drafted", `${spec.n_accepted} / ${spec.n_draft_tokens}`, dash],
+    ["mean accepted / round", spec.mean_accepted, dash],
+    ["accept rate", (100 * spec.accept_rate).toFixed(1) + "%", dash],
+    ["tokens / target forward", spec.tokens_per_target_forward, "1"],
+    ["draft ms total", spec.draft_ms_total, dash],
+    ["verify ms total", spec.verify_ms_total, dash],
+    ["elapsed ms", spec.elapsed_ms, plain?.elapsed_ms ?? dash],
+  ];
+  let html =
+    `<table class="specgrid"><tr><th></th><th>${esc(spec.mode)} run</th><th>plain baseline</th></tr>` +
+    rows.map(([n, a, b]) => `<tr><td>${n}</td><td>${a}</td><td>${b}</td></tr>`).join("") +
+    `<tr class="hl"><td>tokens / sec</td><td>${tpsS ?? dash}</td><td>${tpsP ?? dash}</td></tr></table>`;
+  wrap.innerHTML = `<div class="tm-label" style="font-size:.72rem;color:var(--dim);margin:10px 0 2px">` +
+    `speculative vs plain — same prompt, same machine, measured per request</div>` + html;
+  if (speedup !== null) {
+    const div = document.createElement("div");
+    div.className = "kv";
+    div.style.color = speedup >= 1 ? "var(--accent2)" : "var(--warn)";
+    div.textContent = speedup >= 1
+      ? `speedup ${speedup.toFixed(2)}× vs plain`
+      : `${speedup.toFixed(2)}× vs plain — slower: at this teaching scale (D=${MODEL.config.embed_dim}, NumPy) the drafter's per-round overhead outweighs the accepted-prefix savings`;
+    wrap.appendChild(div);
+  }
+  if (spec.schedule) {
+    const s = spec.schedule;
+    const div = document.createElement("div");
+    div.className = "kv";
+    div.textContent =
+      `DSpark schedule (final): verify_len ${s.verify_len} · target ${s.target} · survival (prefix len 1…): ` +
+      (s.survival || []).slice(1, 9).map((v) => String(Math.round(v * 100) / 100)).join(", ");
+    wrap.appendChild(div);
+  }
+  return wrap;
+}
+
+// render (or hide) the rounds strip + the spec panel from an /api/inference or /api/record response
+function renderSpec(r) {
+  const rw = $("spec-rounds"), pw = $("spec-panel");
+  if (!r.spec) {
+    rw.style.display = "none";
+    pw.style.display = "none";
+    rw.innerHTML = "";
+    pw.innerHTML = "";
+    return;
+  }
+  rw.style.display = "";
+  pw.style.display = "";
+  rw.innerHTML =
+    `<div class="tm-label" style="font-size:.72rem;color:var(--dim);margin:8px 0 2px">` +
+    `verification rounds — the drafter proposes a block (✓ = target agrees, ✗ = rejected), then the committed prefix (+ the target's correction token) is highlighted</div>`;
+  (r.spec.rounds || []).forEach((rd) => rw.appendChild(roundRow(rd)));
+  pw.innerHTML = "";
+  pw.appendChild(specTable(r.spec, r.plain_baseline));
 }
 
 // ---------------------------------------------------------------------------
@@ -498,6 +684,7 @@ async function doRecord() {
     CUR_NODE = "softmax";
     HEAD = 0;
     renderGenerated();
+    renderSpec(RECORD);
     renderRecordMeta();
     renderSteps();
     buildDiagram();

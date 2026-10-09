@@ -94,7 +94,7 @@ class MultiHeadAttention:
         # (H*hd, D) output projection (mixes the heads back into one vector)
         self.o_proj = xavier_uniform(rng, n_heads * hd, embed_dim)
 
-    def _forward_state(self, x: np.ndarray, positions: np.ndarray) -> tuple[np.ndarray, dict]:
+    def _forward_state(self, x: np.ndarray, positions: np.ndarray, causal: bool = True) -> tuple[np.ndarray, dict]:
         """Run the forward and return the intermediates the backward and the
         learning-mode record need.
 
@@ -145,9 +145,16 @@ class MultiHeadAttention:
         # Causal mask: position i may attend only to positions j <= i.
         # A lower-triangular mask (broadcast over B and H) sets the strictly
         # upper triangle to -inf; the stable softmax below turns those into
-        # exactly-zero attention weight.
-        causal = np.triu(np.ones((seq_len, seq_len), dtype=bool), k=1)  # (S, S), True where j > i
-        scores_masked = np.where(causal, -np.inf, scores)  # (B, H, S, S)
+        # exactly-zero attention weight. causal=False (the DSpark drafter's
+        # parallel backbone — see impl/_np/drafters.py) keeps the full
+        # matrix: every block position sees every other, position
+        # information comes from the learned block-position embeddings.
+        if causal:
+            causal_mask = np.triu(np.ones((seq_len, seq_len), dtype=bool), k=1)  # (S, S), True where j > i
+            scores_masked = np.where(causal_mask, -np.inf, scores)  # (B, H, S, S)
+        else:
+            causal_mask = np.zeros((seq_len, seq_len), dtype=bool)
+            scores_masked = scores
 
         # Numerically stable softmax over the key axis: subtract the row max
         # before exponentiating so exp() never overflows.
@@ -178,19 +185,22 @@ class MultiHeadAttention:
             "rope": rope,
             "scores": scores,
             "scores_masked": scores_masked,
-            "causal_mask": causal,
+            "causal_mask": causal_mask,
         }
         return out, state
 
-    def forward(self, x: np.ndarray, positions: np.ndarray | None = None) -> np.ndarray:
+    def forward(self, x: np.ndarray, positions: np.ndarray | None = None, causal: bool = True) -> np.ndarray:
         """Multi-head attention forward pass.
 
         x: (B, S, D) → out: (B, S, D).
         positions: (S,) token indices for RoPE; default arange(S).
+        causal: mask the future (default True — required for autoregressive
+            generation); False = bidirectional within the sequence (used by
+            the DSpark drafter's parallel backbone).
         """
         if positions is None:
             positions = np.arange(x.shape[1], dtype=np.int32)
-        out, _state = self._forward_state(x, positions)
+        out, _state = self._forward_state(x, positions, causal=causal)
         return out
 
     def forward_step(
@@ -318,6 +328,113 @@ class MultiHeadAttention:
                     "scores": scores,
                     "scores_masked": scores,
                     "causal_mask": np.zeros((1, k_r.shape[2]), dtype=bool),
+                    "k_cache": k_r,
+                    "v_cache": v_r,
+                }
+            )
+        return out
+
+    def forward_chunk(self, x: np.ndarray, position: int, cache: dict, state: dict | None = None) -> np.ndarray:
+        """Process a CHUNK of c tokens against the cached K/V (verification path).
+
+        The speculative-decoding workhorse: one call appends all c tokens'
+        K/V and scores every chunk position in parallel — the target's
+        verification pass over a draft block (see ADR 0003). Naive cache
+        only (TurboQuant is a single-token write path; verification demands
+        full precision so the lossless contract holds).
+
+        x: (B, c, D) the chunk's embeddings, c >= 1.
+        position: the absolute index of the chunk's FIRST token (0-based).
+        cache: per-layer dict {"k": (B, G, t, hd), "v": (B, G, t, hd)};
+            mutated in place — the chunk's K/V are appended before attention.
+        state: optional dict; when given it is filled with the same keys as
+            ``forward_step``'s state (the learning-mode record).
+
+        Returns: out (B, c, D).
+
+        Math (the slice of ``forward`` where positions [position, position+c)
+        attend to everything at or before them):
+            q = (x @ Wq) → (B, H, c, hd), RoPE at positions position..position+c-1
+            k = (x @ Wk) → (B, G, c, hd), RoPE at the same positions
+            v = (x @ Wv) → (B, G, c, hd)
+            append k, v to cache → (B, G, t+c, hd)
+            k_r, v_r = GQA repeat(cache) → (B, H, t+c, hd)
+            scores = q @ k_r^T / sqrt(hd)         (B, H, c, t+c)
+            causal  = block-causal (c, t+c) mask — chunk token i attends to
+                      all t cache rows plus chunk rows j <= i
+            attn    = stable softmax(scores_masked, axis=-1)
+            ctx     = attn @ v_r                   (B, H, c, hd)
+            out     = (ctx un-permuted) @ W_o      (B, c, D)
+        """
+        B, c, _ = x.shape
+        H, G, hd = self.n_heads, self.n_groups, self.head_dim
+        positions = np.arange(position, position + c, dtype=np.int32)  # (c,)
+
+        q_pre = x @ self.q_proj  # (B, c, H*hd)
+        k_pre = x @ self.k_proj  # (B, c, G*hd)
+        v_pre = x @ self.v_proj  # (B, c, G*hd)
+
+        q_heads = q_pre.reshape(B, c, H, hd).transpose(0, 2, 1, 3)  # (B, H, c, hd)
+        k_heads = k_pre.reshape(B, c, G, hd).transpose(0, 2, 1, 3)  # (B, G, c, hd)
+        v = v_pre.reshape(B, c, G, hd).transpose(0, 2, 1, 3)  # (B, G, c, hd)
+
+        # RoPE the whole chunk at once (the operator's (B, S, H, hd) view).
+        q, rope_state = RoPE()._forward_state(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim)
+        q = q.transpose(0, 2, 1, 3)  # (B, H, c, hd)
+        k, _ = RoPE()._forward_state(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim)
+        k = k.transpose(0, 2, 1, 3)  # (B, G, c, hd)
+
+        # Append the chunk's per-group K/V to the cache.
+        cache["k"] = np.concatenate([cache["k"], k], axis=2)  # (B, G, t+c, hd)
+        cache["v"] = np.concatenate([cache["v"], v], axis=2)  # (B, G, t+c, hd)
+        if G != H:
+            k_r = np.repeat(cache["k"], H // G, axis=1)  # (B, H, t+c, hd)
+            v_r = np.repeat(cache["v"], H // G, axis=1)  # (B, H, t+c, hd)
+        else:
+            k_r, v_r = cache["k"], cache["v"]
+
+        scale = float(np.sqrt(hd))
+        # (B, H, c, t+c) — chunk queries against every cached + chunk key.
+        scores = q @ k_r.transpose(0, 1, 3, 2) / scale
+        t = k_r.shape[2] - c
+        # Block-causal mask: cache rows (0..t-1) are always in the past of the
+        # chunk; chunk row t+j is visible to chunk token i iff j <= i.
+        causal = np.triu(np.ones((c, c), dtype=bool), k=1)  # (c, c), True where j > i
+        mask = np.zeros((c, t + c), dtype=bool)  # (c, t+c), True = masked
+        mask[:, t:] = causal
+        scores_masked = np.where(mask, -np.inf, scores)  # (B, H, c, t+c)
+
+        # Numerically stable softmax over the key axis.
+        scores_stable = scores_masked - np.max(scores_masked, axis=-1, keepdims=True)
+        exp_scores = np.exp(scores_stable)
+        attn = exp_scores / np.sum(exp_scores, axis=-1, keepdims=True)  # (B, H, c, t+c)
+
+        ctx = attn @ v_r  # (B, H, c, t+c) @ (B, H, t+c, hd) → (B, H, c, hd)
+        ctx = ctx.transpose(0, 2, 1, 3).reshape(B, c, H * hd)  # (B, c, H*hd)
+        out = ctx @ self.o_proj  # (B, c, D)
+
+        if state is not None:
+            k_exp = np.repeat(cache["k"], H // G, axis=1) if G != H else cache["k"]  # (B, H, t+c, hd)
+            v_exp = np.repeat(cache["v"], H // G, axis=1) if G != H else cache["v"]
+            state.update(
+                {
+                    "q_pre": q_pre,
+                    "k_pre": k_pre,
+                    "v_pre": v_pre,
+                    "q_rope_in": q_heads,  # pre-RoPE q in head layout (the forward_chunk state's pre-RoPE view)
+                    "k_rope_in": k_heads,  # pre-RoPE k
+                    "q": q,
+                    "k": k_exp,
+                    "v": v_exp,
+                    "k_group": cache["k"],
+                    "v_group": cache["v"],
+                    "attn": attn,
+                    "ctx": ctx,
+                    "scale": scale,
+                    "rope": rope_state,
+                    "scores": scores,
+                    "scores_masked": scores_masked,
+                    "causal_mask": mask,
                     "k_cache": k_r,
                     "v_cache": v_r,
                 }

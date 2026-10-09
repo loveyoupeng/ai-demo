@@ -361,6 +361,77 @@ class CuTransformerBlock:
             ff_out = swiglu_ffn(hn, self.gate_proj.to(device), self.up_proj.to(device), self.down_proj.to(device))
         return h + ff_out  # (B, 1, D)
 
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Process a CHUNK of c tokens through this block (KV-cached path).
+
+        Mirrors ``impl._torch.layers.TransformerBlock.forward_chunk`` (which
+        mirrors ``impl._np.block.TransformerBlock.forward_chunk``): the
+        whole chunk's K/V are appended to ``cache`` in one pass and every
+        chunk position is scored through the CUDA SDPA path in parallel
+        (causal within the chunk).
+
+        x: (B, c, D) the chunk's vectors. position: the absolute index of
+        the chunk's first token. cache: this layer's dict
+        {"k": (B, G, t, hd), "v": (B, G, t, hd)}, mutated in place.
+
+        Returns: out (B, c, D).
+        """
+        B, c, _ = x.shape
+        device = x.device
+        H, G, hd = self.n_heads, self.n_groups, self.head_dim
+
+        Wq, Wk, Wv, Wo = (
+            self.q_proj.to(device),
+            self.k_proj.to(device),
+            self.v_proj.to(device),
+            self.o_proj.to(device),
+        )
+        ln1 = self.input_layernorm_gamma.to(device)
+        ln2 = self.post_attention_layernorm_gamma.to(device)
+
+        xn = rmsnorm(x, ln1, eps=self.config.norm_eps)  # (B, c, D)
+        q = xn @ Wq  # (B, c, H*hd)
+        k = xn @ Wk  # (B, c, G*hd)
+        v = xn @ Wv  # (B, c, G*hd)
+
+        q = q.view(B, c, H, hd)  # (B, c, H, hd)
+        k = k.view(B, c, G, hd)  # (B, c, G, hd)
+        v = v.view(B, c, G, hd).transpose(1, 2).contiguous()  # (B, G, c, hd)
+
+        positions = torch.arange(position, position + c, device=device, dtype=torch.long)
+        q = apply_rope(q, positions, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, c, hd)
+        k = apply_rope(k, positions, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, c, hd)
+
+        # Append the chunk's per-group K/V to the cache (K already RoPE'd).
+        cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+c, hd)
+        cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+c, hd)
+
+        # GQA: broadcast each cached K/V group to its H // G query heads.
+        k_full, v_full = cache["k"], cache["v"]
+        if G != H:
+            k_full = k_full.repeat_interleave(H // G, dim=1)  # (B, H, t+c, hd)
+            v_full = v_full.repeat_interleave(H // G, dim=1)  # (B, H, t+c, hd)
+
+        t = k_full.shape[2] - c
+        # Left-pad the queries with t dummy rows (zeros → -inf scores after
+        # the causal mask; their outputs are discarded) so the kernel's
+        # row-absolute causal mask (key j <= row i) IS the block-causal
+        # (c, t+c) mask over the real rows — the same shape trick the torch
+        # track expresses as an explicit (c, t+c) allow-mask.
+        q_pad = torch.zeros((B, H, t + c, hd), device=device, dtype=q.dtype)
+        q_pad[:, :, t:, :] = q
+        attn = cuda_sdp_attention(q_pad, k_full, v_full, is_causal=True)  # (B, H, t+c, hd)
+        attn = attn[:, :, t:, :]  # (B, H, c, hd) — crop the dummy rows
+        attn_out = attn.transpose(1, 2).contiguous().view(B, c, H * hd) @ Wo  # (B, c, D)
+        h = x + attn_out  # (B, c, D)
+
+        hn = rmsnorm(h, ln2, eps=self.config.norm_eps)  # (B, c, D)
+        if self.config.has_moe():
+            ff_out = self._moe_forward(hn, device)  # (B, c, D)
+        else:
+            ff_out = swiglu_ffn(hn, self.gate_proj.to(device), self.up_proj.to(device), self.down_proj.to(device))
+        return h + ff_out  # (B, c, D)
+
     def _moe_forward(self, x: torch.Tensor, device: torch.device) -> torch.Tensor:
         """MoE forward: torch routing (identical to the other tracks) + CUDA SwiGLU experts.
 

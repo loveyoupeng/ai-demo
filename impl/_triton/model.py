@@ -132,6 +132,37 @@ class TritonModel(nn.Module):
         x_final = self.final_norm(stack_out)  # (B, 1, D)
         return self.lm_head(x_final)  # (B, 1, V)
 
+    def forward_chunk(
+        self,
+        input_ids: torch.Tensor,
+        position: int,
+        cache: list[dict[str, torch.Tensor]],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Process a CHUNK of c tokens against the cached K/V (verification path).
+
+        Mirrors ``impl._torch.layers.TorchModel.forward_chunk`` (which
+        mirrors ``impl._np.model.NumPyModel.forward_chunk``) — the target
+        side of speculative decoding (ADR 0003): one call runs a draft block
+        of c tokens through the whole stack, appending every token's K/V in
+        a single pass and scoring all c positions in parallel. Naive cache
+        only (the lossless verification contract needs full precision).
+
+        input_ids: (B, c) int token IDs, c >= 1.
+        position: the absolute token index of the chunk's FIRST token (0-based).
+        cache: the per-layer cache; the chunk's K/V are appended to each
+            layer's cache before attention runs.
+
+        Returns (logits (B, c, V), x_final (B, c, D)) — the final-norm
+        hidden stream rides along because the drafter conditions on it at
+        the next anchor.
+        """
+        self._move_to_device(input_ids)
+        x = self.embedding(input_ids)  # (B, c, D)
+        stack_out = self.stack.forward_chunk(x, position, cache)  # (B, c, D)
+        x_final = self.final_norm(stack_out)  # (B, c, D)
+        logits = self.lm_head(x_final)  # (B, c, V)
+        return logits, x_final
+
     def _move_to_device(self, x: torch.Tensor) -> None:
         """Move all parameters to x's device/dtype (triton kernels need it)."""
         if not x.is_cuda:

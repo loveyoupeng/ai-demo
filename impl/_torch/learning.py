@@ -382,6 +382,9 @@ def generate_with_records(
     temp: float | None = None,
     top_k: int | None = None,
     seed: int = 42,
+    spec: str | None = None,
+    k: int | None = None,
+    drafter: object = None,
 ) -> GenerationRecord:
     """Generate ``n_tokens`` with a real KV cache, recording every step.
 
@@ -398,16 +401,30 @@ def generate_with_records(
     formula as the NumPy track so identically distributed steps draw the
     same token).
 
+    **Speculative mode** (``spec in ("mtp", "dspark")``, ADR 0003): the
+    record runs the shared torch-family spec engine
+    (``shared.spec_engine.SpeculativeGenerator``) with the supplied
+    ``drafter`` to produce the OUTPUT tokens (greedy verification — the
+    torch family has no sampled engine), then records the VERIFICATION
+    passes: one step per round, each the target's real ``forward_chunk``
+    over that round's draft block. The record gains one top-level
+    ``"spec"`` key (the engine's stats block + ``mode``/``k``). With
+    ``spec=None`` the classic record is produced, byte-identical in shape
+    to the pre-spec schema (no ``spec`` key).
+
     Returns:
       {
         "config": {...}, "vocab": [...],
         "prompt": {"tokens": [...], "text": "..."},
-        "steps": [ {"step": i, "kind": "prefill"|"decode", "position": int,
+        "steps": [ {"step": i, "kind": "prefill"|"decode"|"verify", "position": int,
                      "input_tokens": [...], "forward": {...},
                      "top_tokens": [[id, prob]...], "token": id, "text": str}, ... ],
         "generated": {"tokens": [...], "text": "..."},
+        "spec": {...},            # only when spec == "mtp"|"dspark"
       }
     """
+    if spec in ("mtp", "dspark"):
+        return _generate_with_spec_records(model, vocab, prompt_ids, n_tokens, temp, top_k, seed, spec, k, drafter)
     rng = np.random.default_rng(seed)
     ctx = model.config.context_length
     seq = list(prompt_ids)
@@ -543,4 +560,106 @@ def generate_with_records(
         "prompt": {"tokens": list(prompt_ids), "text": "".join(vocab[t] for t in prompt_ids)},
         "steps": steps,
         "generated": {"tokens": seq[len(prompt_ids) :], "text": "".join(vocab[t] for t in seq[len(prompt_ids) :])},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Speculative mode — record the verification passes (ADR 0003)
+# ---------------------------------------------------------------------------
+
+
+def _generate_with_spec_records(
+    model: TorchModel,
+    vocab: list[str],
+    prompt_ids: list[int],
+    n_tokens: int,
+    temp: float | None,
+    top_k: int | None,
+    seed: int,
+    spec: str,
+    k: int | None,
+    drafter: object,
+) -> GenerationRecord:
+    """Spec-mode record: the shared spec engine makes the tokens; the record
+    shows the VERIFICATION passes — one step per engine round.
+
+    The OUTPUT comes from the torch-family engine
+    (``shared.spec_engine.SpeculativeGenerator``) with the supplied
+    ``drafter`` — greedy verification (the torch family has no sampled
+    engine; ``temp``/``top_k``/``seed`` are accepted for signature parity
+    and ignored). Each round's step record is a recompute-style capture:
+    ``instrumented_forward`` over the windowed [prefix + draft block]
+    sequence, whose last rows ARE the verification positions (chunk parity:
+    a causal forward over prefix+draft scores the draft rows exactly like
+    the chunk pass did). Step 0 is the prefill, identical in shape to the
+    classic record. The top-level ``spec`` key carries the engine's stats
+    block plus ``mode``/``k`` — same schema as the NumPy adapter.
+    """
+    import torch
+
+    from shared.spec_engine import SpeculativeGenerator
+
+    if drafter is None:
+        raise ValueError("speculative records need a drafter (load a sidecar via shared.draft)")
+
+    prompt = torch.tensor([list(prompt_ids)], dtype=torch.long)
+    with torch.no_grad():
+        gen = SpeculativeGenerator(model, drafter)
+        _seq, stats = gen.generate_greedy(prompt, n_tokens, k=k)
+    out_tokens = [int(x) for x in _seq[0].tolist()][len(prompt_ids) :]
+
+    ctx = model.config.context_length
+    steps: list[StepRecord] = []
+
+    # ---- Step 0: the prefill (same capture as the classic record).
+    x = torch.tensor([prompt_ids[-ctx:]], dtype=torch.long)
+    rec = instrumented_forward(model, x)
+    tok0 = out_tokens[0] if out_tokens else int(np.argmax(np.asarray(rec["softmax"], dtype=np.float64)[0][-1]))
+    steps.append(
+        {
+            "step": 0,
+            "kind": "prefill",
+            "position": int(x.shape[1] - 1) + max(0, len(prompt_ids) - int(x.shape[1])),
+            "input_tokens": list(prompt_ids[-ctx:]),
+            "forward": rec,
+            "top_tokens": rec["top_tokens"],
+            "token": tok0,
+            "text": vocab[tok0],
+        }
+    )
+
+    # ---- Steps 1..r: one VERIFICATION record per engine round — the
+    # windowed [prefix + draft] causal forward; its last k_eff rows are the
+    # verification positions (the chunk pass's own scores, recomputed).
+    pos = len(prompt_ids)
+    for r_idx, r in enumerate(stats["rounds"], start=1):
+        draft = [int(t) for t in r["draft_tokens"]]
+        prefix = list(prompt_ids) + out_tokens[: pos - len(prompt_ids)]
+        window = (prefix + draft)[-ctx:]
+        with torch.no_grad():
+            rec = instrumented_forward(model, torch.tensor([window], dtype=torch.long))
+        tok = int(r["committed"][-1]) if r["committed"] else draft[0]
+        steps.append(
+            {
+                "step": r_idx,
+                "kind": "verify",
+                "position": len(prefix),
+                "input_tokens": draft,
+                "forward": rec,
+                "top_tokens": rec["top_tokens"],
+                "token": tok,
+                "text": vocab[tok],
+            }
+        )
+        pos += len(r["committed"])
+
+    spec_block = {"mode": spec, "k": k, **stats}
+    spec_block.pop("spec", None)  # the engine tags its family; mode covers it
+    return {
+        "config": model.config.to_dict(),
+        "vocab": list(vocab),
+        "prompt": {"tokens": list(prompt_ids), "text": "".join(vocab[t] for t in prompt_ids)},
+        "steps": steps,
+        "generated": {"tokens": out_tokens, "text": "".join(vocab[t] for t in out_tokens)},
+        "spec": spec_block,
     }

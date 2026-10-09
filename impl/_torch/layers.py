@@ -303,6 +303,65 @@ class MultiHeadAttention(nn.Module):
         ctx = ctx.permute(0, 2, 1, 3).reshape(batch_size, 1, H * hd)
         return self.o_proj(ctx)  # (B, 1, D)
 
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Process a CHUNK of c tokens against the cached K/V (verification path).
+
+        Mirrors ``impl._np.attention.MultiHeadAttention.forward_chunk`` — the
+        speculative-decoding workhorse (see ADR 0003): one call appends all c
+        tokens' K/V (per-group — GQA keeps the cache H // G times smaller) and
+        scores every chunk position in one masked batched SDPA call. Naive
+        cache only (verification demands full precision).
+
+        x: (B, c, D) the chunk's embeddings, c >= 1.
+        position: the absolute index of the chunk's FIRST token (0-based).
+        cache: this layer's dict {"k": (B, G, t, hd), "v": (B, G, t, hd)};
+            mutated in place — the chunk's K/V are appended before attention.
+
+        Returns: out (B, c, D).
+
+        The mask is block-causal (c, t+c): cache rows are always in the past
+        of the chunk; chunk row t+j is visible to chunk token i iff j <= i.
+        """
+        B, c, _ = x.shape
+        H, G, hd = self.n_heads, self.n_groups, self.head_dim
+        positions = torch.arange(position, position + c, device=x.device, dtype=torch.long)
+
+        q = self.q_proj(x)  # (B, c, H*hd)
+        k = self.k_proj(x)  # (B, c, G*hd)
+        v = self.v_proj(x)  # (B, c, G*hd)
+
+        q = q.view(B, c, H, hd).permute(0, 2, 1, 3)  # (B, H, c, hd)
+        k = k.view(B, c, G, hd).permute(0, 2, 1, 3)  # (B, G, c, hd)
+        v = v.view(B, c, G, hd).permute(0, 2, 1, 3)  # (B, G, c, hd)
+
+        # RoPE the whole chunk at once (RoPE's contract: (B, S, H, hd)).
+        q = self.rope(q.permute(0, 2, 1, 3), positions, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
+        k = self.rope(k.permute(0, 2, 1, 3), positions, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
+
+        # Append the chunk's per-group K/V to the cache.
+        cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+c, hd)
+        cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+c, hd)
+
+        # GQA: broadcast each cached K/V group to its H // G query heads.
+        k_full, v_full = cache["k"], cache["v"]
+        if G != H:
+            k_full = k_full.repeat_interleave(H // G, dim=1)  # (B, H, t+c, hd)
+            v_full = v_full.repeat_interleave(H // G, dim=1)  # (B, H, t+c, hd)
+
+        t = k_full.shape[2] - c
+        # Block-causal allow-mask: cache rows always visible; chunk row t+j
+        # visible to chunk token i iff j <= i. (True = attend, torch's
+        # bool attn_mask convention.)
+        allow = torch.ones((c, t + c), dtype=torch.bool, device=x.device)
+        allow[:, t:] = torch.tril(torch.ones((c, c), dtype=torch.bool, device=x.device))
+
+        # One masked batched SDPA call over the whole chunk.
+        ctx = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=allow)  # (B, H, c, hd)
+
+        # Merge heads: (B, H, c, hd) → (B, c, H*hd) → project to (B, c, D)
+        ctx = ctx.permute(0, 2, 1, 3).reshape(B, c, H * hd)
+        return self.o_proj(ctx)  # (B, c, D)
+
 
 class SwiGLUFFN(nn.Module):
     """SwiGLU feed-forward network (GLU: Dauphin et al. 2016; SwiGLU: Shazeer 2020).
@@ -484,6 +543,26 @@ class TransformerBlock(nn.Module):
         ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, 1, D)
         return h + ff_out  # (B, 1, D)
 
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Process a CHUNK of c tokens through this block (KV-cached path).
+
+        Mirrors ``impl._np.block.TransformerBlock.forward_chunk``: identical
+        structure to ``forward_step`` but the whole chunk's K/V are appended
+        in one pass and every chunk position is scored in parallel (causal
+        within the chunk). The FFN is chunk-positionwise so it needs no
+        chunk form.
+
+        x: (B, c, D) the chunk's vectors. position: the absolute index of
+        the chunk's first token. cache: this layer's attention cache,
+        mutated in place.
+
+        Returns: out (B, c, D).
+        """
+        attn_out = self.self_attn.forward_chunk(self.input_layernorm(x), position, cache)  # (B, c, D)
+        h = x + attn_out  # (B, c, D)
+        ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, c, D)
+        return h + ff_out  # (B, c, D)
+
 
 class DecoderStack(nn.Module):
     """Stack of n_layers TransformerBlocks (the "body" of the decoder).
@@ -539,6 +618,24 @@ class DecoderStack(nn.Module):
         out = x
         for i, block in enumerate(self.blocks):
             out = block.forward_step(out, position, cache[i])
+        return out
+
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
+        """Process a CHUNK of c tokens through all blocks (KV-cached path).
+
+        Mirrors ``impl._np.stack.DecoderStack.forward_chunk``: each block
+        appends the chunk's K/V to its cache entry (``cache[i]`` mutated in
+        place) and scores all chunk positions in parallel.
+
+        x: (B, c, D) the chunk's vectors. position: the absolute index of
+        the chunk's first token. cache: one dict per block, from the
+        model's ``make_cache``.
+
+        Returns: out (B, c, D).
+        """
+        out = x
+        for i, block in enumerate(self.blocks):
+            out = block.forward_chunk(out, position, cache[i])
         return out
 
 
@@ -657,6 +754,39 @@ class TorchModel(nn.Module):
         stack_out = self.stack.forward_step(x, position, cache)  # (B, 1, D)
         x_final = self.final_norm(stack_out)  # (B, 1, D)
         return self.lm_head(x_final)  # (B, 1, V)
+
+    def forward_chunk(
+        self,
+        input_ids: torch.Tensor,
+        position: int,
+        cache: list[dict[str, torch.Tensor]],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Process a CHUNK of c tokens against the cached K/V (verification path).
+
+        Mirrors ``impl._np.model.NumPyModel.forward_chunk`` — the target
+        side of speculative decoding (ADR 0003): one call runs a draft block
+        of c tokens through the whole stack, appending every token's K/V in
+        a single pass and scoring all c positions in parallel. Naive cache
+        only (the lossless verification contract needs full precision).
+
+        input_ids: (B, c) int token IDs, c >= 1.
+        position: the absolute token index of the chunk's FIRST token (0-based).
+        cache: the per-layer cache; the chunk's K/V are appended to each
+            layer's cache before attention runs.
+
+        Returns (logits (B, c, V), x_final (B, c, D)) — the final-norm
+        hidden stream rides along because the drafter conditions on it at
+        the next anchor.
+
+        Exactness: ``make_cache + forward_prefill + forward_chunk`` over a
+        split of the sequence equals one full ``forward`` — the same
+        guarantee ``forward_step`` carries.
+        """
+        x = self.embedding(input_ids)  # (B, c, D)
+        stack_out = self.stack.forward_chunk(x, position, cache)  # (B, c, D)
+        x_final = self.final_norm(stack_out)  # (B, c, D)
+        logits = self.lm_head(x_final)  # (B, c, V)
+        return logits, x_final
 
     def _param_tensors(self) -> dict[str, torch.Tensor]:
         """Storage binding: registry key → owning tensor (the track's only traversal)."""

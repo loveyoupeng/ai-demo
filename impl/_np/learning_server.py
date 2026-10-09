@@ -182,6 +182,9 @@ class _LearningHandler(BaseHTTPRequestHandler):
     vocabs: dict[str, list[str] | None]  # label → vocab (compare tab)
     tokenizers: dict[str, Tokenizer | None]  # label → BPE (compare tab)
     backend_models: dict[str, Any]  # backend → model of the default checkpoint
+    model_dir: str  # the target checkpoint dir (sidecar drafters live under it)
+    default_spec: str  # page default: plain | mtp | dspark (CLI decides; requests override)
+    _drafter_cache: dict[str, Any]  # backend|family → drafter, lazily loaded
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: D102 — quiet the default stderr noise
         logger.debug(format, *args)
@@ -299,7 +302,74 @@ class _LearningHandler(BaseHTTPRequestHandler):
             "backend": self.backend,
             "n_params": n_params,
             "has_moe": cfg.has_moe(),
+            "spec_available": self._spec_available(),
+            "default_spec": self.default_spec if self.default_spec in self._spec_available() else "plain",
+            "spec_block_size": self._spec_block_sizes(),
         }
+
+    def _spec_block_sizes(self) -> dict[str, int]:
+        """Trained block size per available family (the k slider's cap)."""
+        import json as _json
+
+        from shared.draft import DSHARK, MTP, sidecar_dir
+
+        out: dict[str, int] = {}
+        if not self.model_dir:
+            return out
+        for family in (MTP, DSHARK):
+            meta_path = sidecar_dir(self.model_dir, family) / "draft.json"
+            if meta_path.is_file():
+                out[family] = int(_json.loads(meta_path.read_text())["block_size"])
+        return out
+
+    def _load_drafter(self, family: str) -> Any:
+        """Load the ``family`` sidecar drafter for the CURRENT model.
+
+        NumPy model → the NumPy drafters (``impl/_np/drafters.py``); the
+        torch family (torch/triton/cuda tracks) → the torch drafters over
+        the shared sidecar scheme (``impl/_torch/drafters.py``). Cached
+        per (backend, family); missing sidecar → ValueError with a
+        user-facing message (the page falls back to plain).
+        """
+        import torch as _torch
+
+        from shared.draft import load_drafter, sidecar_dir
+
+        if not self.model_dir:
+            raise ValueError("no model_dir bound — speculative decoding unavailable")
+        key = f"{self.backend}:{family}"
+        if key in self._drafter_cache:
+            return self._drafter_cache[key]
+        meta, params = load_drafter(sidecar_dir(self.model_dir, family))
+        if isinstance(self.model, NumPyModel):
+            from impl._np.drafters import DSparkDrafter as NpDSpark
+            from impl._np.drafters import MTPDrafter as NpMTP
+
+            cls = NpMTP if meta.family == "mtp" else NpDSpark
+            drafter = cls(meta, self.model.embedding.weight, self.model.lm_head_weight)
+            drafter.load_from_numpy_dict(params)
+        else:
+            from impl._torch.drafters import drafter_from_sidecar
+
+            with _torch.no_grad():
+                emb = self.model.embed_tokens.weight.detach().clone().float()
+                lm = self.model.lm_head.weight.detach().clone().float()
+            drafter = drafter_from_sidecar(meta, params, emb, lm)
+            drafter.eval()
+        self._drafter_cache[key] = drafter
+        return drafter
+
+    def _spec_available(self) -> list[str]:
+        """Which drafter families have sidecars for this checkpoint."""
+        from shared.draft import DSHARK, MTP, sidecar_dir
+
+        if not self.model_dir:
+            return []
+        out = []
+        for family in (MTP, DSHARK):
+            if (sidecar_dir(self.model_dir, family) / "draft.npz").is_file():
+                out.append(family)
+        return out
 
     def _decode_params(self, body: dict) -> tuple[list[int], float | None, int | None, int, int, str | None]:
         """Shared request parsing; raises ValueError with a user-facing message."""
@@ -348,7 +418,14 @@ class _LearningHandler(BaseHTTPRequestHandler):
         ``last_step`` is the distribution over the token that would come
         AFTER the generated ones (one extra decode position).
         """
+        spec = str(body.get("spec") or self.default_spec)
+        if spec not in ("plain", "mtp", "dspark"):
+            raise ValueError(f"spec must be plain|mtp|dspark, got {spec!r}")
         ids, t, k, seed, skipped, backend = self._decode_params(body)
+        if spec != "plain":
+            return self._run_spec_inference(
+                body, ids, n=int(body.get("n_tokens", 20)), temp=t, top_k=k, seed=seed, skipped=skipped, spec=spec
+            )
         n = int(body.get("n_tokens", 20))
         vocab = self.vocab
         assert vocab is not None
@@ -404,6 +481,110 @@ class _LearningHandler(BaseHTTPRequestHandler):
             },
         }
 
+    def _run_spec_inference(
+        self,
+        body: dict,
+        ids: list[int],
+        n: int,
+        temp: float | None,
+        top_k: int | None,
+        seed: int,
+        skipped: int,
+        spec: str,
+    ) -> dict:
+        """Speculative generation (ADR 0003) + the paired plain baseline.
+
+        Greedy speculation (the lossless rule) over the track's spec engine:
+        the NumPy engine (``impl/_np/spec.py`` — carries the
+        rejection-sampling theorem for temperature mode) or the shared
+        torch-family engine (``shared/spec_engine.py``). For the honest
+        same-machine speed comparison the page needs, the response also
+        carries a paired PLAIN greedy run of the same prompt/length: its
+        wall-clock and token count are what "tokens/sec without a
+        drafter" actually means on this host (spec decision: measured
+        TPS of the active mode + the plain counterfactual, never a stored
+        average). The two runs share nothing (fresh caches, fresh RNG).
+        """
+        import time as _time
+
+        if temp is not None and not isinstance(self.model, NumPyModel):
+            # Sampled speculation is the NumPy track's theorem path; the
+            # torch family runs greedy verification only (production rule).
+            raise ValueError("sampled speculative decoding is implemented on the NumPy track only")
+        drafter = self._load_drafter(spec)
+        prompt_arr = np.array([ids], dtype=np.int32)
+        k_req = body.get("k")
+
+        t0 = _time.perf_counter()
+        if isinstance(self.model, NumPyModel):
+            from impl._np.spec import SpeculativeGenerator
+
+            gen = SpeculativeGenerator(self.model, drafter)
+            if temp is not None:
+                _seq, stats = gen.generate_sampled(prompt_arr, n, temperature=temp, k=k_req, seed=seed)
+            else:
+                _seq, stats = gen.generate_greedy(prompt_arr, n, k=k_req)
+        else:
+            import torch as _torch
+
+            from shared.spec_engine import SpeculativeGenerator as TorchSpecGen
+
+            with _torch.no_grad():
+                gen = TorchSpecGen(self.model, drafter)
+                _seq, stats = gen.generate_greedy(prompt_arr, n, k=k_req)
+        spec_ms = (_time.perf_counter() - t0) * 1000
+        gen_ids = [int(x) for x in np.asarray(_seq)[0][len(ids) :]]
+
+        # Paired plain baseline: same prompt, same length, greedy, no drafter.
+        t1 = _time.perf_counter()
+        plain_ids = self._plain_greedy_ids(ids, n)
+        plain_ms = (_time.perf_counter() - t1) * 1000
+
+        n_gen = len(gen_ids)
+        vocab = self.vocab or []
+        decode = self.tokenizer.decode if self.tokenizer else (lambda toks: "".join(vocab[i] for i in toks))
+        return {
+            "prompt": {"tokens": list(ids), "text": decode(list(ids))},
+            "skipped_chars": skipped,
+            "generated": {"tokens": gen_ids, "text": decode(gen_ids)},
+            "spec": {
+                "mode": spec,
+                "k": k_req,
+                **{kk: vv for kk, vv in stats.items() if kk != "rounds"},
+                "rounds": stats.get("rounds", []),
+                "tokens_per_sec": round(n_gen / max(spec_ms / 1000, 1e-9), 2),
+                "elapsed_ms": round(spec_ms, 2),
+            },
+            "plain_baseline": {
+                "tokens": plain_ids,
+                "tokens_per_sec": round(len(plain_ids) / max(plain_ms / 1000, 1e-9), 2),
+                "elapsed_ms": round(plain_ms, 2),
+            },
+        }
+
+    def _plain_greedy_ids(self, ids: list[int], n: int) -> list[int]:
+        """Plain greedy baseline (no drafter) on the CURRENT model, fresh cache.
+
+        Uses the track's own generator path — the same one /api/inference
+        runs with temperature=None — so the comparison is same-model,
+        same-machine, same-decode-rule.
+        """
+        model = self.model
+        if isinstance(model, NumPyModel):
+            from impl._np.inference import TextGenerator
+
+            gen = TextGenerator(model, max_new_tokens=n, temperature=0.0)
+            seq = gen.generate_greedy(np.array([ids], dtype=np.int32))
+            return [int(x) for x in seq[0][len(ids) :]]
+        import torch
+
+        from shared.generator import TextGenerator as TorchGen
+
+        with torch.no_grad():
+            gen = TorchGen(model, max_new_tokens=n, temperature=0.0)
+            seq = gen.generate_greedy(torch.tensor([ids], dtype=torch.int64))
+        return [int(x) for x in seq[0][len(ids) :].tolist()]
+
     def _api_record(self, body: dict) -> dict[str, object]:
         with self._per_backend(body.get("backend")):
             return self._run_record(body)
@@ -418,11 +599,26 @@ class _LearningHandler(BaseHTTPRequestHandler):
         in sync by `_per_backend`, and using the class keeps this honest
         even if a call site forgot the swap.
         """
+        spec = str(body.get("spec") or self.default_spec)
+        drafter = None
+        if spec in ("mtp", "dspark"):
+            drafter = self._load_drafter(spec)
         ids, t, k, seed, skipped, backend = self._decode_params(body)
         n = int(body.get("n_tokens", 20))
         model = self.model
         if isinstance(model, NumPyModel):
-            record = generate_with_records(model, self.vocab or [], list(ids), n, temp=t, top_k=k, seed=seed)
+            record = generate_with_records(
+                model,
+                self.vocab or [],
+                list(ids),
+                n,
+                temp=t,
+                top_k=k,
+                seed=seed,
+                spec=spec,
+                k=body.get("k"),
+                drafter=drafter,
+            )
         else:
             # Class name shown only for diagnostics; all four records share one schema.
             cls_name = type(model).__name__
@@ -430,19 +626,46 @@ class _LearningHandler(BaseHTTPRequestHandler):
                 from impl._torch import learning as torch_learning
 
                 record = torch_learning.generate_with_records(
-                    model, self.vocab or [], list(ids), n, temp=t, top_k=k, seed=seed
+                    model,
+                    self.vocab or [],
+                    list(ids),
+                    n,
+                    temp=t,
+                    top_k=k,
+                    seed=seed,
+                    spec=spec,
+                    k=body.get("k"),
+                    drafter=drafter,
                 )
             elif cls_name == "TritonModel":
                 from impl._triton import learning as triton_learning
 
                 record = triton_learning.generate_with_records(
-                    model, self.vocab or [], list(ids), n, temp=t, top_k=k, seed=seed
+                    model,
+                    self.vocab or [],
+                    list(ids),
+                    n,
+                    temp=t,
+                    top_k=k,
+                    seed=seed,
+                    spec=spec,
+                    k=body.get("k"),
+                    drafter=drafter,
                 )
             elif cls_name == "CUDAModel":
                 from impl._cuda import learning as cuda_learning
 
                 record = cuda_learning.generate_with_records(
-                    model, self.vocab or [], list(ids), n, temp=t, top_k=k, seed=seed
+                    model,
+                    self.vocab or [],
+                    list(ids),
+                    n,
+                    temp=t,
+                    top_k=k,
+                    seed=seed,
+                    spec=spec,
+                    k=body.get("k"),
+                    drafter=drafter,
                 )
             else:
                 raise ValueError(f"no record adapter for model class {cls_name!r}")
@@ -501,6 +724,8 @@ def make_handler(
     vocabs: dict[str, list[str] | None] | None = None,
     tokenizer: Tokenizer | None = None,
     tokenizers: dict[str, Tokenizer | None] | None = None,
+    model_dir: str = "",
+    default_spec: str = "plain",
 ) -> type[BaseHTTPRequestHandler]:
     """Bind the model + backend + vocab + web dir into a handler class
     (closure over state). The compare tab adds its secondary models via
@@ -519,6 +744,9 @@ def make_handler(
             "vocabs": vocabs if vocabs is not None else {},
             "tokenizers": tokenizers if tokenizers is not None else {},
             "backend_models": {},  # lazy per-backend caches, populated on first request
+            "model_dir": model_dir,
+            "default_spec": default_spec,
+            "_drafter_cache": {},
         },
     )
 
@@ -533,6 +761,8 @@ def start_server(
     vocabs: dict[str, list[str] | None] | None = None,
     tokenizer: Tokenizer | None = None,
     tokenizers: dict[str, Tokenizer | None] | None = None,
+    model_dir: str = "",
+    default_spec: str = "plain",
 ) -> ThreadingHTTPServer:
     """Create the learning-mode HTTP server (bound and listening, not yet serving).
 
@@ -540,9 +770,23 @@ def start_server(
     daemon thread (tests). The ``models``/``vocabs``/``tokenizers`` sets are
     the named compare-tab models; the main model is the default ""-keyed
     endpoints.
+
+    ``model_dir`` is the target checkpoint directory — the root the
+    speculative-decoding sidecar drafters (``draft_mtp/``, ``draft_dspark/``)
+    are loaded from when a request picks ``spec: mtp|dspark`` (ADR 0003).
+    ``default_spec`` is the mode the page starts in (the CLI default is
+    ``mtp`` when drafters exist; requests override per call).
     """
     handler = make_handler(
-        model, vocab, backend=backend, models=models, vocabs=vocabs, tokenizer=tokenizer, tokenizers=tokenizers
+        model,
+        vocab,
+        backend=backend,
+        models=models,
+        vocabs=vocabs,
+        tokenizer=tokenizer,
+        tokenizers=tokenizers,
+        model_dir=model_dir,
+        default_spec=default_spec,
     )
     server = ThreadingHTTPServer((host, port), handler)
     logger.info("learning mode: serving on http://%s:%d", host, port)

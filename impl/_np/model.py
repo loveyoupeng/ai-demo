@@ -353,6 +353,57 @@ class NumPyModel:
             )
         return logits
 
+    def forward_chunk(
+        self,
+        input_ids: np.ndarray,
+        position: int,
+        cache: list[dict],
+        record: dict | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Process a CHUNK of c tokens against the cached K/V (verification path).
+
+        The target side of speculative decoding (ADR 0003): one call runs a
+        draft block of c tokens through the whole stack, appending every
+        token's K/V in a single pass, and scores all c positions in
+        parallel — verification. Naive cache only (TurboQuant is a
+        single-token write path; the lossless contract needs full
+        precision).
+
+        input_ids: (B, c) int token IDs, c >= 1.
+        position: the absolute token index of the chunk's FIRST token (0-based).
+        cache: the per-layer cache; the chunk's K/V are appended to each
+            layer's cache before attention runs.
+        record: optional dict filled with the raw intermediates of this pass
+            (same keys as ``forward_step``'s record) — the learning-mode path.
+
+        Returns (logits (B, c, V), x_final (B, c, D)) — the final-norm
+        hidden stream rides along because the drafter conditions on it at
+        the next anchor (the MTP/DSpark input is norm(h_target)).
+
+        Exactness: ``make_cache + forward_prefill + forward_chunk`` over a
+        split of the sequence equals one full ``forward`` over the whole
+        sequence — the same guarantee ``forward_step`` carries (pinned by
+        the chunk parity tests).
+        """
+        c = input_ids.shape[1]
+        x = self.embedding.forward(input_ids)  # (B, c, D)
+        blocks_rec = [{} for _ in self.stack.layers] if record is not None else None
+        stack_out = self.stack.forward_chunk(x, position, cache, record=blocks_rec)  # (B, c, D)
+        x_final = self.final_norm.forward(stack_out)  # (B, c, D)
+        logits = x_final @ self.lm_head_weight  # (B, c, V)
+        if record is not None:
+            record.update(
+                {
+                    "x_in0": x,
+                    "stack_out": stack_out,
+                    "positions": np.arange(position, position + c, dtype=np.int32),
+                    "blocks": blocks_rec,
+                    "x_final": x_final,
+                    "logits": logits,
+                }
+            )
+        return logits, x_final
+
     def backward(self, input_ids: np.ndarray, targets: np.ndarray) -> dict[str, np.ndarray]:
         """Analytic gradients of the loss w.r.t. every parameter.
 

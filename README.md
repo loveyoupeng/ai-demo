@@ -127,6 +127,18 @@ vector wherever it sits. Order enters later, inside attention, via RoPE.
   `forward_step` == full re-forward). The generators step one token per
   iteration (O(1) per step). TurboQuant (1-bit quantized cache) is wired as
   an alternative with a parity-budget test.
+- **Speculative decoding** (ADR 0003): all four tracks expose
+  `forward_chunk` — k tokens of K/V appended in one pass (the target's
+  verification step). The drafter protocol (`shared/draft.py`) has two
+  live implementations: **MTP** (one block, sequential, k=4, shares the
+  target's embedding + lm_head) and **DSpark** (semi-AR parallel backbone +
+  causal refinement, k=8, plus confidence-scheduled verification with a
+  0.8 prefix-survival target). Drafters are distilled from the frozen
+  target (`scripts/train_drafters.py`) and live as sidecar checkpoints
+  (`<model>/draft_{mtp,dspark}/`). The greedy path is **token-identical to
+  plain greedy** — the lossless contract, pinned by verify_equivalence
+  scenarios; NumPy also carries the rejection-sampling theorem for
+  temperature mode.
 - **Analytic backward** (NumPy): every operator has a closed-form
   `backward(dout, x) -> (dinput, dparams)`; `check_model_gradients` verifies
   it against finite differences (float64, ~1e-10, MoE top-k kink-aware).
@@ -184,14 +196,28 @@ uv run python -m impl._torch.cli \
 
 # Unified script (any backend, any checkpoint)
 uv run python -m scripts.infer --model resource/models/torch_real/ --backend torch --prompt "hello"
+
+# Speculative decoding (drafters distilled from the target; Sidecars land
+# under <model>/draft_{mtp,dspark}/)
+uv run python -m scripts.train_drafters                                  # distill both drafters
+uv run python -m scripts.infer --model resource/models/learning_tool/ --backend numpy \
+    --spec mtp --prompt "Once upon a time"                                # MTP (default when trained)
+uv run python -m scripts.infer --model resource/models/learning_tool/ --backend numpy \
+    --spec dspark --prompt "Once upon a time"                             # DSpark
+uv run python -m scripts.infer --model resource/models/learning_tool/ --backend numpy \
+    --spec plain --prompt "Once upon a time"                              # no drafter (comparison)
 ```
 
 ### Learning mode (web page)
 
 ```bash
-# Serves http://0.0.0.0:8080 by default; a first run with no checkpoints
-# bootstraps them via scripts.train_demo_model_v2
+# Serves http://0.0.0.0:8080 by default; a first run bootstraps the
+# target via scripts.train_demo_model_v2 AND the drafter sidecars via
+# scripts.train_drafters. The page opens in MTP mode when sidecars exist
+# (the trained demo ships speculative); --spec plain|mtp|dspark picks
+# the startup mode.
 uv run python -m scripts.learning
+uv run python -m scripts.learning --spec dspark
 
 # The page runs all four backends via its in-page dropdown; --backend only
 # picks the startup load (numpy [default] or torch); port/model overridable

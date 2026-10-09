@@ -32,6 +32,18 @@ Inference: exact KV-cache step path — `forward_prefill` + `forward_step`
 equals a full re-forward; generators step one token per iteration (O(1)).
 TurboQuant (1-bit quantized K/V cache) is wired behind the same
 `forward_step(quantize=True)` interface with a parity-budget test.
+Speculative decoding (ADR 0003): all four tracks also expose
+`forward_chunk(ids, position, cache) -> (logits, x_final)` — k tokens'
+K/V appended in ONE pass (the verification path); drafters (MTP k=4
+sequential, DSpark k=8 semi-AR + confidence-scheduled verification with a
+0.8 survival target) implement the `shared/draft.py` Drafter protocol and
+live as sidecar checkpoints (`<model>/draft_mtp/`, `<model>/draft_dspark/`
+— the target's registry is untouched). Greedy spec output is
+token-identical to plain greedy (the lossless contract; NumPy additionally
+implements the rejection-sampling theorem for temperature mode). Drafters
+train by distillation (`scripts/train_drafters.py`, bootstrapped by
+learning mode); learning mode ships with MTP active (`--spec
+plain|mtp|dspark`), showing acceptance/TPS vs a paired plain run.
 
 **NumPy backward:** every operator has a closed-form
 `backward(dout, x) -> (dinput, dparams)` (stateless — recomputes
@@ -74,12 +86,12 @@ compare tab: `learning_base`, `learning_sft`). The legacy char-level MoE demo
 
 | Path | Purpose |
 | --- | --- |
-| `impl/_np/` | NumPy reference track: per-operator modules, `model.py` (analytic backward + KV-step dict cache), `training.py`, `inference.py`, `sft.py`, `gradcheck.py`, `cli.py`, learning mode |
+| `impl/_np/` | NumPy reference track: per-operator modules, `model.py` (analytic backward + KV-step dict cache), `training.py`, `inference.py`, `spec.py` (speculative engine: greedy verify + rejection sampling), `drafters.py` (MTP/DSpark drafters), `sft.py`, `gradcheck.py`, `cli.py`, learning mode |
 | `impl/_torch/` | PyTorch track: `layers.py` (all nn.Modules, `TorchModel`), `training.py`, `inference.py`, `sft.py`, `learning.py`, `cli.py` |
 | `impl/_triton/` | Triton kernels over a PyTorch model: `attn.py`, `flash_attn.py` (online softmax), `ffn.py`, `moe.py`, `transformer.py`, `sft.py`, `learning.py`, `training.py`, `cli.py` |
 | `impl/_cuda/` | NVRTC bare-metal kernels: `compiler.py`, `attention.py`, `layernorm.py`, `rope.py`, `ffn.py`, `moe.py`, `model.py`, `training.py`, `sft.py`, `learning.py`, `cli.py` |
-| `shared/` | Cross-track backbone: `config.py` (`TransformerConfig`), `constants.py` (Keys), `registry.py`, `checkpoint.py`, `generator.py`, `sft_data.py`, `tokenizer.py`, `dataset.py`, `utils/` |
-| `scripts/` | Unified `train.py`/`infer.py`/`learning.py` (all backends), `verify_equivalence.py`, `sft.py`, `train_tokenizer.py`, `download_sft_data.py`, `train_real_tinystories.py`, `train_demo_model.py`, `train_demo_model_v2.py`, `download_tinystories.py` |
+| `shared/` | Cross-track backbone: `config.py` (`TransformerConfig`), `constants.py` (Keys), `registry.py`, `checkpoint.py`, `generator.py`, `draft.py` (Drafter protocol + sidecar scheme), `spec_engine.py` (torch-family speculative engine), `sft_data.py`, `tokenizer.py`, `dataset.py`, `utils/` |
+| `scripts/` | Unified `train.py`/`infer.py`/`learning.py` (all backends), `verify_equivalence.py` (9 scenarios incl. `spec_mtp_np_torch`/`spec_dspark_np_torch`), `sft.py`, `train_tokenizer.py`, `download_sft_data.py`, `train_real_tinystories.py`, `train_demo_model.py`, `train_demo_model_v2.py`, `train_drafters.py` (drafter distillation), `download_tinystories.py` |
 | `tests/` | `unit/` (root: shared, scripts, registry; plus `_np`, `_torch`, `_triton`, `_cuda`) and `cross_backend/` (49 parity tests) |
 | `docs/` | `specs/architecture-fixes.md` (spec + progress of record), `theory/transformer-walkthrough.md` (forward-pass tour), `theory/training-pipeline.md` (pretrain→SFT→tool pipeline), `seam_triton_to_torch.md`, `docstring_style.md`, `adr/`, `design.md` |
 | `resource/` | **git-ignored**: TinyStories JSON + `models/{numpy,torch,triton,cuda}_real`, the `models/learning_{base,sft,tool}` pipeline checkpoints, and `models/learning_demo` (legacy char-level demo) — recreate via scripts |
@@ -103,9 +115,18 @@ uv run python -m impl._torch.cli --prompt "Once upon a" --max_new_tokens 50 \
     --temperature 0.9 --top_k 20 --embed_dim 64 --n_layers 4 --n_heads 8
 
 # Learning mode (web page; bootstraps the learning_tool checkpoint via
-# scripts.train_demo_model_v2 on first run)
+# scripts.train_demo_model_v2 AND the drafter sidecars via
+# scripts.train_drafters on first run; --spec plain|mtp|dspark picks the
+# startup decoding mode — default auto: mtp when sidecars exist)
 uv run python -m scripts.learning                        # http://0.0.0.0:8080
 uv run python -m scripts.learning --backend torch        # PyTorch-backend records
+uv run python -m scripts.learning --spec dspark          # start in DSpark mode
+
+# Speculative decoding (drafters distilled from the frozen target; sidecars
+# land under <model>/draft_{mtp,dspark}/)
+uv run python -m scripts.train_drafters
+uv run python -m scripts.infer --model resource/models/learning_tool/ --backend numpy \
+    --spec mtp --prompt "Once upon a time"
 
 # Training / data / verification (unified scripts, --backend numpy|torch|triton|cuda)
 uv run python -m scripts.train --backend torch [--synthetic] [--n_layers 2 --embed_dim 128]

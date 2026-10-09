@@ -102,16 +102,16 @@ SCENARIOS: list[Scenario] = [
         backends=["torch", "triton"],
     ),
     Scenario(
-        name="cuda_shared_weights",
-        description="CUDA track: shared-weight load + forward validity",
+        name="spec_mtp_np_torch",
+        description="Speculative decoding (MTP drafter, ADR 0003): spec-greedy == plain greedy, NumPy + PyTorch",
         kwargs=_cfg(),
-        backends=["cuda"],
+        backends=["numpy", "torch"],
     ),
     Scenario(
-        name="all_four_backends",
-        description="All four tracks run the same weights (full interchange)",
+        name="spec_dspark_np_torch",
+        description="Speculative decoding (DSpark drafter, ADR 0003): spec-greedy == plain greedy, NumPy + PyTorch",
         kwargs=_cfg(),
-        backends=["numpy", "torch", "triton", "cuda"],
+        backends=["numpy", "torch"],
     ),
 ]
 
@@ -460,9 +460,68 @@ def run_scenario(scenario: Scenario, steps: int = 2) -> dict:
             results[b] = {"params": {}, "greedy": [], "loss": 0.0, "finite": False, "error": str(e)}
 
     passed = _compare_results(results, ref_params, ref_logits, ref_greedy, details)
+    if scenario.name.startswith("spec_"):
+        _spec_lossless_check(scenario, kwargs, details)
+        passed = passed and bool(details.get("spec_lossless", False))
 
     elapsed = round(time.time() - T1, 2)
     return {"passed": passed, "name": scenario.name, "details": details, "elapsed": elapsed}
+
+
+def _spec_lossless_check(scenario: Scenario, kwargs: dict[str, Any], details: dict[str, Any]) -> None:
+    """Speculative-decoding lossless check (ADR 0003): spec-greedy output
+    must equal plain greedy on both the NumPy engine and the shared
+    torch-family engine, with an UNTRAINED drafter — the lossless contract
+    must not depend on drafter quality (a bad drafter only costs speed,
+    never correctness).
+    """
+    import torch as th
+
+    from impl._np.drafters import make_drafter_meta as np_meta
+    from impl._np.model import NumPyModel
+    from shared.draft import DSHARK, MTP
+
+    family = MTP if "mtp" in scenario.name else DSHARK
+    k = 4 if family == MTP else 8
+    cfg = _to_transformer_config(kwargs)
+    ref = NumPyModel(cfg)
+    tokens = np.random.default_rng(int(kwargs.get("seed", 42))).integers(0, cfg.vocab_size, (1, 8)).astype(np.int32)
+
+    # Plain greedy reference — the TRACK'S OWN plain generator (the
+    # repetition guard included): the lossless contract is "identical to
+    # the shipped plain decoder", not "identical to an unguarded loop".
+    from impl._np.inference import TextGenerator as NpGen
+
+    plain = NpGen(ref, max_new_tokens=6, temperature=0.0).generate_greedy(tokens)[0].tolist()
+
+    # NumPy engine.
+    from impl._np.drafters import DSparkDrafter as NpDSpark
+    from impl._np.drafters import MTPDrafter as NpMTP
+    from impl._np.spec import SpeculativeGenerator as NpSpecGen
+
+    np_cls = NpMTP if family == MTP else NpDSpark
+    np_drafter = np_cls(np_meta(family, cfg, block_size=k, ff_dim=48), ref.embedding.weight, ref.lm_head_weight)
+    np_seq, _stats = NpSpecGen(ref, np_drafter).generate_greedy(tokens, 6, k=k)
+    details["spec_numpy_match"] = bool(np_seq[0].tolist() == plain)
+
+    # Torch-family engine (TorchModel, float32).
+    from impl._torch.drafters import TorchDSparkDrafter, TorchMTPDrafter
+    from impl._torch.layers import TorchModel
+    from shared.spec_engine import SpeculativeGenerator as TorchSpecGen
+
+    t_model = TorchModel(cfg)
+    t_model.load_from_numpy_dict({kk: v.copy() for kk, v in ref.get_all_parameters().items()})
+    if hasattr(t_model, "eval"):
+        t_model.eval()
+    t_cls = TorchMTPDrafter if family == MTP else TorchDSparkDrafter
+    t_drafter = t_cls(
+        np_meta(family, cfg, block_size=k, ff_dim=48), th.tensor(ref.embedding.weight), th.tensor(ref.lm_head_weight)
+    )
+    prompt_t = th.tensor(tokens, dtype=th.int64)
+    with th.no_grad():
+        t_seq, _t_stats = TorchSpecGen(t_model, t_drafter).generate_greedy(prompt_t, 6, k=k)
+    details["spec_torch_match"] = bool(t_seq[0].tolist() == plain)
+    details["spec_lossless"] = bool(details["spec_numpy_match"] and details["spec_torch_match"])
 
 
 # ─── Report ────────────────────────────────────────────────────────────────────

@@ -155,6 +155,51 @@ docs, and tests.
 - **Top-k filtering**: keep only the k largest logits; set the rest to -inf
   before softmax. Constrains the sampling distribution to the top-k tokens.
 
+- **Speculative decoding**: an inference acceleration that splits generation
+  into two roles — a cheap **drafter** proposes a block of candidate tokens,
+  and the **target model** verifies them in a single parallel forward pass.
+  Only tokens the target agrees with are kept, so the output matches plain
+  decoding while several tokens are confirmed per target pass. Ships
+  **on by default** (MTP active when the sidecar exists — ADR 0003);
+  `plain` is the opt-out comparison mode.
+
+- **Target model**: the full-quality checkpoint whose agreement defines
+  correctness. It is the only thing that runs on drafted positions, at
+  verification time.
+
+- **Drafter** (draft model): the small, fast model that proposes candidate
+  tokens. Families: *sequential* drafting (MTP — one token per drafter
+  step) and *parallel* drafting (DSpark's semi-autoregressive block; DFlash's
+  masked-diffusion block, a planned plug-in).
+
+- **Draft block**: the k candidate tokens proposed in one round. Larger k
+  means more tokens *available* per target pass but decaying suffix
+  acceptance.
+
+- **Verification**: the target's one forward over context + draft block,
+  scoring every drafted position in parallel. The **accepted prefix** is the
+  longest run of drafted tokens the target agrees with; at the first
+  disagreement the target's own token replaces the draft and the rest of
+  the block is discarded.
+
+- **Acceptance / accepted length**: how many drafted tokens survive
+  verification in a round. The speedup lever: tokens per target forward,
+  minus the drafter's cost.
+
+- **MTP** (multi-token prediction): a small head conditioned on the target's
+  final hidden state that drafts the *next* token; drafts a block by
+  repeated single-token steps (sequential drafting). DeepSeek-V3 style.
+
+- **DSpark**: a parallel drafter — a *semi-autoregressive* module (parallel
+  backbone predicting the whole block plus a lightweight sequential module
+  for intra-block dependency) — with *confidence-scheduled verification*:
+  the verified length adapts per request from the estimated prefix-survival
+  probability.
+
+- **DFlash**: a parallel drafter using masked block diffusion — the draft
+  block is denoised in a fixed number of parallel steps, conditioned on the
+  target's context features. A planned plug-in drafter, not yet built.
+
 - **TurboQuant**: the 1-bit quantized KV path. On each token write, the new
   K/V vector is stored as int8 sign bits plus **one scale scalar per
   (batch, head)** — `scale = mean(|x|)` over the token vector
