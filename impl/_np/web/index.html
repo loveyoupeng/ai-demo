@@ -274,6 +274,7 @@ let MODEL = null;      // /api/model response
 let RECORD = null;     // last /api/record response
 let CUR_STEP = 0;      // selected step index
 let CUR_NODE = "softmax";
+let SPEC_MODE = "plain";   // header dropdown state ("plain" | "mtp" | "dspark") — the diagram lane reads it
 let HEAD = 0;          // selected attention head
 let PLAY_TIMER = null;
 
@@ -542,6 +543,7 @@ function specCtlInit() {
     (avail.includes("dspark") ? `<option value="dspark">DSpark</option>` : "");
   const def = MODEL.default_spec || "plain";
   sel.value = [...sel.options].some((o) => o.value === def) ? def : "plain";
+  SPEC_MODE = sel.value;
   const cap = (mode) => (MODEL.spec_block_size || {})[mode] || (mode === "dspark" ? 8 : 4);
   const sync = () => {
     const mode = sel.value;
@@ -559,6 +561,8 @@ function specCtlInit() {
   };
   sel.onchange = () => {
     sync();
+    SPEC_MODE = sel.value;
+    if ($("diagram-holder")) buildDiagram();   // the spec lane appears/disappears with the mode
     if (!RECORD && $("gen-text").textContent) doGenerate();
   };
   $("spec-k").oninput = () => { $("spec-k-val").textContent = $("spec-k").value; };
@@ -809,7 +813,8 @@ function buildDiagram() {
   const holder = $("diagram-holder");
   holder.innerHTML = "";
   const footY = HEAD_H + c.n_layers * (BLOCK_H + BLOCK_GAP);
-  const totalH = footY + 150;
+  const specOn = (typeof SPEC_MODE !== "undefined" ? SPEC_MODE : "plain") !== "plain";
+  const totalH = footY + 150 + (specOn ? 120 : 0);
   SVG = svgEl("svg", { id: "diagram", viewBox: `0 0 ${LW} ${totalH}` });
   // flow adjacency — the TRUE data-flow graph (a DAG, not just the drawn
   // order): inside attention, q/k/v are parallel projections of the same
@@ -862,6 +867,18 @@ function buildDiagram() {
   FLOW.fnorm = { pred: [`b${c.n_layers - 1}.out`], succ: ["lmhead"] };
   FLOW.lmhead = { pred: ["fnorm"], succ: ["softmax"] };
   FLOW.softmax = { pred: ["lmhead"], succ: [] };
+  // Speculative-decoding lane (ADR 0003): the drafter reads the target's
+  // final-norm hidden (fnorm's output) + the last committed token, proposes
+  // a draft block; the target verifies it in ONE forward_chunk (the whole
+  // stack, appended K/V); the accepted prefix feeds back as the next anchor.
+  // Softmax (the plain sampler) still owns the committed token when the
+  // draft is rejected — the lane is an accelerator around it, never a
+  // replacement (the lossless contract).
+  const specMode = typeof SPEC_MODE !== "undefined" ? SPEC_MODE : "plain";
+  if (specOn) {
+    FLOW.drafter = { pred: ["fnorm", "softmax"], succ: ["verify"] };
+    FLOW.verify = { pred: ["drafter"], succ: ["softmax"] };
+  }
 
   const defs = svgEl("defs");
   const marker = svgEl("marker", { id: "arrow", viewBox: "0 0 10 10", refX: "8.5", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" });
@@ -1028,6 +1045,32 @@ function buildDiagram() {
   node("softmax", CX_R, fy + 18, CW_R, 62, "softmax + argmax", "next token (non-linear)", true);
   edge([[CX_L + CW_L, fy + 49], [CX_C - 3, fy + 49]], { num: 8, numAt: [CX_C - 30, fy + 37], from: "fnorm", to: "lmhead" });
   edge([[CX_C + CW_C, fy + 49], [CX_R - 3, fy + 49]], { num: 9, numAt: [CX_R - 24, fy + 37], from: "lmhead", to: "softmax" });
+
+  // ---- speculative-decoding lane (below the footer; spec modes only) ----
+  if (specOn) {
+    const sy = fy + 18 + 62 + 26;                 // lane row top
+    const kCap = (MODEL.spec_block_size || {})[specMode] || (specMode === "dspark" ? 8 : 4);
+    node("drafter", CX_C, sy, CW_C, 62, specMode === "mtp" ? "MTP drafter" : "DSpark drafter",
+      specMode === "mtp"
+        ? `one tiny block · h_target + tok → k=${kCap} tokens, sequential`
+        : `parallel backbone + causal refine · k=${kCap} in one pass`, true);
+    node("verify", CX_R, sy, CW_R, 62, "verify", `forward_chunk: ONE pass scores all ${specMode === "dspark" ? "surviving" : "k"} drafted tokens`, true);
+    // fnorm's hidden + the last committed token feed the drafter (dashed:
+    // a side-read of the target's final hidden, not the main data flow)
+    edge([[CX_C + CW_C / 2, fy + 80], [CX_C + CW_C / 2, sy - 3]], { dashed: true, from: "fnorm", to: "drafter" });
+    // softmax's committed token is the drafter's anchor
+    edge([[CX_R + CW_R / 2, fy + 80], [CX_R + CW_R + 44, fy + 111], [CX_R + CW_R + 44, sy + 31], [CX_C + CW_C - 3, sy + 31]], { dashed: true, from: "softmax", to: "drafter" });
+    // drafter → verify: the draft block
+    edge([[CX_C + CW_C, sy + 31], [CX_R - 3, sy + 31]], { num: "d", numAt: [CX_R - 28, sy + 19], from: "drafter", to: "verify" });
+    // verify → softmax: the accepted prefix re-enters at the sampler (the
+    // target's own pick commits the first disagreeing position)
+    edge([[CX_R + CW_R / 2, sy], [CX_R + CW_R / 2, fy + 80]], { dashed: true, from: "verify", to: "softmax" });
+    const sl = svgEl("text", { class: "t-sub", x: CX_C + CW_C / 2, y: sy + 62 + 16, "text-anchor": "middle" });
+    sl.textContent = specMode === "dspark"
+      ? "DSpark: verify length = longest prefix with survival ≥ 0.8 (confidence-scheduled, online)"
+      : "MTP: sequential drafting — one token per step, own tiny KV cache";
+    SVG.appendChild(sl);
+  }
 
   holder.appendChild(SVG);
   SVG.addEventListener("click", (ev) => { if (!ev.target.closest(".node")) clearFlowHi(); }); // background click resets
@@ -1351,6 +1394,8 @@ const EXPLAIN = {
   fnorm: { what: "Final RMSNorm over the last block's output.", why: "Centers the hidden state before the vocabulary projection so logit scales stay comparable across positions." },
   lmhead: { what: "Each position's D-vector is dotted with all V vocabulary rows → logits.", why: "The largest logit is the model's current guess for the next token; the full row is the belief state sampling draws from." },
   softmax: { what: "softmax over the last position's logits → next-token distribution; greedy takes argmax, sampling draws from it.", why: "Temperature sharpens or flattens this distribution; top-k cuts off the low-probability tail before sampling." },
+  drafter: { what: "The speculative drafter: reads the target's final-norm hidden state plus the last committed token and proposes a block of k candidate tokens.", why: "A tiny model is cheap per token, so drafting costs little; the catch is drift — every drafted token compounds the drafter's own errors. MTP drafts sequentially (each token conditions the next); DSpark predicts the whole block in one parallel pass and repairs it with a causal refinement pass, the semi-AR coupling that fights suffix decay." },
+  verify: { what: "The target's verification pass: forward_chunk appends all drafted tokens' K/V in ONE pass and scores every drafted position in parallel.", why: "Verification is where the speedup lives: one target forward confirms up to k tokens. The longest agreeing prefix is committed; at the first disagreement the target's own token wins and the block tail is discarded — that rule is why speculative output is token-identical to plain greedy (the lossless contract). DSpark also schedules the verify length from online prefix-survival statistics." },
 };
 
 function renderInspector() {
@@ -1387,6 +1432,34 @@ function renderInspector() {
   } else if (id === "fnorm") {
     title.textContent = "Final norm — RMSNorm before lm_head";
     view = normView(f.final_norm, { xIn: f.blocks[f.blocks.length - 1].out[0], label: "final block output " });
+  } else if (id === "drafter" || id === "verify") {
+    title.textContent = id === "drafter"
+      ? `${SPEC_MODE === "dspark" ? "DSpark" : "MTP"} drafter — the speculative proposer`
+      : "Verification — the target's forward_chunk pass";
+    const sp = (RECORD && RECORD.spec) || null;
+    view = (body) => {
+      body.appendChild(formula(
+        id === "drafter"
+          ? (SPEC_MODE === "dspark"
+             ? "u_j = W_{in}[h_{\text{norm}}; p_j] \;\to\; \text{parallel backbone} \;\to\; \text{causal refine} \;\to\; \hat{t}_j"
+             : "x = W_{in}[h_{\text{norm}}; \text{emb}(t)] \;\to\; \text{block step} \;\to\; \hat{t}_{\text{next}}")
+          : "\\text{out} = \\underset{\\text{prefix}}{\\arg\\max}\\,\\text{agrees}(\\text{target},\\, \\text{draft})",
+        id === "drafter"
+          ? (SPEC_MODE === "dspark"
+             ? "the whole draft block in ONE pass: a non-causal backbone reads the anchor hidden plus a learned block-position embedding per slot, then a small causal module repairs intra-block dependency (suffix decay is the parallel drafter's enemy — the semi-AR coupling is DSpark's answer)"
+             : "one drafted token per block step: the drafter keeps its own tiny KV cache and feeds each drafted token back in — sequential dependency by construction, at k× the drafting latency")
+          : "verification scores every drafted position in one target pass; the longest agreeing prefix commits, the target's own token replaces the first disagreement, and the rejected tail is rolled back out of the KV cache"
+      ));
+      if (sp) {
+        body.appendChild(matLabel(`this run — mode ${sp.mode}, k=${sp.k ?? "trained"}: ${sp.n_rounds} rounds, ${sp.n_accepted}/${sp.n_draft_tokens} drafted tokens accepted (${(100 * (sp.accept_rate ?? 0)).toFixed(1)}%), mean accepted length ${sp.mean_accepted}`));
+        const rows = [["round", "draft tokens", "accepted"]];
+        (sp.rounds || []).slice(0, 8).forEach((r) => rows.push([`r${r.round}`, r.draft_tokens.map((t) => vocab()[t] ?? t).join(" "), `${r.accepted}/${r.k_eff}`]));
+        body.appendChild(numsTable(rows));
+        if (sp.schedule) body.appendChild(matLabel(`DSpark schedule: verify_len ${sp.schedule.verify_len} · survival target ${sp.schedule.target} · survival curve (prefix len 1…): ${(sp.schedule.survival || []).slice(1, 9).join(", ")}`));
+      } else {
+        body.appendChild(matLabel("run a generation in this mode to populate this panel with the actual draft/accept numbers"));
+      }
+    };
   } else if (id === "lmhead" || id === "softmax") {
     const s = RECORD.steps[CUR_STEP];
     if (id === "lmhead") title.textContent = "lm_head — projection to vocabulary";
