@@ -518,6 +518,39 @@ async function init() {
 // ---------------------------------------------------------------------------
 // Token strip: prompt + generated tokens with position indices
 // ---------------------------------------------------------------------------
+// Per-position drafter output distributions (top-8 each): the drafter's
+// own p_d(·) per drafted slot, straight from the round record's
+// drafter.draft_probs_top — [[token_id, prob], ...] per position.
+function draftProbBlocks(parent, round, title) {
+  const dr = round.drafter;
+  if (!dr || !dr.draft_probs_top) return;
+  const head = document.createElement("div");
+  head.className = "matlabel";
+  head.textContent = title;
+  parent.appendChild(head);
+  dr.draft_probs_top.forEach((top, j) => {
+    const dTok = (round.draft_tokens || [])[j];
+    const wrap = document.createElement("div");
+    wrap.className = "tblock";
+    const h = document.createElement("div");
+    h.className = "thead";
+    const pick = top[0] ? top[0][0] : null;
+    h.innerHTML = `<span class="tag ${pick === dTok ? "out" : "in"}">${pick === dTok ? "OUTPUT" : "dist"}</span> <b>draft position ${j} — p_d(·)</b> <span class="shape">top ${top.length}</span>`;
+    wrap.appendChild(h);
+    const bars = document.createElement("div");
+    bars.className = "topbars";
+    top.forEach(([tid, p]) => {
+      const name = `${vocab()[tid] ?? "?"} (${tid})${tid === dTok ? " ◂ picked" : ""}`;
+      const row = document.createElement("div");
+      const w = Math.round(200 * p / Math.max(top[0][1], 1e-9));
+      row.innerHTML = `<span>${esc(name)}</span><span class="bar"><i style="width:${Math.max(w, 1)}px"></i></span><span class="p">${p.toFixed(4)}</span>`;
+      bars.appendChild(row);
+    });
+    wrap.appendChild(bars);
+    parent.appendChild(wrap);
+  });
+}
+
 // a compact one-row token strip for the inspector (drafter/verify views)
 function tokenChipsRow(tokens) {
   const div = document.createElement("div");
@@ -1536,46 +1569,55 @@ function renderInspector() {
       if (id === "drafter.inproj") {
         body.appendChild(formula(
           SPEC_MODE === "dspark"
-            ? "u_j = W_{in}\\,[\\,h_{norm};\\; p_j\\,],\\quad j=0\\dots k-1"
-            : "x = W_{in}\\,[\\,h_{norm};\\; \\mathrm{emb}(t_{anchor})\\,]",
+            ? "u_j = W_{in}[h_{norm}; p_j], \\quad j = 0 \\dots k-1"
+            : "x = W_{in}[h_{norm}; \\mathrm{emb}(t_{anchor})]",
           SPEC_MODE === "dspark"
             ? "k parallel inputs in one matrix product: the SAME anchor hidden, a DIFFERENT learned position embedding per slot — this concat is the only thing that tells the backbone's slots apart"
             : "one input per drafted token: the anchor hidden plus the current token's embedding — at step j+1 the 'current token' is the drafter's own draft from step j"));
-        if (vstep && vstep.forward && vstep.forward.x_final) {
-          const xf = vstep.forward.x_final[0];
-          tensorBlock(body, "in", "target hidden h at the anchor position (D,)", [xf[xf.length - 1]], { cell: 14, names: ["D"] });
+        if (round && round.drafter) {
+          const dr = round.drafter;
+          tensorBlock(body, "in", `anchor token id (this round) — "${tokChar(dr.anchor_token)}"`, [[dr.anchor_token]], { cell: 20, names: ["1"] });
+          tensorBlock(body, "in", "h_norm: the target's final-norm hidden at the anchor (D,) — the drafter's conditioning input", [dr.anchor_hidden], { cell: 14, names: ["D"] });
+          const embRow = dr.anchor_token >= 0 && MODEL.vocab ? null : null;
+          body.appendChild(matLabel(`concat([h_norm; second input]) has length ${2 * MODEL.config.embed_dim} → W_in projects it back to D=${MODEL.config.embed_dim}`));
         } else {
           body.appendChild(matLabel("input: h_norm (D,) — the target's final-norm hidden at the anchor; run a spec record to see the live values"));
         }
         if (sp) body.appendChild(matLabel(`this run drafts k=${sp.k ?? "trained"} slots per round — ${SPEC_MODE === "dspark" ? "all k in ONE pass" : "one per step"}`));
       } else if (id === "drafter.block") {
         body.appendChild(formula(
-          "x_{j+1} = \\mathrm{block}(x_j,\\ \\mathrm{emb}(\\hat{t}_j))",
-          "MTP's recurrence: each drafted token is re-embedded and fed back — attention over the drafter's own tiny KV cache carries the intra-block dependency, one step per token; \hat{t} comes from the shared lm_head after out_norm"));
-        if (round) {
-          body.appendChild(matLabel("this round's draft tokens (one per sequential step):"));
-          body.appendChild(tokenChipsRow(round.draft_tokens));
+          "x_{j+1} = \\mathrm{block}(x_j,\\; \\mathrm{emb}(\\hat{t}_j))",
+          "MTP's recurrence: each drafted token is re-embedded and fed back — attention over the drafter's own tiny KV cache carries the intra-block dependency, one step per token"));
+        if (round && round.drafter) {
+          tensorBlock(body, "out", "draft tokens d_0…d_{k-1} (this round's proposal, one per sequential step)", [round.draft_tokens], { cell: 16, names: ["k"] });
+          draftProbBlocks(body, round, "the drafter's per-step output distribution p_d(·) — top-8 per drafted position");
         } else {
-          body.appendChild(matLabel("run a spec record to see the drafted tokens"));
+          body.appendChild(matLabel("run a spec record to see the drafted tokens and distributions"));
         }
-      } else if (id === "drafter.parallel") {
+            } else if (id === "drafter.parallel") {
         body.appendChild(formula(
           "P = \\mathrm{block}_{noncausal}(U),\\quad U = [u_0;\\dots;u_{k-1}]",
           "ONE non-causal pass over the block: slot j attends to every slot (no mask) — the whole block is proposed in parallel, at 1/k the sequential latency, but with no order information inside the block"));
-        if (round) {
-          body.appendChild(matLabel(`this round proposed ${round.draft_tokens.length} slots (k_eff=${round.k_eff}) in one pass:`));
-          body.appendChild(tokenChipsRow(round.draft_tokens));
+        if (round && round.drafter) {
+          tensorBlock(body, "out", "parallel proposal, all k_eff slots in ONE pass (k,)", [round.draft_tokens], { cell: 16, names: ["k"] });
+          draftProbBlocks(body, round, "the backbone's per-slot distribution p_d(·) — top-8 per position");
         }
-      } else if (id === "drafter.seq") {
+            } else if (id === "drafter.seq") {
         body.appendChild(formula(
           "S = \\mathrm{block}_{causal}(P)",
           "the semi-AR repair: a causal pass over the parallel proposal — slot j re-reads slots < j, reintroducing the dependency the parallel backbone dropped (DSpark's answer to suffix decay)"));
-        if (round) body.appendChild(matLabel(`refined block scored by the shared lm_head → ${round.accepted}/${round.k_eff} accepted this round`));
-      } else if (id === "drafter.outnorm") {
+        if (round && round.drafter) {
+          draftProbBlocks(body, round, "the REFINED per-slot distribution after the causal pass (top-8 per position) — the final proposal the verifier sees");
+          body.appendChild(matLabel(`${round.accepted}/${round.k_eff} accepted this round after refinement`));
+        }
+            } else if (id === "drafter.outnorm") {
         body.appendChild(formula("\\hat{h} = h / \\sqrt{\\mathrm{mean}(h^2)} \\cdot \\gamma_d", "the drafter's own final RMSNorm — puts its hidden stream on the shared head's expected scale before the vocabulary projection"));
       } else if (id === "drafter.lmhead") {
         body.appendChild(formula("\\hat{t} = \\arg\\max\\ \\hat{h}\\ W_{lm}^{\\,target}", "the TARGET's lm_head, borrowed: no copied V×D parameters (the sidecar stores none of them), and the drafter's proposals live in exactly the target's vocabulary space — the accept/reject comparison is apples-to-apples"));
         body.appendChild(matLabel("shared parameters — see shared/draft.py's key scheme (the sidecar holds only the drafter's own weights)"));
+        if (round && round.drafter) {
+          draftProbBlocks(body, round, "the shared head's per-position output distributions p_d(·) (top-8) — what the verifier's acceptance rule compares against the target's own");
+        }
       } else if (id === "verify.chunk") {
         body.appendChild(formula(
           "[\\ell_0,\\dots,\\ell_{c-1}] = \\mathrm{target}(\\mathrm{prefix}\\,\\Vert\\,\\mathrm{draft})",
@@ -1583,6 +1625,20 @@ function renderInspector() {
         if (vstep) {
           tensorBlock(body, "in", `draft block token ids this round (${vstep.input_tokens.length},)`, [vstep.input_tokens], { cell: 16, names: ["c"] });
           tensorBlock(body, "out", "verification logits (c, V) — the target's verdict at every drafted position", vstep.forward.logits, { cell: 8, names: ["c", "V"] });
+          // The per-position verdict this pass implies (the mask's source):
+          // draft d_j is accepted iff the target's argmax at position j-1
+          // equals it; position 0's verdict comes from the anchor's logits.
+          if (round) {
+            const vl = vstep.forward.logits[0];
+            const rows2 = [["j", "draft d_j", "target's argmax here", "verdict"]];
+            round.draft_tokens.forEach((t, j) => {
+              const tgt = j < vl.length ? vl[j] : null;
+              const tpick = tgt ? (tgt.indexOf(Math.max(...tgt))) : null;
+              rows2.push([String(j), `${vocab()[t] ?? t} (${t})`, tpick === null ? "—" : `${vocab()[tpick] ?? tpick} (${tpick})`, round.accept_mask[j] ? "✓ same token" : "✗ differs → cut"]);
+            });
+            body.appendChild(textTable(rows2));
+            body.appendChild(matLabel("verdict rule: d_j accepted ⟺ argmax(target logits at the position BEFORE j) == d_j — the walk's source of truth"));
+          }
           body.appendChild(matLabel(`this verify pass ran ${vstep.input_tokens.length} positions through all ${MODEL.config.n_layers} blocks in ONE forward`));
         } else {
           body.appendChild(matLabel("run a spec record — this panel shows the actual chunk logits (c, V)"));

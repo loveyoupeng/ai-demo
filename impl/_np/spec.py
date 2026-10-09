@@ -328,7 +328,7 @@ class SpeculativeGenerator:
             if k_eff <= 0:
                 break
 
-            d, _probs, logits_v, d_ms, v_ms = self._round_common(
+            d, d_probs, logits_v, d_ms, v_ms = self._round_common(
                 anchor_token,
                 anchor_hidden,
                 k_eff,
@@ -345,6 +345,21 @@ class SpeculativeGenerator:
             committed = [int(x) for x in d[:a]] + [int(np.argmax(corr))]
             committed = committed[:remaining]
             n_new = len(committed)
+
+            # The drafter's own inputs/outputs for this round (the learning
+            # page's drafter-node views): its two inputs (anchor token id +
+            # anchor hidden) and its per-position output distributions. The
+            # full (k, V) probs are trimmed to the top-8 per position — the
+            # page shows distributions, not a k×512 wall.
+            def _top_slice(p: np.ndarray, n_top: int = 8) -> list[list[float]]:
+                idx = np.argsort(p)[::-1][:n_top]
+                return [[int(i), round(float(p[i]), 6)] for i in idx]
+
+            round_drafter = {
+                "anchor_token": int(anchor_token.reshape(-1)[0]),
+                "anchor_hidden": [round(float(x), 6) for x in np.asarray(anchor_hidden).reshape(-1)],
+                "draft_probs_top": [_top_slice(np.asarray(p).reshape(-1)) for p in d_probs],
+            }
 
             self._trim_cache(cache, t + a)
             if n_new > 0:
@@ -367,6 +382,7 @@ class SpeculativeGenerator:
                     "draft_ms": round(d_ms * 1000, 3),
                     "verify_ms": round(v_ms * 1000, 3),
                     "schedule": sched.state() if scheduled else None,
+                    "drafter": round_drafter,
                 }
             )
             t += n_new
@@ -436,6 +452,16 @@ class SpeculativeGenerator:
             committed = committed[:remaining]
             n_new = len(committed)
 
+            def _top_slice(p: np.ndarray, n_top: int = 8) -> list[list[float]]:
+                idx = np.argsort(p)[::-1][:n_top]
+                return [[int(i), round(float(p[i]), 6)] for i in idx]
+
+            round_drafter = {
+                "anchor_token": int(anchor_token.reshape(-1)[0]),
+                "anchor_hidden": [round(float(x), 6) for x in np.asarray(anchor_hidden).reshape(-1)],
+                "draft_probs_top": [_top_slice(np.asarray(p).reshape(-1)) for p in draft_probs],
+            }
+
             self._trim_cache(cache, t + a)
             if n_new > 0:
                 pending_logits, anchor_hidden = self._commit(cache, t + a, committed[-1])
@@ -455,6 +481,7 @@ class SpeculativeGenerator:
                     "draft_ms": round(d_ms * 1000, 3),
                     "verify_ms": round(v_ms * 1000, 3),
                     "schedule": None,
+                    "drafter": round_drafter,
                 }
             )
             t += n_new

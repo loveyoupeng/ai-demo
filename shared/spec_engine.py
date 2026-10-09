@@ -284,7 +284,7 @@ class SpeculativeGenerator:
                 break
 
             t0 = time.perf_counter()
-            draft_tokens, _probs = self.drafter.draft(anchor_token, anchor_hidden, k_eff)
+            draft_tokens, d_probs = self.drafter.draft(anchor_token, anchor_hidden, k_eff)
             d = torch.as_tensor(draft_tokens)[0].tolist()  # (k_eff,) greedy proposals
             t1 = time.perf_counter()
             draft_ids = torch.as_tensor(draft_tokens, dtype=torch.long, device=ids.device).reshape(1, k_eff)
@@ -307,6 +307,19 @@ class SpeculativeGenerator:
             if scheduled:
                 sched.update(a)
 
+            # The drafter's own inputs/outputs this round (the learning
+            # page's drafter-node views) — same schema as the NumPy engine.
+            def _top_slice(p, n_top: int = 8):
+                pv = p.detach().reshape(-1).float().cpu()
+                idx = torch.argsort(pv, descending=True)[:n_top]
+                return [[int(i), round(float(pv[i]), 6)] for i in idx]
+
+            round_drafter = {
+                "anchor_token": int(anchor_token.reshape(-1)[0].item()),
+                "anchor_hidden": [round(float(x), 6) for x in anchor_hidden.reshape(-1).float().cpu()],
+                "draft_probs_top": [_top_slice(p) for p in d_probs],
+            }
+
             out_tokens.extend(committed)
             rounds.append(
                 {
@@ -320,6 +333,7 @@ class SpeculativeGenerator:
                     "draft_ms": round(d_ms * 1000, 3),
                     "verify_ms": round(v_ms * 1000, 3),
                     "schedule": sched.state() if scheduled else None,
+                    "drafter": round_drafter,
                 }
             )
             t += n_new
