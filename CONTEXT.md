@@ -224,6 +224,13 @@ docs, and tests.
   is the same JSON shape from every adapter. Off by default; it has no
   impact on any track.
 
+- **Spec lane** (learning page): the diagram row under the footer that
+  appears in spec modes — the drafter and verify nodes with their
+  per-family sub-cells (MTP: in_proj → block·causal → out_norm → shared
+  lm_head; DSpark: in_proj → parallel⊕non-causal → causal refine → shared
+  lm_head; verify: forward_chunk → survival cap (DSpark) → accept walk →
+  commit/rollback), each click-inspectable like every other node.
+
 - **Inference record**: the per-token capture of every forward intermediate — embedding through each block's
   attention/FFN (or MoE) tensors, final norm, logits, and the sampled token — serialized as JSON for the page and
   for download.

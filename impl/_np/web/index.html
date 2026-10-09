@@ -297,10 +297,16 @@ async function api(path, body) {
 function promptParams() {
   const t = $("temp").value;
   const spec = $("spec").value;
+  const backend = $("backend").value;
+  // Sampled speculation (the rejection-sampling theorem) is the NumPy
+  // track's teaching path; the torch family runs greedy verification —
+  // what production runs at temperature 0. Force greedy there instead of
+  // erroring, so switching backend keeps the demo running.
+  const forceGreedy = spec !== "plain" && backend !== "numpy" && t !== "greedy";
   return {
     text: $("prompt").value,
     n_tokens: Math.max(1, Math.min(32, parseInt($("ntokens").value || "8", 10))),
-    temperature: t === "greedy" ? null : parseFloat(t),
+    temperature: forceGreedy ? null : t === "greedy" ? null : parseFloat(t),
     top_k: parseInt($("topk").value || "0", 10),
     seed: parseInt($("seed").value || "42", 10),
     backend: $("backend").value,
@@ -391,6 +397,25 @@ function heatGrid(matrix, { cell = 16, title = "", rowLabels = null } = {}) {
 }
 
 // RAW number matrix as a monospace table, capped to maxR x maxC
+// a text-safe table for mixed cells (labels, tokens, ✓/✗ verdicts …):
+// numbers keep numsTable's fixed-width formatting, strings pass through.
+function textTable(matrix, { maxR = 32, maxC = 48, dec = 3 } = {}) {
+  const m = rows2d(matrix);
+  const r = Math.min(m.length, maxR);
+  const c = Math.min((m[0] || []).length, maxC);
+  const fmt = (v) => (typeof v === "number" ? (Math.abs(v) >= 100 ? v.toFixed(1) : v.toFixed(dec)).padStart(8) : String(v).padStart(8));
+  let out = "";
+  const hdr = "row".padStart(4) + " " + Array.from({ length: c }, (_, j) => String(j).padStart(8)).join("");
+  out += `<span class="nh">${hdr}</span>\n`;
+  for (let i = 0; i < r; i++) {
+    out += String(i).padStart(4) + " " + m[i].slice(0, c).map(fmt).join(" ") + "\n";
+  }
+  const el = document.createElement("div");
+  el.className = "nums";
+  el.textContent = out;
+  return el;
+}
+
 function numsTable(matrix, { maxR = 32, maxC = 48, dec = 3 } = {}) {
   const m = rows2d(matrix);
   const r = Math.min(m.length, maxR);
@@ -493,6 +518,19 @@ async function init() {
 // ---------------------------------------------------------------------------
 // Token strip: prompt + generated tokens with position indices
 // ---------------------------------------------------------------------------
+// a compact one-row token strip for the inspector (drafter/verify views)
+function tokenChipsRow(tokens) {
+  const div = document.createElement("div");
+  div.className = "chips";
+  (tokens || []).forEach((t, i) => {
+    const ch = document.createElement("span");
+    ch.className = "chip tok";
+    ch.innerHTML = `<span class="idx">${i}</span>${esc(String(vocab()[t] ?? t))} <small>${t}</small>`;
+    div.appendChild(ch);
+  });
+  return div;
+}
+
 function tokenChips(tokens, offset, cls) {
   return tokens.map((t, i) => {
     const ch = MODEL.vocab ? MODEL.vocab[t] : "?";
@@ -814,7 +852,7 @@ function buildDiagram() {
   holder.innerHTML = "";
   const footY = HEAD_H + c.n_layers * (BLOCK_H + BLOCK_GAP);
   const specOn = (typeof SPEC_MODE !== "undefined" ? SPEC_MODE : "plain") !== "plain";
-  const totalH = footY + 150 + (specOn ? 120 : 0);
+  const totalH = footY + 150 + (specOn ? 175 : 0);
   SVG = svgEl("svg", { id: "diagram", viewBox: `0 0 ${LW} ${totalH}` });
   // flow adjacency — the TRUE data-flow graph (a DAG, not just the drawn
   // order): inside attention, q/k/v are parallel projections of the same
@@ -878,6 +916,27 @@ function buildDiagram() {
   if (specOn) {
     FLOW.drafter = { pred: ["fnorm", "softmax"], succ: ["verify"] };
     FLOW.verify = { pred: ["drafter"], succ: ["softmax"] };
+    // Drafter internals (explicit per family — see the lane's module cells).
+    if (specMode === "mtp") {
+      FLOW["drafter.inproj"] = { pred: ["drafter"], succ: ["drafter.block"] };
+      FLOW["drafter.block"] = { pred: ["drafter.inproj"], succ: ["drafter.outnorm"] };
+      FLOW["drafter.outnorm"] = { pred: ["drafter.block"], succ: ["drafter.lmhead"] };
+      FLOW["drafter.lmhead"] = { pred: ["drafter.outnorm"], succ: ["verify"] }; // shared with the target (no copy)
+    } else {
+      FLOW["drafter.inproj"] = { pred: ["drafter"], succ: ["drafter.parallel"] };
+      FLOW["drafter.parallel"] = { pred: ["drafter.inproj"], succ: ["drafter.seq"] }; // non-causal over the block
+      FLOW["drafter.seq"] = { pred: ["drafter.parallel"], succ: ["drafter.lmhead"] }; // causal intra-block repair
+      FLOW["drafter.lmhead"] = { pred: ["drafter.seq"], succ: ["verify"] };
+    }
+    // Verification internals: the chunk pass, the (scheduled) accept walk,
+    // and the commit/rollback of the KV cache + the committed prefix.
+    FLOW["verify.chunk"] = { pred: ["drafter.lmhead"], succ: ["verify.walk"] };
+    if (specMode === "dspark") {
+      FLOW["verify.schedule"] = { pred: ["verify.chunk"], succ: ["verify.walk"] }; // survival cap feeds the walk length
+      FLOW["verify.chunk"].succ = ["verify.schedule"];
+    }
+    FLOW["verify.walk"] = { pred: ["verify.chunk"], succ: ["verify.rollback"] };
+    FLOW["verify.rollback"] = { pred: ["verify.walk"], succ: ["softmax"] };
   }
 
   const defs = svgEl("defs");
@@ -1047,25 +1106,42 @@ function buildDiagram() {
   edge([[CX_C + CW_C, fy + 49], [CX_R - 3, fy + 49]], { num: 9, numAt: [CX_R - 24, fy + 37], from: "lmhead", to: "softmax" });
 
   // ---- speculative-decoding lane (below the footer; spec modes only) ----
+  // The two drafter families have DIFFERENT architectures and the diagram
+  // shows that explicitly (they are not interchangeable internals):
+  //   MTP: [h_norm; emb(anchor)] → in_proj → ONE block (own tiny KV cache,
+  //        causal) → out_norm → shared lm_head — one token per step, k steps.
+  //   DSpark: [h_norm; pos_emb_j] → in_proj → parallel backbone (NON-causal
+  //        over the block) → causal sequential refine (the semi-AR repair)
+  //        → out_norm → shared lm_head — the whole block in ONE pass.
   if (specOn) {
     const sy = fy + 18 + 62 + 26;                 // lane row top
     const kCap = (MODEL.spec_block_size || {})[specMode] || (specMode === "dspark" ? 8 : 4);
-    node("drafter", CX_C, sy, CW_C, 62, specMode === "mtp" ? "MTP drafter" : "DSpark drafter",
-      specMode === "mtp"
-        ? `one tiny block · h_target + tok → k=${kCap} tokens, sequential`
-        : `parallel backbone + causal refine · k=${kCap} in one pass`, true);
-    node("verify", CX_R, sy, CW_R, 62, "verify", `forward_chunk: ONE pass scores all ${specMode === "dspark" ? "surviving" : "k"} drafted tokens`, true);
+    if (specMode === "mtp") {
+      module("drafter", CX_C, sy, CW_C, 96, "MTP drafter (sequential)", [
+        [["[h;emb]", "drafter.inproj"], ["block·causal", "drafter.block"], ["out_norm", "drafter.outnorm"], ["shared W_lm", "drafter.lmhead"]],
+      ], null);
+      module("verify", CX_R, sy, CW_R, 96, "verify", [
+        [["forward_chunk", "verify.chunk"], ["accept walk", "verify.walk"], ["commit/rollback", "verify.rollback"]],
+      ], null);
+    } else {
+      module("drafter", CX_C, sy, CW_C, 96, "DSpark drafter (semi-AR)", [
+        [["[h;pos_j]", "drafter.inproj"], ["parallel ⊕ non-causal", "drafter.parallel"], ["causal refine", "drafter.seq"], ["shared W_lm", "drafter.lmhead"]],
+      ], null);
+      module("verify", CX_R, sy, CW_R, 96, "verify (scheduled)", [
+        [["forward_chunk", "verify.chunk"], ["survival≥0.8 cap", "verify.schedule"], ["accept walk", "verify.walk"], ["commit/rollback", "verify.rollback"]],
+      ], null);
+    }
     // fnorm's hidden + the last committed token feed the drafter (dashed:
     // a side-read of the target's final hidden, not the main data flow)
     edge([[CX_C + CW_C / 2, fy + 80], [CX_C + CW_C / 2, sy - 3]], { dashed: true, from: "fnorm", to: "drafter" });
     // softmax's committed token is the drafter's anchor
-    edge([[CX_R + CW_R / 2, fy + 80], [CX_R + CW_R + 44, fy + 111], [CX_R + CW_R + 44, sy + 31], [CX_C + CW_C - 3, sy + 31]], { dashed: true, from: "softmax", to: "drafter" });
+    edge([[CX_R + CW_R / 2, fy + 80], [CX_R + CW_R + 44, fy + 111], [CX_R + CW_R + 44, sy + 48], [CX_C + CW_C - 3, sy + 48]], { dashed: true, from: "softmax", to: "drafter" });
     // drafter → verify: the draft block
-    edge([[CX_C + CW_C, sy + 31], [CX_R - 3, sy + 31]], { num: "d", numAt: [CX_R - 28, sy + 19], from: "drafter", to: "verify" });
+    edge([[CX_C + CW_C, sy + 48], [CX_R - 3, sy + 48]], { num: "d", numAt: [CX_R - 28, sy + 36], from: "drafter", to: "verify" });
     // verify → softmax: the accepted prefix re-enters at the sampler (the
     // target's own pick commits the first disagreeing position)
-    edge([[CX_R + CW_R / 2, sy], [CX_R + CW_R / 2, fy + 80]], { dashed: true, from: "verify", to: "softmax" });
-    const sl = svgEl("text", { class: "t-sub", x: CX_C + CW_C / 2, y: sy + 62 + 16, "text-anchor": "middle" });
+    edge([[CX_R + CW_R / 2, sy + 48], [CX_R + CW_R / 2, fy + 80]], { dashed: true, from: "verify", to: "softmax" });
+    const sl = svgEl("text", { class: "t-sub", x: CX_C + CW_C / 2, y: sy + 96 + 16, "text-anchor": "middle" });
     sl.textContent = specMode === "dspark"
       ? "DSpark: verify length = longest prefix with survival ≥ 0.8 (confidence-scheduled, online)"
       : "MTP: sequential drafting — one token per step, own tiny KV cache";
@@ -1395,7 +1471,17 @@ const EXPLAIN = {
   lmhead: { what: "Each position's D-vector is dotted with all V vocabulary rows → logits.", why: "The largest logit is the model's current guess for the next token; the full row is the belief state sampling draws from." },
   softmax: { what: "softmax over the last position's logits → next-token distribution; greedy takes argmax, sampling draws from it.", why: "Temperature sharpens or flattens this distribution; top-k cuts off the low-probability tail before sampling." },
   drafter: { what: "The speculative drafter: reads the target's final-norm hidden state plus the last committed token and proposes a block of k candidate tokens.", why: "A tiny model is cheap per token, so drafting costs little; the catch is drift — every drafted token compounds the drafter's own errors. MTP drafts sequentially (each token conditions the next); DSpark predicts the whole block in one parallel pass and repairs it with a causal refinement pass, the semi-AR coupling that fights suffix decay." },
+  "drafter.inproj": { what: "Input projection: x = W_in · concat(h_norm, second input), where the second input is emb(anchor token) for MTP but the learned block-position embedding p_j for DSpark.", why: "Both families condition on the target's hidden state (the anchor's context summary), but they differ in what tells the positions apart: MTP gets order from its recurrent feedback, DSpark from the learned position embeddings p_j — the parallel drafter has no order signal otherwise." },
+  "drafter.block": { what: "MTP's single transformer block — causal, with its own tiny KV cache; each drafted token is fed back as the next step's input.", why: "Sequential by construction: draft token j conditions draft token j+1 through the block's attention, exactly like ordinary decoding but in miniature. The cost is latency — k forward steps per block — and the benefit is that early tokens are as good as the drafter can make them." },
+  "drafter.parallel": { what: "DSpark's parallel backbone: one NON-causal block pass over all k positions at once — every slot sees every other slot.", why: "The whole block in a single pass is what makes parallel drafting fast, but with no mask there is no order — that is why each slot's input carries its own learned position embedding, and why suffix decay (later slots drift more) is this family's known weakness." },
+  "drafter.seq": { what: "DSpark's lightweight causal refinement module: a second block pass WITH the causal mask over the drafted block.", why: "The semi-autoregressive coupling (parallel propose → causal repair) is DSpark's answer to suffix decay: the refinement lets slot j re-read slots < j, reintroducing the intra-block dependency the parallel backbone dropped, at a fraction of sequential drafting's cost." },
+  "drafter.outnorm": { what: "The drafter's own final RMSNorm before the vocabulary projection.", why: "Mirrors the target's final norm: the drafter's hidden stream must be normalized before the shared lm_head so its logits live on the same scale the head was trained for." },
+  "drafter.lmhead": { what: "The TARGET's lm_head, borrowed — the drafter shares it instead of owning a copy (DeepSeek-V3 MTP design).", why: "The V×D head is by far the largest parameter block; sharing it keeps the drafter tiny and — more importantly — makes the drafter's logits live in exactly the target's vocabulary space, so the accept/reject comparison is apples-to-apples." },
   verify: { what: "The target's verification pass: forward_chunk appends all drafted tokens' K/V in ONE pass and scores every drafted position in parallel.", why: "Verification is where the speedup lives: one target forward confirms up to k tokens. The longest agreeing prefix is committed; at the first disagreement the target's own token wins and the block tail is discarded — that rule is why speculative output is token-identical to plain greedy (the lossless contract). DSpark also schedules the verify length from online prefix-survival statistics." },
+  "verify.chunk": { what: "forward_chunk: the draft block enters the REAL target stack — embeddings, all L blocks' attention against the appended K/V, final norm, lm_head — in one pass.", why: "This is just an ordinary forward over c tokens; nothing about it is speculative. The trick is that the causal mask makes position t+i's scores exactly what a step-by-step decode would have computed — so one pass prices every drafted token at once (chunk parity is what the tests pin)." },
+  "verify.schedule": { what: "DSpark's confidence schedule: the verified length for each round is the longest draft prefix whose EMPIRICAL survival probability (tracked online, per prefix length) still meets the 0.8 target.", why: "Verifying positions that almost never survive wastes the target pass — the paper's throughput observation. The schedule reads its own history: if only 30% of length-6 prefixes survived so far, drafting past the length whose survival first drops below 0.8 is a bad bet, so the block is cut there." },
+  "verify.walk": { what: "The accept mask: per drafted position j, compare the drafter's token with the target's argmax at the position BEFORE it (from the chunk pass).", why: "The walk builds the ✓/✗ tree the rounds panel shows: each ✓ extends the accepted prefix; the first ✗ (or the end of the block) ends the round. The comparison uses the target's REPETITION-GUARDED argmax — the same rule plain greedy applies — which is exactly why the committed stream equals plain greedy's stream." },
+  "verify.rollback": { what: "Commit + rollback: the accepted prefix's K/V stay in the target cache, the rejected tail's rows are trimmed, and the correction/bonus token (the target's own pick) is appended as the next anchor.", why: "The KV cache must end the round holding exactly the committed tokens — anything else desynchronizes every later position. Rollback is speculative decoding's bookkeeping cost: the price of guessing ahead is sometimes putting rows back in the cache." },
 };
 
 function renderInspector() {
@@ -1432,32 +1518,133 @@ function renderInspector() {
   } else if (id === "fnorm") {
     title.textContent = "Final norm — RMSNorm before lm_head";
     view = normView(f.final_norm, { xIn: f.blocks[f.blocks.length - 1].out[0], label: "final block output " });
-  } else if (id === "drafter" || id === "verify") {
-    title.textContent = id === "drafter"
-      ? `${SPEC_MODE === "dspark" ? "DSpark" : "MTP"} drafter — the speculative proposer`
-      : "Verification — the target's forward_chunk pass";
+  } else if (id === "drafter" || id === "verify" || id.startsWith("drafter.") || id.startsWith("verify.")) {
+    const fam = SPEC_MODE === "dspark" ? "DSpark" : "MTP";
+    const isDrafter = id === "drafter" || id.startsWith("drafter.");
+    title.textContent = isDrafter
+      ? (id === "drafter"
+          ? `${fam} drafter — the speculative proposer`
+          : `${fam} drafter / ${id.replace("drafter.", "")}`)
+      : (id === "verify" ? "Verification — the target's forward_chunk pass" : `Verification / ${id.replace("verify.", "")}`);
     const sp = (RECORD && RECORD.spec) || null;
+    const vsteps = RECORD ? (RECORD.steps || []).filter((s) => s.kind === "verify") : [];
+    const vIdx = Math.min(Math.max(0, vsteps.length ? CUR_STEP - 1 : 0), Math.max(0, vsteps.length - 1));
+    const vstep = vsteps[vIdx] || null;
+    const round = sp && sp.rounds ? (sp.rounds[vIdx] || sp.rounds[0]) : null;
     view = (body) => {
-      body.appendChild(formula(
-        id === "drafter"
-          ? (SPEC_MODE === "dspark"
-             ? "u_j = W_{in}[h_{\text{norm}}; p_j] \;\to\; \text{parallel backbone} \;\to\; \text{causal refine} \;\to\; \hat{t}_j"
-             : "x = W_{in}[h_{\text{norm}}; \text{emb}(t)] \;\to\; \text{block step} \;\to\; \hat{t}_{\text{next}}")
-          : "\\text{out} = \\underset{\\text{prefix}}{\\arg\\max}\\,\\text{agrees}(\\text{target},\\, \\text{draft})",
-        id === "drafter"
-          ? (SPEC_MODE === "dspark"
-             ? "the whole draft block in ONE pass: a non-causal backbone reads the anchor hidden plus a learned block-position embedding per slot, then a small causal module repairs intra-block dependency (suffix decay is the parallel drafter's enemy — the semi-AR coupling is DSpark's answer)"
-             : "one drafted token per block step: the drafter keeps its own tiny KV cache and feeds each drafted token back in — sequential dependency by construction, at k× the drafting latency")
-          : "verification scores every drafted position in one target pass; the longest agreeing prefix commits, the target's own token replaces the first disagreement, and the rejected tail is rolled back out of the KV cache"
-      ));
-      if (sp) {
-        body.appendChild(matLabel(`this run — mode ${sp.mode}, k=${sp.k ?? "trained"}: ${sp.n_rounds} rounds, ${sp.n_accepted}/${sp.n_draft_tokens} drafted tokens accepted (${(100 * (sp.accept_rate ?? 0)).toFixed(1)}%), mean accepted length ${sp.mean_accepted}`));
-        const rows = [["round", "draft tokens", "accepted"]];
-        (sp.rounds || []).slice(0, 8).forEach((r) => rows.push([`r${r.round}`, r.draft_tokens.map((t) => vocab()[t] ?? t).join(" "), `${r.accepted}/${r.k_eff}`]));
-        body.appendChild(numsTable(rows));
-        if (sp.schedule) body.appendChild(matLabel(`DSpark schedule: verify_len ${sp.schedule.verify_len} · survival target ${sp.schedule.target} · survival curve (prefix len 1…): ${(sp.schedule.survival || []).slice(1, 9).join(", ")}`));
-      } else {
-        body.appendChild(matLabel("run a generation in this mode to populate this panel with the actual draft/accept numbers"));
+      // ---- per-sub-node deep views (real input/output tensors) ----
+      if (id === "drafter.inproj") {
+        body.appendChild(formula(
+          SPEC_MODE === "dspark"
+            ? "u_j = W_{in}\\,[\\,h_{norm};\\; p_j\\,],\\quad j=0\\dots k-1"
+            : "x = W_{in}\\,[\\,h_{norm};\\; \\mathrm{emb}(t_{anchor})\\,]",
+          SPEC_MODE === "dspark"
+            ? "k parallel inputs in one matrix product: the SAME anchor hidden, a DIFFERENT learned position embedding per slot — this concat is the only thing that tells the backbone's slots apart"
+            : "one input per drafted token: the anchor hidden plus the current token's embedding — at step j+1 the 'current token' is the drafter's own draft from step j"));
+        if (vstep && vstep.forward && vstep.forward.x_final) {
+          const xf = vstep.forward.x_final[0];
+          tensorBlock(body, "in", "target hidden h at the anchor position (D,)", [xf[xf.length - 1]], { cell: 14, names: ["D"] });
+        } else {
+          body.appendChild(matLabel("input: h_norm (D,) — the target's final-norm hidden at the anchor; run a spec record to see the live values"));
+        }
+        if (sp) body.appendChild(matLabel(`this run drafts k=${sp.k ?? "trained"} slots per round — ${SPEC_MODE === "dspark" ? "all k in ONE pass" : "one per step"}`));
+      } else if (id === "drafter.block") {
+        body.appendChild(formula(
+          "x_{j+1} = \\mathrm{block}(x_j,\\ \\mathrm{emb}(\\hat{t}_j))",
+          "MTP's recurrence: each drafted token is re-embedded and fed back — attention over the drafter's own tiny KV cache carries the intra-block dependency, one step per token; \hat{t} comes from the shared lm_head after out_norm"));
+        if (round) {
+          body.appendChild(matLabel("this round's draft tokens (one per sequential step):"));
+          body.appendChild(tokenChipsRow(round.draft_tokens));
+        } else {
+          body.appendChild(matLabel("run a spec record to see the drafted tokens"));
+        }
+      } else if (id === "drafter.parallel") {
+        body.appendChild(formula(
+          "P = \\mathrm{block}_{noncausal}(U),\\quad U = [u_0;\\dots;u_{k-1}]",
+          "ONE non-causal pass over the block: slot j attends to every slot (no mask) — the whole block is proposed in parallel, at 1/k the sequential latency, but with no order information inside the block"));
+        if (round) {
+          body.appendChild(matLabel(`this round proposed ${round.draft_tokens.length} slots (k_eff=${round.k_eff}) in one pass:`));
+          body.appendChild(tokenChipsRow(round.draft_tokens));
+        }
+      } else if (id === "drafter.seq") {
+        body.appendChild(formula(
+          "S = \\mathrm{block}_{causal}(P)",
+          "the semi-AR repair: a causal pass over the parallel proposal — slot j re-reads slots < j, reintroducing the dependency the parallel backbone dropped (DSpark's answer to suffix decay)"));
+        if (round) body.appendChild(matLabel(`refined block scored by the shared lm_head → ${round.accepted}/${round.k_eff} accepted this round`));
+      } else if (id === "drafter.outnorm") {
+        body.appendChild(formula("\\hat{h} = h / \\sqrt{\\mathrm{mean}(h^2)} \\cdot \\gamma_d", "the drafter's own final RMSNorm — puts its hidden stream on the shared head's expected scale before the vocabulary projection"));
+      } else if (id === "drafter.lmhead") {
+        body.appendChild(formula("\\hat{t} = \\arg\\max\\ \\hat{h}\\ W_{lm}^{\\,target}", "the TARGET's lm_head, borrowed: no copied V×D parameters (the sidecar stores none of them), and the drafter's proposals live in exactly the target's vocabulary space — the accept/reject comparison is apples-to-apples"));
+        body.appendChild(matLabel("shared parameters — see shared/draft.py's key scheme (the sidecar holds only the drafter's own weights)"));
+      } else if (id === "verify.chunk") {
+        body.appendChild(formula(
+          "[\\ell_0,\\dots,\\ell_{c-1}] = \\mathrm{target}(\\mathrm{prefix}\\,\\Vert\\,\\mathrm{draft})",
+          "one ordinary causal forward over prefix+draft: the draft rows' logits are exactly what step-by-step decoding would compute (chunk parity), so a single pass prices every drafted token"));
+        if (vstep) {
+          tensorBlock(body, "in", `draft block token ids this round (${vstep.input_tokens.length},)`, [vstep.input_tokens], { cell: 16, names: ["c"] });
+          tensorBlock(body, "out", "verification logits (c, V) — the target's verdict at every drafted position", vstep.forward.logits, { cell: 8, names: ["c", "V"] });
+          body.appendChild(matLabel(`this verify pass ran ${vstep.input_tokens.length} positions through all ${MODEL.config.n_layers} blocks in ONE forward`));
+        } else {
+          body.appendChild(matLabel("run a spec record — this panel shows the actual chunk logits (c, V)"));
+        }
+      } else if (id === "verify.schedule") {
+        body.appendChild(formula(
+          "p(l) = \\mathrm{counts}[l]\\,/\\,\\mathrm{rounds},\\quad \\ell_{verify} = \\max\\{l : p(l) \\ge 0.8\\}",
+          "the online survival estimate: counts[l] = rounds that accepted ≥ l tokens; the verified length is cut where the empirical survival probability first drops below the 0.8 target — no verification budget on suffixes that almost never survive"));
+        if (sp && sp.schedule) {
+          const sv = sp.schedule.survival || [];
+          const rows = [["prefix len l", ...sv.map((_, i) => i)]];
+          rows.push(["survival p(l)", ...sv.map((v) => Number(v).toFixed(2))]);
+          body.appendChild(textTable(rows));
+          body.appendChild(matLabel(`verify_len ${sp.schedule.verify_len} · target ${sp.schedule.target} · ${sp.schedule.rounds} rounds of history`));
+        } else {
+          body.appendChild(matLabel("DSpark only — the schedule populates after a DSpark run"));
+        }
+      } else if (id === "verify.walk") {
+        body.appendChild(formula(
+          "\\mathrm{keep}\\ d_j \\iff \\arg\\max\\ \\ell_{j-1}^{guard} = d_j",
+          "the accept-mask tree: position j's verdict is the target's REPETITION-GUARDED argmax at the position before it (j=0 uses the anchor's pending logits) — the same rule plain greedy uses, which is why the committed stream is token-identical to plain greedy (the lossless contract)"));
+        if (round) {
+          const rows = [["j", "draft d_j", "verdict"]];
+          round.draft_tokens.forEach((t, j) => {
+            rows.push([String(j), `${vocab()[t] ?? t} (${t})`, round.accept_mask[j] ? "✓ accepted" : "✗ rejected — tail discarded"]);
+          });
+          body.appendChild(textTable(rows));
+          body.appendChild(matLabel(`accepted prefix: ${round.accepted}/${round.k_eff}; committed this round: ${round.committed.length} tokens`));
+        } else {
+          body.appendChild(matLabel("run a spec record — the per-position ✓/✗ walk appears here"));
+        }
+      } else if (id === "verify.rollback") {
+        body.appendChild(formula(
+          "\\mathrm{cache} \\leftarrow \\mathrm{cache}[:\\,t+a],\\qquad \\mathrm{drafter}\\,\\mathrm{cache} \\leftarrow 1 + a\\ \\mathrm{steps}",
+          "the KV cache keeps exactly the committed positions: accepted drafts stay, the rejected tail's rows are trimmed, and the target's correction/bonus token is appended as the next anchor — the drafter's own cache rolls back in step"));
+        if (round) {
+          body.appendChild(matLabel(`this round: trimmed ${Math.max(0, round.k_eff - round.accepted)} rejected rows; committed ${round.committed.length} tokens (${round.accepted} accepted + the target's correction):`));
+          body.appendChild(tokenChipsRow(round.committed));
+        }
+      } else if (id === "drafter" || id === "verify") {
+        // ---- the parent nodes keep the summary + per-round table ----
+        body.appendChild(formula(
+          isDrafter
+            ? (SPEC_MODE === "dspark"
+               ? "u_j = W_{in}[h_{norm}; p_j] \\to \\text{parallel} \\to \\text{causal refine} \\to \\hat{t}_j"
+               : "x = W_{in}[h_{norm}; \\text{emb}(t)] \\to \\text{block step} \\to \\hat{t}_{next}")
+            : "\\text{out} = \\underset{\\text{prefix}}{\\arg\\max}\\,\\text{agrees}(\\text{target},\\, \\text{draft})",
+          isDrafter
+            ? (SPEC_MODE === "dspark"
+               ? "the whole draft block in ONE pass: a non-causal backbone reads the anchor hidden plus a learned block-position embedding per slot, then a small causal module repairs intra-block dependency (suffix decay is the parallel drafter's enemy — the semi-AR coupling is DSpark's answer). Click the cells above for each stage's math and live numbers."
+               : "one drafted token per block step: the drafter keeps its own tiny KV cache and feeds each drafted token back in — sequential dependency by construction, at k× the drafting latency. Click the cells above for each stage's math and live numbers.")
+            : "verification scores every drafted position in one target pass; the longest agreeing prefix commits, the target's own token replaces the first disagreement, and the rejected tail is rolled back out of the KV cache. Click the cells above for the chunk/schedule/walk/rollback details."
+        ));
+        if (sp) {
+          body.appendChild(matLabel(`this run — mode ${sp.mode}, k=${sp.k ?? "trained"}: ${sp.n_rounds} rounds, ${sp.n_accepted}/${sp.n_draft_tokens} drafted tokens accepted (${(100 * (sp.accept_rate ?? 0)).toFixed(1)}%), mean accepted length ${sp.mean_accepted}`));
+          const rows = [["round", "draft tokens", "accepted"]];
+          (sp.rounds || []).slice(0, 8).forEach((r) => rows.push([`r${r.round}`, r.draft_tokens.map((t) => vocab()[t] ?? t).join(" "), `${r.accepted}/${r.k_eff}`]));
+          body.appendChild(textTable(rows));
+          if (sp.schedule) body.appendChild(matLabel(`DSpark schedule: verify_len ${sp.schedule.verify_len} · survival target ${sp.schedule.target} · survival curve (prefix len 1…): ${(sp.schedule.survival || []).slice(1, 9).join(", ")}`));
+        } else {
+          body.appendChild(matLabel("run a generation in this mode to populate this panel with the actual draft/accept numbers"));
+        }
       }
     };
   } else if (id === "lmhead" || id === "softmax") {

@@ -216,6 +216,77 @@ each step recomputes only the new token's K/V (one row appended per block):
   cache and only the last `context_length` tokens in the softmax window at prefill;
   the learning page documents this window → full-history semantics explicitly.
 
+## 9. Speculative decoding — drafting ahead, verifying once
+
+The learning page renders this stage as the two-node lane under the
+diagram's footer (ADR 0003): a **drafter** proposes a block of k tokens,
+and the **target verifies** them in one `forward_chunk` pass. The two
+drafter families the repo ships have *different architectures* — the
+page shows both explicitly.
+
+### The shared contract (both families)
+
+```
+draft:   (t_anchor, h_norm = final_norm(x)[anchor])  →  d_0 … d_{k-1},  p_d(·|anchor)
+verify:  ℓ_j = target_logits(prefix ∥ d_0…d_{k-1})_j        (ONE forward_chunk pass)
+accept:  keep d_j while  argmax(ℓ_{j-1}) == d_j ;  the first mismatch → the target's own token wins
+rollback: KV cache keeps exactly the committed prefix; the correction token is the next anchor
+```
+
+- The drafter **shares the target's embedding and lm_head** (DeepSeek-V3 MTP
+  design): the V×D head is the biggest parameter block, and sharing it puts
+  the drafter's proposals in exactly the target's vocabulary space.
+- Greedy acceptance uses the target's *repetition-guarded* argmax — the
+  same rule plain greedy applies — so the committed stream is
+  **token-identical to plain greedy** (the lossless contract; pinned by the
+  `spec_mtp_np_torch` / `spec_dspark_np_torch` equivalence scenarios).
+- The NumPy engine additionally implements the rejection-sampling theorem
+  for temperature mode: accept with `min(1, p_t/p_d)`, resample from
+  `norm(max(0, p_t − p_d))` at the first rejection — committed tokens are
+  distributed exactly as the target would have sampled them.
+
+### MTP (sequential drafting) — `impl/_np/drafters.py` `MTPDrafter`
+
+One tiny transformer block with its own KV cache, run k times:
+
+```
+x_{j+1} = block( W_in [h_norm ; emb(d_j)] )        (d_0 = the anchor token)
+d_{j+1} = argmax( W_lm · out_norm(x_{j+1}) )       (W_lm shared with the target)
+```
+
+Order comes from recurrence: each drafted token is re-embedded and fed
+back, attention over the drafter's own cache carries the intra-block
+dependency. Trained block size k=4.
+
+### DSpark (semi-autoregressive parallel drafting) — arXiv 2607.05147
+
+The whole block in **one** pass, then a causal repair:
+
+```
+u_j    = W_in [h_norm ; p_j]          p_j = learned block-position embedding (k=8)
+P      = parallel_block_noncausal(u)   every slot sees every slot — no order inside
+S      = seq_block_causal(P)          slot j re-reads slots < j  (the semi-AR repair)
+d_j    = argmax( W_lm · out_norm(S_j) )
+```
+
+The parallel pass is fast (1 forward for all k) but blind to order — the
+position embeddings are its only ordering signal and suffix decay is its
+known weakness; the causal refinement module reintroduces the dependency.
+DSpark's second idea, **confidence-scheduled verification**, lives in the
+engines: per-prefix-length survival statistics are tracked online
+(`counts[l]/rounds`), and each round's verified length is capped at the
+longest prefix whose empirical survival probability still meets the 0.8
+target — no target budget is spent on suffixes that almost never survive.
+
+### Where the speedup comes from (and why this demo shows it honestly)
+
+Tokens confirmed **per target forward** is the lever: plain greedy is
+always 1; speculation is `1 + mean_accepted` minus the drafting cost. On
+the D=64 teaching model the drafter's per-round Python overhead outweighs
+the accepted-prefix savings, so the page's tokens/sec panel shows the
+*measured* comparison (spec vs a paired plain run) rather than a promised
+speedup — the mechanism is real, the scale is honest.
+
 ## Paper → repo map
 
 | Concept | Paper (section) | Code |
@@ -231,6 +302,10 @@ each step recomputes only the new token's K/V (one row appended per block):
 | GQA | Ainslie et al. 2023 | `impl/_np/attention.py` (group repeat) |
 | Switch-style MoE | Fedus et al. 2022 / Mixtral 2023 | `impl/_np/moe.py` |
 | Flash attention (PROD) | Dao et al. 2022 | `impl/_triton/flash_attn.py` |
+| Speculative decoding (lossless) | Leviathan et al., ICML 2023 | `impl/_np/spec.py` (rejection sampling), `shared/spec_engine.py` (greedy verify) |
+| MTP head | DeepSeek-V3 | `impl/_np/drafters.py` `MTPDrafter`, `impl/_torch/drafters.py` `TorchMTPDrafter` |
+| DSpark (semi-AR + scheduled verify) | arXiv 2607.05147 | `impl/_np/drafters.py` `DSparkDrafter`, `_SurvivalSchedule` |
+| DFlash (block diffusion) | arXiv 2602.06036 | plug-in point only (`shared/draft.py` Drafter protocol; not built) |
 
 ## Design decisions in this repo
 

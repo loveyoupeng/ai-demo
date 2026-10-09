@@ -473,6 +473,12 @@ def drafter_from_sidecar(
     else:
         raise ValueError(f"no torch drafter for family {meta.family!r}")
     d.load_from_numpy_dict(params)
+    # Align the drafter with the target it runs beside: the shared
+    # embedding/lm_head arrive in the target's dtype/device (float64 on the
+    # torch record path, float32+CUDA on triton/cuda), while the sidecar
+    # arrays load as float32 CPU — cast the whole drafter to the target.
+    ref = embedding_weight
+    d = d.to(dtype=ref.dtype, device=ref.device)
     return d
 
 

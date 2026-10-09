@@ -331,13 +331,18 @@ class _LearningHandler(BaseHTTPRequestHandler):
         per (backend, family); missing sidecar → ValueError with a
         user-facing message (the page falls back to plain).
         """
-        import torch as _torch
 
         from shared.draft import load_drafter, sidecar_dir
 
         if not self.model_dir:
             raise ValueError("no model_dir bound — speculative decoding unavailable")
-        key = f"{self.backend}:{family}"
+        fam = "np" if isinstance(self.model, NumPyModel) else "torch"
+        sub = ""
+        if fam == "torch":
+            p = next(self.model.parameters(), None) if hasattr(self.model, "parameters") else None
+            if p is not None:
+                sub = f":{p.device}:{p.dtype}"
+        key = f"{fam}{sub}:{family}"
         if key in self._drafter_cache:
             return self._drafter_cache[key]
         meta, params = load_drafter(sidecar_dir(self.model_dir, family))
@@ -349,13 +354,43 @@ class _LearningHandler(BaseHTTPRequestHandler):
             drafter = cls(meta, self.model.embedding.weight, self.model.lm_head_weight)
             drafter.load_from_numpy_dict(params)
         else:
+            import torch as _torch2
+
             from impl._torch.drafters import drafter_from_sidecar
 
-            with _torch.no_grad():
-                emb = self.model.embed_tokens.weight.detach().clone().float()
-                lm = self.model.lm_head.weight.detach().clone().float()
+            # The torch family's three models spell the shared embedding /
+            # lm_head differently (TorchModel/TritonModel: nn modules with
+            # .embedding/.lm_head; CUDAModel: raw tensors .embedding_weights/
+            # .lm_head_weight). One accessor, dtype/device matched to the
+            # target (the record path materializes TorchModel as float64).
+            def _shared(t):
+                t = t.detach().clone()
+                return t
+
+            with _torch2.no_grad():
+                emb = (
+                    _shared(self.model.embedding_weights)
+                    if hasattr(self.model, "embedding_weights")
+                    else _shared(self.model.embedding.weight)
+                )
+                if hasattr(self.model, "lm_head_weight"):
+                    lm = _shared(self.model.lm_head_weight)  # already (D, V)
+                else:
+                    # nn.Linear-backed lm_head: .weight is (V, D) — the
+                    # drafter contract wants the NumPy track's (D, V).
+                    lm = _shared(self.model.lm_head.weight).T
+                dtype = emb.dtype  # match the target (torch record path is float64; triton/cuda float32)
+                # CUDAModel is follow-the-input: its weights rest on CPU but
+                # its NVRTC kernels (and so the spec engine's hidden states)
+                # are GPU — the drafter must sit on the model's compute
+                # device, not the weight storage device.
+                device = getattr(self.model, "device", None) or emb.device
+                emb = emb.to(dtype=dtype, device=device)
+                lm = lm.to(dtype=dtype, device=device).contiguous()
             drafter = drafter_from_sidecar(meta, params, emb, lm)
-            drafter.eval()
+            drafter = drafter.to(device=device)
+            if hasattr(drafter, "eval"):
+                drafter.eval()
         self._drafter_cache[key] = drafter
         return drafter
 
@@ -448,9 +483,20 @@ class _LearningHandler(BaseHTTPRequestHandler):
         else:
             import torch
 
+            # Place the window on the model's compute device: triton/cuda
+            # models live on the GPU (a CPU tensor crashes the embedding
+            # lookup); the torch record model is CPU/float64.
+            _wdev = torch.device("cpu")
+            if hasattr(model, "parameters"):
+                _p = next(model.parameters(), None)
+                if _p is not None:
+                    _wdev = _p.device
+            elif hasattr(model, "device"):
+                _wdev = model.device
+
             def _window_logits(window: list[int]) -> np.ndarray:
                 with torch.no_grad():
-                    out = model(torch.tensor([window], dtype=torch.int64))
+                    out = model(torch.tensor([window], dtype=torch.int64, device=_wdev))
                 return out[0, -1].double().detach().cpu().numpy().astype(np.float64)
 
             logits = _window_logits(seq[-ctx:])
@@ -529,11 +575,28 @@ class _LearningHandler(BaseHTTPRequestHandler):
 
             from shared.spec_engine import SpeculativeGenerator as TorchSpecGen
 
+            def _dev() -> _torch.device:
+                if hasattr(self.model, "parameters"):
+                    p = next(self.model.parameters(), None)
+                    if p is not None:
+                        return p.device
+                if hasattr(self.model, "embedding_weights") and not hasattr(self.model, "embedding"):
+                    # CUDAModel (follow-the-input): its NVRTC kernels are
+                    # GPU-only, so the prompt must land on the GPU even
+                    # though its weights rest on CPU.
+                    return _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
+                return _torch.device("cpu")
+
+            prompt_t = _torch.tensor([ids], dtype=_torch.long, device=_dev())
             with _torch.no_grad():
                 gen = TorchSpecGen(self.model, drafter)
-                _seq, stats = gen.generate_greedy(prompt_arr, n, k=k_req)
+                _seq, stats = gen.generate_greedy(prompt_t, n, k=k_req)
+            _seq = _seq.detach().cpu().tolist()
         spec_ms = (_time.perf_counter() - t0) * 1000
-        gen_ids = [int(x) for x in np.asarray(_seq)[0][len(ids) :]]
+        if isinstance(_seq, np.ndarray):
+            gen_ids = [int(x) for x in _seq[0][len(ids) :]]
+        else:
+            gen_ids = [int(x) for x in _seq[0][len(ids) :]]
 
         # Paired plain baseline: same prompt, same length, greedy, no drafter.
         t1 = _time.perf_counter()
@@ -580,9 +643,16 @@ class _LearningHandler(BaseHTTPRequestHandler):
 
         from shared.generator import TextGenerator as TorchGen
 
+        device = torch.device("cpu")
+        if hasattr(model, "parameters"):
+            p = next(model.parameters(), None)
+            if p is not None:
+                device = p.device
+        elif hasattr(model, "embedding_weights") and not hasattr(model, "embedding"):
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         with torch.no_grad():
             gen = TorchGen(model, max_new_tokens=n, temperature=0.0)
-            seq = gen.generate_greedy(torch.tensor([ids], dtype=torch.int64))
+            seq = gen.generate_greedy(torch.tensor([ids], dtype=torch.int64, device=device))
         return [int(x) for x in seq[0][len(ids) :].tolist()]
 
     def _api_record(self, body: dict) -> dict[str, object]:
