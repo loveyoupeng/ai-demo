@@ -612,15 +612,10 @@ def _generate_with_spec_records(
     elif cls_name == "CUDAModel":
         from impl._cuda.learning import instrumented_forward as cuda_if
 
-    # Follow the model's device: triton/cuda models are GPU-resident (the
-    # CUDA track's NVRTC kernels are GPU-only), torch is CPU.
-    device = torch.device("cpu")
-    if hasattr(model, "parameters"):
-        p = next(model.parameters(), None)
-        if p is not None:
-            device = p.device
-    elif hasattr(model, "embedding_weights") and not hasattr(model, "embedding"):
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Follow the model's device (one deep helper — see shared/device_util.py).
+    from shared.device_util import compute_device
+
+    device = compute_device(model)
 
     prompt = torch.tensor([list(prompt_ids)], dtype=torch.long, device=device)
     with torch.no_grad():

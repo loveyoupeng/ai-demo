@@ -354,41 +354,12 @@ class _LearningHandler(BaseHTTPRequestHandler):
             drafter = cls(meta, self.model.embedding.weight, self.model.lm_head_weight)
             drafter.load_from_numpy_dict(params)
         else:
-            import torch as _torch2
-
             from impl._torch.drafters import drafter_from_sidecar
+            from shared.device_util import compute_device, shared_embedding_and_head
 
-            # The torch family's three models spell the shared embedding /
-            # lm_head differently (TorchModel/TritonModel: nn modules with
-            # .embedding/.lm_head; CUDAModel: raw tensors .embedding_weights/
-            # .lm_head_weight). One accessor, dtype/device matched to the
-            # target (the record path materializes TorchModel as float64).
-            def _shared(t):
-                t = t.detach().clone()
-                return t
-
-            with _torch2.no_grad():
-                emb = (
-                    _shared(self.model.embedding_weights)
-                    if hasattr(self.model, "embedding_weights")
-                    else _shared(self.model.embedding.weight)
-                )
-                if hasattr(self.model, "lm_head_weight"):
-                    lm = _shared(self.model.lm_head_weight)  # already (D, V)
-                else:
-                    # nn.Linear-backed lm_head: .weight is (V, D) — the
-                    # drafter contract wants the NumPy track's (D, V).
-                    lm = _shared(self.model.lm_head.weight).T
-                dtype = emb.dtype  # match the target (torch record path is float64; triton/cuda float32)
-                # CUDAModel is follow-the-input: its weights rest on CPU but
-                # its NVRTC kernels (and so the spec engine's hidden states)
-                # are GPU — the drafter must sit on the model's compute
-                # device, not the weight storage device.
-                device = getattr(self.model, "device", None) or emb.device
-                emb = emb.to(dtype=dtype, device=device)
-                lm = lm.to(dtype=dtype, device=device).contiguous()
+            emb, lm = shared_embedding_and_head(self.model)
             drafter = drafter_from_sidecar(meta, params, emb, lm)
-            drafter = drafter.to(device=device)
+            drafter = drafter.to(device=compute_device(self.model))
             if hasattr(drafter, "eval"):
                 drafter.eval()
         self._drafter_cache[key] = drafter
@@ -425,6 +396,30 @@ class _LearningHandler(BaseHTTPRequestHandler):
         k: int | None = None if top_k is None else int(top_k)
         return ids, t, k, seed, skipped, backend
 
+    def _decode_spec_params(self, body: dict) -> tuple[str, int | None]:
+        """Validate the speculative-decoding request fields (BOTH endpoints
+        run through this — one place answers "what requests are legal").
+
+        Returns (spec, k). Raises ValueError with a user-facing message on:
+          - spec not in plain|mtp|dspark;
+          - k outside [1, the drafter's trained block size] (a k past the
+            trained max would silently draft garbage; k<=0 is a no-op).
+
+        The temperature rule (sampled speculation = NumPy track only) is
+        enforced at the call sites — it depends on the CURRENT backend.
+        """
+        spec = str(body.get("spec") or self.default_spec)
+        if spec not in ("plain", "mtp", "dspark"):
+            raise ValueError(f"spec must be plain|mtp|dspark, got {spec!r}")
+        raw_k = body.get("k")
+        k: int | None = None if raw_k is None else int(raw_k)
+        if k is not None and spec != "plain":
+            caps = self._spec_block_sizes()
+            cap = caps.get(spec)
+            if not (1 <= k <= (cap or k)):
+                raise ValueError(f"k must be in [1, {cap or 'the trained block size'}] for spec={spec!r}, got {k}")
+        return spec, k
+
     def _api_inference(self, body: dict) -> dict:
         with self._per_backend(body.get("backend")):
             return self._run_inference(body)
@@ -453,13 +448,23 @@ class _LearningHandler(BaseHTTPRequestHandler):
         ``last_step`` is the distribution over the token that would come
         AFTER the generated ones (one extra decode position).
         """
-        spec = str(body.get("spec") or self.default_spec)
-        if spec not in ("plain", "mtp", "dspark"):
-            raise ValueError(f"spec must be plain|mtp|dspark, got {spec!r}")
         ids, t, k, seed, skipped, backend = self._decode_params(body)
+        spec, spec_k = self._decode_spec_params(body)
+        if t is not None and spec != "plain" and not isinstance(self.model, NumPyModel):
+            # Sampled speculation is the NumPy track's theorem path; the
+            # torch family runs greedy verification (production at T=0).
+            raise ValueError("sampled speculative decoding is implemented on the NumPy track only")
         if spec != "plain":
             return self._run_spec_inference(
-                body, ids, n=int(body.get("n_tokens", 20)), temp=t, top_k=k, seed=seed, skipped=skipped, spec=spec
+                body,
+                ids,
+                n=int(body.get("n_tokens", 20)),
+                temp=t,
+                top_k=k,
+                seed=seed,
+                skipped=skipped,
+                spec=spec,
+                spec_k=spec_k,
             )
         n = int(body.get("n_tokens", 20))
         vocab = self.vocab
@@ -483,20 +488,11 @@ class _LearningHandler(BaseHTTPRequestHandler):
         else:
             import torch
 
-            # Place the window on the model's compute device: triton/cuda
-            # models live on the GPU (a CPU tensor crashes the embedding
-            # lookup); the torch record model is CPU/float64.
-            _wdev = torch.device("cpu")
-            if hasattr(model, "parameters"):
-                _p = next(model.parameters(), None)
-                if _p is not None:
-                    _wdev = _p.device
-            elif hasattr(model, "device"):
-                _wdev = model.device
+            from shared.device_util import compute_device
 
             def _window_logits(window: list[int]) -> np.ndarray:
                 with torch.no_grad():
-                    out = model(torch.tensor([window], dtype=torch.int64, device=_wdev))
+                    out = model(torch.tensor([window], dtype=torch.int64, device=compute_device(model)))
                 return out[0, -1].double().detach().cpu().numpy().astype(np.float64)
 
             logits = _window_logits(seq[-ctx:])
@@ -537,6 +533,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
         seed: int,
         skipped: int,
         spec: str,
+        spec_k: int | None = None,
     ) -> dict:
         """Speculative generation (ADR 0003) + the paired plain baseline.
 
@@ -559,7 +556,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
             raise ValueError("sampled speculative decoding is implemented on the NumPy track only")
         drafter = self._load_drafter(spec)
         prompt_arr = np.array([ids], dtype=np.int32)
-        k_req = body.get("k")
+        k_req = spec_k
 
         t0 = _time.perf_counter()
         if isinstance(self.model, NumPyModel):
@@ -573,21 +570,10 @@ class _LearningHandler(BaseHTTPRequestHandler):
         else:
             import torch as _torch
 
+            from shared.device_util import compute_device
             from shared.spec_engine import SpeculativeGenerator as TorchSpecGen
 
-            def _dev() -> _torch.device:
-                if hasattr(self.model, "parameters"):
-                    p = next(self.model.parameters(), None)
-                    if p is not None:
-                        return p.device
-                if hasattr(self.model, "embedding_weights") and not hasattr(self.model, "embedding"):
-                    # CUDAModel (follow-the-input): its NVRTC kernels are
-                    # GPU-only, so the prompt must land on the GPU even
-                    # though its weights rest on CPU.
-                    return _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
-                return _torch.device("cpu")
-
-            prompt_t = _torch.tensor([ids], dtype=_torch.long, device=_dev())
+            prompt_t = _torch.tensor([ids], dtype=_torch.long, device=compute_device(self.model))
             with _torch.no_grad():
                 gen = TorchSpecGen(self.model, drafter)
                 _seq, stats = gen.generate_greedy(prompt_t, n, k=k_req)
@@ -641,18 +627,12 @@ class _LearningHandler(BaseHTTPRequestHandler):
             return [int(x) for x in seq[0][len(ids) :]]
         import torch
 
+        from shared.device_util import compute_device
         from shared.generator import TextGenerator as TorchGen
 
-        device = torch.device("cpu")
-        if hasattr(model, "parameters"):
-            p = next(model.parameters(), None)
-            if p is not None:
-                device = p.device
-        elif hasattr(model, "embedding_weights") and not hasattr(model, "embedding"):
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         with torch.no_grad():
             gen = TorchGen(model, max_new_tokens=n, temperature=0.0)
-            seq = gen.generate_greedy(torch.tensor([ids], dtype=torch.int64, device=device))
+            seq = gen.generate_greedy(torch.tensor([ids], dtype=torch.int64, device=compute_device(model)))
         return [int(x) for x in seq[0][len(ids) :].tolist()]
 
     def _api_record(self, body: dict) -> dict[str, object]:
@@ -669,11 +649,13 @@ class _LearningHandler(BaseHTTPRequestHandler):
         in sync by `_per_backend`, and using the class keeps this honest
         even if a call site forgot the swap.
         """
-        spec = str(body.get("spec") or self.default_spec)
+        ids, t, k, seed, skipped, backend = self._decode_params(body)
+        spec, spec_k = self._decode_spec_params(body)
         drafter = None
         if spec in ("mtp", "dspark"):
+            if t is not None and not isinstance(self.model, NumPyModel):
+                raise ValueError("sampled speculative decoding is implemented on the NumPy track only")
             drafter = self._load_drafter(spec)
-        ids, t, k, seed, skipped, backend = self._decode_params(body)
         n = int(body.get("n_tokens", 20))
         model = self.model
         if isinstance(model, NumPyModel):
@@ -686,7 +668,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
                 top_k=k,
                 seed=seed,
                 spec=spec,
-                k=body.get("k"),
+                k=spec_k,
                 drafter=drafter,
             )
         else:
@@ -704,7 +686,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
                     top_k=k,
                     seed=seed,
                     spec=spec,
-                    k=body.get("k"),
+                    k=spec_k,
                     drafter=drafter,
                 )
             elif cls_name == "TritonModel":
@@ -719,7 +701,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
                     top_k=k,
                     seed=seed,
                     spec=spec,
-                    k=body.get("k"),
+                    k=spec_k,
                     drafter=drafter,
                 )
             elif cls_name == "CUDAModel":
@@ -734,7 +716,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
                     top_k=k,
                     seed=seed,
                     spec=spec,
-                    k=body.get("k"),
+                    k=spec_k,
                     drafter=drafter,
                 )
             else:

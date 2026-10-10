@@ -295,15 +295,16 @@ def generate_speculative(
         all_tokens = seq[0].tolist()
     else:
         from impl._torch.drafters import drafter_from_sidecar
+        from shared.device_util import compute_device, shared_embedding_and_head
         from shared.spec_engine import SpeculativeGenerator as TorchSpecGen
 
         with torch.no_grad():
-            emb = model.embed_tokens.weight.detach().clone().float()
-            lm = model.lm_head.weight.detach().clone().float()
+            emb, lm = shared_embedding_and_head(model)
             drafter = drafter_from_sidecar(meta, params, emb, lm)
-            drafter.eval()
+            if hasattr(drafter, "eval"):
+                drafter.eval()
             seq, stats = TorchSpecGen(model, drafter).generate_greedy(
-                torch.tensor([prompt_tokens], dtype=torch.int64), max_new_tokens, k=k
+                torch.tensor([prompt_tokens], dtype=torch.int64, device=compute_device(model)), max_new_tokens, k=k
             )
         all_tokens = seq[0].detach().cpu().tolist() if hasattr(seq, "detach") else seq[0].tolist()
     generated = all_tokens[len(prompt_tokens) :] if len(all_tokens) > len(prompt_tokens) else []
