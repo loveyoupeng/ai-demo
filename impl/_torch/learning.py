@@ -602,7 +602,27 @@ def _generate_with_spec_records(
     if drafter is None:
         raise ValueError("speculative records need a drafter (load a sidecar via shared.draft)")
 
-    prompt = torch.tensor([list(prompt_ids)], dtype=torch.long)
+    # The step captures are per-track (each adapter's display path): the
+    # torch capture here, the triton/cuda captures in their own adapters.
+    # All three produce the same record schema, so the spec path dispatches
+    # on the model class.
+    cls_name = type(model).__name__
+    if cls_name == "TritonModel":
+        from impl._triton.learning import instrumented_forward as triton_if
+    elif cls_name == "CUDAModel":
+        from impl._cuda.learning import instrumented_forward as cuda_if
+
+    # Follow the model's device: triton/cuda models are GPU-resident (the
+    # CUDA track's NVRTC kernels are GPU-only), torch is CPU.
+    device = torch.device("cpu")
+    if hasattr(model, "parameters"):
+        p = next(model.parameters(), None)
+        if p is not None:
+            device = p.device
+    elif hasattr(model, "embedding_weights") and not hasattr(model, "embedding"):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    prompt = torch.tensor([list(prompt_ids)], dtype=torch.long, device=device)
     with torch.no_grad():
         gen = SpeculativeGenerator(model, drafter)
         _seq, stats = gen.generate_greedy(prompt, n_tokens, k=k)
@@ -612,8 +632,14 @@ def _generate_with_spec_records(
     steps: list[StepRecord] = []
 
     # ---- Step 0: the prefill (same capture as the classic record).
-    x = torch.tensor([prompt_ids[-ctx:]], dtype=torch.long)
-    rec = instrumented_forward(model, x)
+    x = torch.tensor([prompt_ids[-ctx:]], dtype=torch.long, device=device)
+    rec = (
+        triton_if(model, x)
+        if cls_name == "TritonModel"
+        else cuda_if(model, x)
+        if cls_name == "CUDAModel"
+        else instrumented_forward(model, x)
+    )
     tok0 = out_tokens[0] if out_tokens else int(np.argmax(np.asarray(rec["softmax"], dtype=np.float64)[0][-1]))
     steps.append(
         {
@@ -637,7 +663,13 @@ def _generate_with_spec_records(
         prefix = list(prompt_ids) + out_tokens[: pos - len(prompt_ids)]
         window = (prefix + draft)[-ctx:]
         with torch.no_grad():
-            rec = instrumented_forward(model, torch.tensor([window], dtype=torch.long))
+            rec = (
+                triton_if(model, torch.tensor([window], dtype=torch.long, device=device))
+                if cls_name == "TritonModel"
+                else cuda_if(model, torch.tensor([window], dtype=torch.long, device=device))
+                if cls_name == "CUDAModel"
+                else instrumented_forward(model, torch.tensor([window], dtype=torch.long, device=device))
+            )
         tok = int(r["committed"][-1]) if r["committed"] else draft[0]
         steps.append(
             {

@@ -35,6 +35,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from impl._torch.learning import _generate_with_spec_records  # shared-seam: torch-family logic consumed by this track
 from shared.constants import REP_PENALTY
 
 if TYPE_CHECKING:
@@ -470,6 +471,9 @@ def generate_with_records(
     temp: float | None = None,
     top_k: int | None = None,
     seed: int = 42,
+    spec: str | None = None,
+    k: int | None = None,
+    drafter: object = None,
 ) -> GenerationRecord:
     """Generate ``n_tokens`` with a real KV cache, recording every step.
 
@@ -495,6 +499,11 @@ def generate_with_records(
         "generated": {"tokens": [...], "text": "..."},
       }
     """
+    if spec in ("mtp", "dspark"):
+        # The spec path is the shared torch-family helper (shared-seam): the
+        # CUDA track's NVRTC kernels run the TARGET; the drafter is a torch
+        # module — the production-tech-stack choice at this scale.
+        return _generate_with_spec_records(model, vocab, prompt_ids, n_tokens, temp, top_k, seed, spec, k, drafter)
     rng = np.random.default_rng(seed)
     ctx = model.config.context_length
     seq = list(prompt_ids)
