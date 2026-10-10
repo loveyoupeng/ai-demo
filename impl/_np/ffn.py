@@ -77,7 +77,12 @@ class SwiGLUFFN:
         self.down_proj = xavier_uniform(rng, ff_dim, embed_dim)  # (FF, D)
 
     def forward(self, x: np.ndarray) -> np.ndarray:
-        """SwiGLU forward: gate⊙up then project down. x: (..., D) → out: (..., D)."""
+        """SwiGLU forward: gate⊙up then project down. x: (..., D) → out: (..., D).
+
+        x: (B, S, D) (or any leading dims) — the post-LN2 stream, D-wide.
+        Contract: out = (SiLU(x@Wg) ⊙ (x@Wu)) @ Wd — two parallel
+        projections meet at the elementwise product; Wd compresses back
+        to D. Positionwise (no cross-token mixing)."""
         out, _state = self._forward_state(x)
         return out
 

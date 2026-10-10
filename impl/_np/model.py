@@ -138,6 +138,10 @@ class NumPyModel:
     def load_from_numpy_dict(self, params: dict[str, np.ndarray]) -> None:
         """Load parameters from a flat dict (inverse of ``get_all_parameters``).
 
+        params: the registry-keyed arrays (checkpoint format) — validated
+        against the registry (key-set + shapes); arrays are copied, never
+        aliased (in-place training must not mutate the caller's dict).
+
         Validates against the registry first, so stale or mismatched
         checkpoints fail fast instead of half-loading. The assignment walk
         mirrors the track's binding map (``_param_arrays``) exactly — both
@@ -181,6 +185,9 @@ class NumPyModel:
     ) -> tuple[np.ndarray, dict]:
         """Forward pass plus the intermediates the analytic backward needs.
 
+        input_ids: (B, S) int token IDs — B sequences, S token positions
+            each (values index the embedding table, 0..vocab_size-1).
+
         Returns (logits, trace) where trace holds:
             x_in0    (B, S, D) embedding output (the stack input)
             stack_out (B, S, D) pre-final-norm activations
@@ -218,6 +225,11 @@ class NumPyModel:
 
     def make_cache(self, batch_size: int, quantize: bool = False) -> list[dict]:
         """Create an empty per-layer KV cache for the per-token step path.
+
+        batch_size: how many independent sequences the cache serves (one
+            row each); the cache's B axis.
+        quantize: False → the naive full-precision cache (exact); True →
+            the TurboQuant 1-bit cache (lossy, documented alternative).
 
         Naive cache (quantize=False): each layer gets
             {"k": (B, G, 0, hd), "v": (B, G, 0, hd)}
@@ -326,6 +338,9 @@ class NumPyModel:
             full cached tensor before attention, so the step attends against
             the (lossy) quantized cache. If False, append the full-precision
             K/V (the default naive path).
+
+        record: optional dict filled with the step's intermediates (same
+            keys as the chunk/trace records — the learning-mode path).
 
         Returns: logits (B, 1, V).
 
@@ -486,7 +501,12 @@ class NumPyModel:
         return float(CrossEntropyLoss(shift=False).forward(logits, targets))
 
     def train_step(self, input_ids: np.ndarray, targets: np.ndarray, optimizer) -> float:
-        """One training step: loss = CE(forward(x), y); grads = backward; optimizer.step.
+        """One training step:
+
+        input_ids: (B, S) int token ids — the teacher-forced context
+            (position t sees tokens 0..t).
+        targets: (B, S) the TRUE next token per position (the shifted
+            sequence; the pre-shifted-target contract all tracks share). loss = CE(forward(x), y); grads = backward; optimizer.step.
 
         The optimizer updates the parameter arrays in place (AdamW mutates
         each array's values), so the model state changes in place as well.

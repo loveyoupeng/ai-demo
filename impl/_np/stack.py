@@ -40,6 +40,19 @@ class DecoderStack:
     def forward(
         self, x: np.ndarray, positions: np.ndarray | None = None, record: list[dict] | None = None
     ) -> np.ndarray:
+        """Run all blocks in order. x: (B, S, D) → out: (B, S, D).
+
+        x: (B, S, D) the embedding output — B sequences, S positions, each
+            a D-wide vector.
+        positions: (S,) the absolute token indices for RoPE (threaded to
+            every block; None → arange(S)).
+        record: optional per-block record list (one dict per block, filled
+            by each block's forward — the learning-mode capture).
+
+        Contract: the blocks run in index order 0..n_layers-1; the output
+        of block i is the input of block i+1 (the residual stream
+        accumulates — nothing is overwritten).
+        """
         """Run all blocks. x: (B, S, D) → out: (B, S, D).
 
         record: optional per-block state dicts (one per layer); when given,
@@ -54,6 +67,21 @@ class DecoderStack:
     def forward_step(
         self, x: np.ndarray, position: int, cache: list[dict], quantize: bool = False, record: list[dict] | None = None
     ) -> np.ndarray:
+        """Process ONE new token through all blocks (KV-cached path).
+
+        x: (B, 1, D) the new token's vector — ONE new position per sequence.
+        position: the absolute token index (for RoPE; must equal the
+            caches' current depth).
+        cache: the per-layer cache LIST (one dict per block, in block
+            order; mutated in place).
+        quantize: TurboQuant switch (threaded to every block's attention).
+        record: optional per-block record list.
+
+        Returns: (B, 1, D) the stack output for the new token. Contract:
+        equal to the matching slice of ``forward`` over the full sequence
+        (the exact KV-step guarantee); every cache ends holding positions
+        0..position.
+        """
         """Process ONE new token through all blocks (KV-cached path).
 
         x: (B, 1, D) the new token's vector.

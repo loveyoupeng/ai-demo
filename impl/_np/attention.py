@@ -102,10 +102,39 @@ class MultiHeadAttention:
         self.o_proj = xavier_uniform(rng, n_heads * hd, embed_dim)
 
     def _forward_state(self, x: np.ndarray, positions: np.ndarray, causal: bool = True) -> tuple[np.ndarray, dict]:
-        """Run the forward and return the intermediates the backward and the
-        learning-mode record need.
+        """Run the attention forward and return every intermediate the
+        analytic backward and the learning-mode record need.
 
-        Returns (out, state) where state holds:
+        Invariant/contract: the returned ``out`` is bit-identical whether or
+        not ``state`` is captured (the record is an overlay, not a second
+        code path); ``positions[i]`` is the absolute RoPE position of
+        sequence position i (relative distances drive q·k); GQA repeat (when
+        G < H) happens BEFORE the score computation, so the returned ``k``
+        is post-repeat (B, H, S, hd) while ``k_group`` stays per-group
+        (B, G, S, hd) — the cache-ready view.
+
+        Parameters
+        ----------
+        x : np.ndarray, shape (B, S, D)
+            The block's input vectors: B independent sequences, S token
+            positions each, each a D-wide vector (D = embed_dim; this is
+            the post-LN1 stream). One matrix row per position.
+        positions : np.ndarray, shape (S,) or (B, S)
+            The absolute token index of each sequence position (0-based) —
+            the ONLY position information in the model; RoPE rotates q and
+            k by angle ∝ positions. None → arange(S) (a fresh sequence).
+        causal : bool, default True
+            Mask the future (True required for autoregressive generation —
+            position i attends only to j <= i). False = bidirectional
+            within the sequence (used only by the DSpark drafter's parallel
+            backbone, where order comes from learned position embeddings).
+
+        Returns
+        -------
+        out : np.ndarray, shape (B, S, D)
+            The attention output (the residual-stream delta, pre-add).
+        state : dict
+            Every intermediate, keyed for the backward and the record:
             q_pre, k_pre, v_pre : (B, S, ·) projections before head permute
             q_rope_in, k_rope_in: pre-RoPE q/k in head layout
             q, k, v             : (B, H, S, hd) after RoPE / GQA repeat
@@ -197,9 +226,10 @@ class MultiHeadAttention:
         return out, state
 
     def forward(self, x: np.ndarray, positions: np.ndarray | None = None, causal: bool = True) -> np.ndarray:
-        """Multi-head attention forward pass.
+        """Multi-head attention forward pass (the plain path — no cache).
 
-        x: (B, S, D) → out: (B, S, D).
+        x: (B, S, D) → out: (B, S, D). Contract: bit-identical to the
+        cached step path over the same tokens (pinned by the parity tests).
         positions: (S,) token indices for RoPE; default arange(S).
         causal: mask the future (default True — required for autoregressive
             generation); False = bidirectional within the sequence (used by
@@ -236,8 +266,19 @@ class MultiHeadAttention:
             compression experiment; it degrades outputs (see the parity-
             budget test) while shrinking the KV memory by ≈4x (int8 bits
             plus one float scale per (batch, head) per token-write).
+        state: optional dict; when given it is filled with the same
+            intermediate keys as ``_forward_state``'s state (the
+            learning-mode record) — the math is bit-identical either way.
 
-        Returns: out (B, 1, D) — the attention output for the new token.
+        Returns
+        -------
+        out : np.ndarray, shape (B, 1, D)
+            The attention output for the new token (the residual-stream
+            delta for this position, pre-add). Contract: with quantize=
+            False, equal to the matching slice of ``forward`` over the
+            same sequence (the exact KV-step guarantee, pinned by tests);
+            the cache is left holding positions 0..position (mutated in
+            place).
 
         Math (identical to the slice of ``forward`` that attends the new
         token to all cached tokens; only the new K/V are computed):
@@ -355,9 +396,17 @@ class MultiHeadAttention:
         cache: per-layer dict {"k": (B, G, t, hd), "v": (B, G, t, hd)};
             mutated in place — the chunk's K/V are appended before attention.
         state: optional dict; when given it is filled with the same keys as
-            ``forward_step``'s state (the learning-mode record).
+            ``forward_step``'s state (the learning-mode record); the math
+            is bit-identical either way.
 
-        Returns: out (B, c, D).
+        Returns
+        -------
+        out : np.ndarray, shape (B, c, D)
+            The attention output for every chunk position (pre-residual-
+            add). Contract: equal to the matching c slices of ``forward``
+            over the full sequence (chunk parity, pinned by tests); the
+            cache is left holding positions 0..position+c-1 (mutated in
+            place) — the caller trims it on rollback.
 
         Math (the slice of ``forward`` where positions [position, position+c)
         attend to everything at or before them):
@@ -479,11 +528,33 @@ class MultiHeadAttention:
     ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """Analytic backward (derivation in the class docstring).
 
-        dout: (B, S, D) upstream gradient.
-        x: (B, S, D) the forward input (recomputes the intermediates).
-        positions: the same RoPE positions used in forward.
+        Invariant/contract: the forward intermediates are RECOMPUTED from
+        ``x`` (stateless — no cached activations), so ``x`` and
+        ``positions`` must be exactly the forward's inputs; the gradient
+        w.r.t. each weight has the weight's own shape, and ``dx`` carries
+        the full upstream (the residual is the caller's concern). Verified
+        against finite differences (float64, ~1e-10) by
+        ``tests/unit/_np/test_gradient_check.py``.
 
-        Returns: (dx, dparams) with local names {"q_proj", "k_proj", "v_proj", "o_proj"}.
+        Parameters
+        ----------
+        dout : np.ndarray, shape (B, S, D)
+            The upstream gradient of the loss w.r.t. this operator's
+            output (the residual add is the caller's job).
+        x : np.ndarray, shape (B, S, D)
+            The forward input (the post-LN1 stream) — recomputes every
+            intermediate from it.
+        positions : np.ndarray, shape (S,) or (B, S), optional
+            The same RoPE positions used in forward; None → arange(S).
+
+        Returns
+        -------
+        dx : np.ndarray, shape (B, S, D)
+            The gradient w.r.t. the input x.
+        dparams : dict[str, np.ndarray]
+            Gradients keyed by attribute-path local names:
+            {"q_proj": (D, H*hd), "k_proj": (D, G*hd), "v_proj": (D, G*hd),
+             "o_proj": (H*hd, D)}.
         """
         if positions is None:
             positions = np.arange(x.shape[1], dtype=np.int32)

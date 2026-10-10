@@ -94,6 +94,8 @@ class DrafterMeta:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DrafterMeta:
+        """Deserialize draft.json's dict (missing rope_dim → 0; unknown
+        families raise in __post_init__)."""
         return cls(
             family=str(data["family"]),
             block_size=int(data["block_size"]),
@@ -123,7 +125,10 @@ def _block_param_keys(prefix: str, D: int, H: int, G: int, hd: int, FF: int) -> 
 
 def expected_drafter_params(meta: DrafterMeta) -> list[tuple[str, tuple[int, ...], bool]]:
     """Every sidecar key for a drafter, in stable order, with its npz shape
-    and torch_transpose flag — the single owner of the sidecar format."""
+    and torch_transpose flag — the single owner of the sidecar format.
+
+    meta: the drafter's hyperparameters (the key set derives from it:
+    MTP = one block; DSpark = pos_emb + parallel + seq blocks)."""
     D, H = meta.embed_dim, meta.n_heads
     G = meta.n_groups if meta.n_groups is not None else meta.n_heads
     if D % H != 0:
@@ -185,12 +190,20 @@ class Drafter(Protocol):
 
 
 def sidecar_dir(model_dir: str | Path, family: str) -> Path:
-    """The conventional sidecar directory for a family under a target checkpoint."""
+    """The conventional sidecar directory for a family under a target checkpoint.
+
+    model_dir: the target checkpoint's directory; family: "mtp" |
+    "dspark" — returns <model_dir>/draft_<family>/ (draft.json + draft.npz)."""
     return Path(model_dir) / f"draft_{family}"
 
 
 def save_drafter(directory: str | Path, meta: DrafterMeta, params: dict[str, np.ndarray]) -> None:
-    """Write a drafter sidecar: draft.json + draft.npz (validated first)."""
+    """Write a drafter sidecar: draft.json + draft.npz (validated first).
+
+    directory: the sidecar directory (sidecar_dir's output); meta: the
+    drafter's hyperparameters; params: the sidecar key → array map (npz
+    layout — torch_transpose keys stored (in, out)). Raises ValueError on
+    key-set or shape drift — never writes a malformed sidecar."""
     _validate_params(meta, params)
     path = Path(directory)
     path.mkdir(parents=True, exist_ok=True)
@@ -200,7 +213,11 @@ def save_drafter(directory: str | Path, meta: DrafterMeta, params: dict[str, np.
 
 
 def load_drafter(directory: str | Path) -> tuple[DrafterMeta, dict[str, np.ndarray]]:
-    """Load a drafter sidecar; fail fast on key-set or shape drift."""
+    """Load a drafter sidecar; fail fast on key-set or shape drift.
+
+    directory: the sidecar directory. Returns (meta, params) — the
+    hyperparameters and the validated npz-layout arrays (a torch-track
+    loader applies the torch_transpose rule on top)."""
     path = Path(directory)
     with open(path / "draft.json") as f:
         meta = DrafterMeta.from_dict(json.load(f))

@@ -152,6 +152,8 @@ class _SurvivalSchedule:
         self.rounds = 0
 
     def update(self, accepted: int) -> None:
+        """Record one round's outcome: accepted = how many drafted tokens
+        survived (0 = all rejected — still counts as a round of history)."""
         self.rounds += 1
         for length in range(1, accepted + 1):
             self.counts[length] += 1
@@ -227,6 +229,13 @@ class SpeculativeGenerator:
         (its logits (1, 1, V), its final-norm hidden (1, D)) — the next
         round's pending_logits / anchor_hidden.
 
+        cache: the per-layer cache list — MUST hold exactly positions
+            0..position-1 (the caller trims first); mutated in place: ends
+            holding 0..position.
+        position: the absolute token index the committed token occupies
+            (0-based; = the trimmed cache depth).
+        token: the committed token id (the correction or bonus token).
+
         This is the round's SECOND target pass (see the module docstring's
         accounting): the correction/bonus token was never part of the draft
         block, so its K/V row and its hidden state do not exist until this
@@ -244,6 +253,16 @@ class SpeculativeGenerator:
         emitted: list[int],
     ) -> tuple[list[bool], int, np.ndarray]:
         """Greedy acceptance walk over one draft block.
+
+        pending_logits: (1, 1, V) the ANCHOR position's target logits
+            (the prediction that scores draft position 0) — carried from
+            the previous round's commit pass or the prefill.
+        logits_v: (1, k_eff, V) this round's verification logits (the
+            chunk pass over the draft block).
+        draft: (k_eff,) the drafter's proposed token ids.
+        k_eff: this round's draft length.
+        emitted: the committed tokens so far (the repetition guard's
+            view; grows as the walk accepts).
 
         pred(j) = the target's logits at the position BEFORE draft token j:
         the anchor's pending logits for j=0, otherwise logits_v[j-1] (the
@@ -331,7 +350,11 @@ class SpeculativeGenerator:
         """The drafter's own inputs/outputs for one round (the learning
         page's drafter-node views): its two inputs (anchor token id +
         anchor hidden) and its per-position output distributions, trimmed
-        to top-8 per position (the page shows distributions, not a k×V wall)."""
+        to top-8 per position (the page shows distributions, not a k×V wall).
+
+        anchor_token: (1,) the anchor's token id; anchor_hidden: (1, D)
+        the target's final-norm hidden at the anchor; d_probs: the
+        drafter's k per-position distributions, each (1, V)."""
         return {
             "anchor_token": int(anchor_token.reshape(-1)[0]),
             "anchor_hidden": [round(float(x), 6) for x in np.asarray(anchor_hidden).reshape(-1)],
@@ -353,13 +376,25 @@ class SpeculativeGenerator:
     ) -> tuple[np.ndarray, dict]:
         """The draft → verify → accept → trim → commit → record loop.
 
-        ``walk(pending_logits, logits_v, draft, k_eff) -> (mask, a, next)``
-        is the verification rule (greedy comparison or rejection sampling);
-        ``next`` is the correction logits (greedy) or the next-token
-        distribution (sampled). Everything else — cache trimming, drafter
-        rollback, the round record with the drafter's inputs/outputs — is
-        shared bookkeeping, written exactly once.
-        """
+        prompt: (S,) or (1, S) the starting token ids (B=1, asserted).
+        max_new_tokens: the output length cap (truncates mid-round).
+        walk: the verification rule — greedy or sampled (see the wrappers;
+            both share the (pending_logits, logits_v, draft, k_eff,
+            emitted) head).
+        propose: the proposal strategy — (draft_tokens, d_probs) -> the
+            proposed token ids (greedy: the argmax row; sampled: draws
+            from the temperature-scaled p_d).
+        nxt_pick: the correction strategy — the walk's third output ->
+            the committed token id (greedy: argmax; sampled: a draw).
+        temperature: the sampling temperature (greedy ignores it).
+        rng: the seeded RNG.
+        k_req: the draft block size (capped at the drafter's).
+        sched: the DSpark survival schedule (None = unscheduled; MTP
+            without a passed schedule is unscheduled).
+
+        Everything else — cache trimming, drafter rollback, the round
+        record with the drafter's inputs/outputs — is shared bookkeeping,
+        written exactly once. Returns (seq (1, S+n), stats dict)."""
         ids = np.asarray(prompt, dtype=np.int32).reshape(1, -1)
         assert ids.shape[0] == 1, "speculative engine is single-sequence (see docstring)"
         t = int(ids.shape[1])
@@ -453,9 +488,15 @@ class SpeculativeGenerator:
     ) -> dict:
         """Aggregate the per-round records into the spec stats block.
 
+        out_tokens: the committed tokens (excluding the prompt); rounds:
+            the per-round records; t_draft_ms/t_verify_ms: accumulated
+            timings (seconds); scheduled: whether a schedule ran; sched:
+            the schedule object (state() snapshot goes in the block).
+
         n_target_forwards = 1 (prefill) + 2 × n_rounds (verify + commit per
         round) — the honest count; see the module docstring's accounting.
-        """
+        Returns the spec block dict (the records/UI contract — same keys as
+        the torch-family engine)."""
         n_rounds = len(rounds)
         n_draft = sum(r["k_eff"] for r in rounds)
         n_accepted = sum(r["accepted"] for r in rounds)
@@ -493,6 +534,31 @@ class SpeculativeGenerator:
              a full block) is committed as the correction token.
           4. ROLL BACK the target cache to t+a, the drafter to the a kept
              drafts, append the committed token — the new anchor.
+
+        Parameters
+        ----------
+        prompt : np.ndarray, shape (S,) or (1, S)
+            The token ids to start from (B=1 — the engine is
+            single-sequence; asserted).
+        max_new_tokens : int
+            How many tokens to generate (the output is truncated here even
+            mid-round).
+        k : int, optional
+            The draft block size (default: the drafter's trained
+            block_size; capped at it — the page's slider drags DOWN only).
+        schedule : _SurvivalSchedule, optional
+            An existing survival schedule to keep updating (DSpark gets one
+            automatically; passing one to MTP makes MTP scheduled too).
+
+        Returns
+        -------
+        seq : np.ndarray, shape (1, S + generated)
+            The full sequence INCLUDING the prompt.
+        stats : dict
+            The spec block: rounds (each with draft_tokens, accept_mask,
+            committed, timings, the drafter's inputs/outputs), n_rounds,
+            n_target_forwards, n_accepted, accept_rate, mean_accepted,
+            tokens_per_target_forward, schedule state.
         """
         k_req = min(k if k is not None else self.drafter.block_size, self.drafter.block_size)
         sched = schedule if schedule is not None else _SurvivalSchedule(k_req)
@@ -534,6 +600,30 @@ class SpeculativeGenerator:
         temperature sampling — the drafter never changes the distribution,
         only how many tokens one target pass confirms. No schedule, no
         repetition guard (see the module docstring).
+
+        Parameters
+        ----------
+        prompt : np.ndarray, shape (S,) or (1, S)
+            The token ids to start from (B=1, asserted).
+        max_new_tokens : int
+            How many tokens to generate (output truncated here).
+        temperature : float
+            The sampling temperature for BOTH the drafter's proposals and
+            the target's acceptance/residual distributions (the theorem's
+            p_t and p_d must use the same scaling); clamped to >= 1e-8.
+        k : int, optional
+            The draft block size (default: the drafter's trained
+            block_size, capped at it).
+        seed : int
+            Seeds the RNG — reproducible sampling.
+
+        Returns
+        -------
+        seq : np.ndarray, shape (1, S + generated)
+            The full sequence INCLUDING the prompt.
+        stats : dict
+            The spec block (same keys as greedy, plus mode="sampled" and
+            the temperature).
         """
         T = max(temperature, 1e-8)
         k_req = min(k if k is not None else self.drafter.block_size, self.drafter.block_size)

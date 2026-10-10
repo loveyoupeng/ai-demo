@@ -116,7 +116,15 @@ class _DrafterBlock:
         self.mlp = SwiGLUFFN(embed_dim=D, ff_dim=ff_dim, seed=seed + 2)
 
     def forward(self, x: np.ndarray, positions: np.ndarray) -> np.ndarray:
-        """Standard pre-norm block forward with the configured mask."""
+        """Standard pre-norm block forward with the configured mask.
+
+        x: (B, S, D) the block's input (DSpark: the whole k-slot block,
+            S = k; MTP: a single step, S = 1).
+        positions: (S,) the block-local RoPE positions.
+
+        Returns (B, S, D). Contract: causal=True for the seq module (slot
+        j sees slots < j); False for the parallel backbone (every slot
+        sees every slot — the DSpark architecture's core difference)."""
         ln1_out = self.input_layernorm.forward(x)  # (B, S, D)
         attn_out = self.self_attn.forward(ln1_out, positions, causal=self.causal)  # (B, S, D)
         h = x + attn_out  # (B, S, D)
@@ -124,7 +132,16 @@ class _DrafterBlock:
         return h + self.mlp.forward(ln2_out)  # (B, S, D)
 
     def forward_step(self, x: np.ndarray, position: int, cache: dict) -> np.ndarray:
-        """One-token step with the drafter's own tiny KV cache (MTP path)."""
+        """One-token step with the drafter's own tiny KV cache (MTP path).
+
+        x: (B, 1, D) the projected input (in_proj's output).
+        position: the block-local absolute index (0-based; must equal the
+            cache's current depth).
+        cache: the drafter's own {"k": (B, G, t, hd), "v": ...} dict —
+            mutated in place (the token's K/V appended).
+
+        Returns (B, 1, D). Contract: mirrors the target block's
+        forward_step exactly (same operators, fewer weights)."""
         ln1_out = self.input_layernorm.forward(x)  # (B, 1, D)
         attn_out = self.self_attn.forward_step(ln1_out, position, cache)  # (B, 1, D)
         h = x + attn_out  # (B, 1, D)
@@ -132,6 +149,9 @@ class _DrafterBlock:
         return h + self.mlp.forward(ln2_out)  # (B, 1, D)
 
     def params(self, prefix: str) -> dict[str, np.ndarray]:
+        """The sidecar key → array map for this block. prefix: the family
+        key path ("mtp.block" / "dspark.parallel" / "dspark.seq"); keys
+        mirror the main scheme's per-layer names (see shared/draft.py)."""
         """The sidecar key → array map for this block (see shared/draft.py)."""
         return {
             f"{prefix}.input_layernorm.weight": self.input_layernorm.gamma,
@@ -146,7 +166,11 @@ class _DrafterBlock:
         }
 
     def load(self, prefix: str, params: dict[str, np.ndarray]) -> None:
-        """Copy sidecar arrays into the operators (no aliasing)."""
+        """Copy sidecar arrays into the operators (no aliasing — mutating
+        the caller's dict must not touch the model).
+
+        prefix: the family key path; params: the validated sidecar dict
+        (shared/draft.py load_drafter's output)."""
         self.input_layernorm.gamma = np.array(params[f"{prefix}.input_layernorm.weight"], copy=True)
         self.self_attn.q_proj = np.array(params[f"{prefix}.self_attn.q_proj.weight"], copy=True)
         self.self_attn.k_proj = np.array(params[f"{prefix}.self_attn.k_proj.weight"], copy=True)
@@ -207,10 +231,27 @@ class MTPDrafter:
     def draft(self, anchor_token: np.ndarray, anchor_hidden: np.ndarray, k: int) -> tuple[np.ndarray, list[np.ndarray]]:
         """Propose up to k tokens after the anchor, sequentially.
 
-        anchor_token: (B,) ints — the last verified token.
-        anchor_hidden: (B, D) — the target's final-norm hidden at the anchor.
-        Returns (tokens (B, k'), probs — k' arrays (B, V), the drafter's own
-        per-position distributions). k' = min(k, block_size).
+        anchor_token: (B,) ints — the last verified token (the drafter's
+            first input; its embedding is re-projected at every step).
+        anchor_hidden: (B, D) — the target's final-norm hidden AT the
+            anchor position (the second input; the same vector every step
+            of the round — the context summary).
+        k: how many tokens to propose (capped at block_size).
+
+        Returns
+        -------
+        tokens : np.ndarray, shape (B, k')
+            The proposed token ids, one per sequential step (k' = min(k,
+            block_size)).
+        probs : list of k' arrays, each (B, V)
+            The drafter's own next-token distribution per drafted position
+            (softmax over the shared lm_head logits) — the rejection-
+            sampling rule's p_d.
+
+        Contract: the drafter's KV cache accumulates the anchor + drafted
+        steps (the caller rolls back to 1+accepted after a rejected
+        verification); each step's input is [h_norm; emb(latest token)] —
+        self-conditioning, matching training (scripts/train_drafters.py).
         """
         k = min(k, self.block_size)
         B = anchor_hidden.shape[0]
@@ -244,7 +285,16 @@ class MTPDrafter:
         return np.stack(tokens, axis=1), probs_list  # (B, k), k × (B, V)
 
     def in_proj_forward(self, h_norm: np.ndarray, token_ids: np.ndarray) -> np.ndarray:
-        """x = in_proj(concat(h_norm, emb(token))): (B, s, D) → (B, s, D)."""
+        """x = in_proj(concat(h_norm, emb(token))): (B, s, D) → (B, s, D).
+
+        h_norm: (B, s, D) the anchor's normalized hidden, repeated to the
+            step count s (the same vector every step of a round).
+        token_ids: (B, s) the current token per step (the anchor on step 0,
+            the drafter's own draft afterwards — self-conditioning).
+
+        Returns (B, s, D): the block-step input. Contract: the (2D, D)
+        in_proj is the drafter's own weight (sidecar key
+        {family}.in_proj.weight, torch_transpose=True)."""
         emb = self.embedding_weight[token_ids]  # (B, s, D)
         cat = np.concatenate([h_norm, emb], axis=-1)  # (B, s, 2D)
         return cat @ self.in_proj  # (B, s, D) @ (2D, D)
@@ -252,13 +302,20 @@ class MTPDrafter:
     def rollback(self, keep: int) -> None:
         """After a rejection: keep the anchor + first ``keep`` drafted steps
         in the drafter's KV cache, drop the rest (the next draft continues
-        from the new anchor)."""
+        from the new anchor).
+
+        keep: how many of the LAST draft call's proposals were accepted
+            (0 = all rejected — the cache keeps just the anchor row).
+            Contract: the cache ends holding 1+keep rows, aligned with the
+            committed sequence; the engine calls this after every round."""
         n = 1 + keep
         self._cache["k"] = self._cache["k"][:, :, :n]
         self._cache["v"] = self._cache["v"][:, :, :n]
 
     # ── sidecar I/O ────────────────────────────────────────────────────────
     def get_all_parameters(self) -> dict[str, np.ndarray]:
+        """The full sidecar key → array map (the save path's input; keys
+        mirror the family's scheme — see shared/draft.py)."""
         p = {
             "mtp.norm.weight": self.norm.gamma,
             "mtp.in_proj.weight": self.in_proj,
@@ -268,6 +325,9 @@ class MTPDrafter:
         return p
 
     def load_from_numpy_dict(self, params: dict[str, np.ndarray]) -> None:
+        """Copy the validated sidecar arrays into the operators (no aliasing);
+        params: shared/draft.py load_drafter's output (key-set + shapes
+        checked against the family's scheme)."""
         self.norm.gamma = np.array(params["mtp.norm.weight"], copy=True)
         self.in_proj = np.array(params["mtp.in_proj.weight"], copy=True)
         self.out_norm.gamma = np.array(params["mtp.out_norm.weight"], copy=True)
@@ -323,9 +383,18 @@ class DSparkDrafter:
     def draft(self, anchor_token: np.ndarray, anchor_hidden: np.ndarray, k: int) -> tuple[np.ndarray, list[np.ndarray]]:
         """Propose up to k tokens after the anchor in ONE forward pass.
 
-        Same contract as ``MTPDrafter.draft``; the whole block is predicted
-        in parallel (non-causal backbone) then refined causally.
-        """
+        anchor_token: (B,) ints — the last verified token (unused by the
+            math: DSpark conditions on the hidden state + position
+            embeddings only; kept for protocol parity).
+        anchor_hidden: (B, D) — the target's final-norm hidden AT the
+            anchor (the backbone's only context input, replicated to all
+            k slots).
+        k: how many slots to propose (capped at block_size).
+
+        Returns (tokens (B, k'), probs — k' arrays (B, V)) — same contract
+        as ``MTPDrafter.draft``; the whole block is predicted in parallel
+        (non-causal backbone) then refined causally. Stateless across
+        rounds (rollback is a no-op)."""
         k = min(k, self.block_size)
         B, D = anchor_hidden.shape
         h_norm = self.norm.forward(anchor_hidden.reshape(B, 1, D))  # (B, 1, D)
@@ -344,10 +413,13 @@ class DSparkDrafter:
         return tokens, [probs[:, j, :] for j in range(k)]  # k × (B, V)
 
     def rollback(self, keep: int) -> None:
-        """Stateless — nothing to roll back."""
+        """Stateless — nothing to roll back (keep: accepted count, ignored;
+        each draft() call is independent of the last)."""
 
     # ── sidecar I/O ────────────────────────────────────────────────────────
     def get_all_parameters(self) -> dict[str, np.ndarray]:
+        """The full sidecar key → array map (the save path's input; keys
+        mirror the family's scheme — see shared/draft.py)."""
         p = {
             "dspark.norm.weight": self.norm.gamma,
             "dspark.in_proj.weight": self.in_proj,
@@ -359,6 +431,9 @@ class DSparkDrafter:
         return p
 
     def load_from_numpy_dict(self, params: dict[str, np.ndarray]) -> None:
+        """Copy the validated sidecar arrays into the operators (no aliasing);
+        params: shared/draft.py load_drafter's output (key-set + shapes
+        checked against the family's scheme)."""
         self.norm.gamma = np.array(params["dspark.norm.weight"], copy=True)
         self.in_proj = np.array(params["dspark.in_proj.weight"], copy=True)
         self.pos_emb = np.array(params["dspark.pos_emb.weight"], copy=True)
@@ -374,6 +449,15 @@ def drafter_from_sidecar(
     lm_head_weight: np.ndarray,
 ) -> MTPDrafter | DSparkDrafter:
     """Build a NumPy drafter from a validated sidecar + the target's shared
+    weights (any track's sidecar loads here — the round-trip guarantee).
+
+    meta: the sidecar's hyperparameters (draft.json).
+    params: the sidecar's validated arrays (draft.npz).
+    embedding_weight: (V, D) the TARGET's embedding matrix (shared, never
+        copied into the sidecar).
+    lm_head_weight: (D, V) the TARGET's lm_head (shared; the drafter's
+        proposals land in the target's exact vocabulary space)."""
+    """Build a NumPy drafter from a validated sidecar + the target's shared
     embedding/lm_head. Any track's sidecar loads here (round-trip guarantee)."""
     if meta.family == MTP:
         d: MTPDrafter | DSparkDrafter = MTPDrafter(meta, embedding_weight, lm_head_weight)
@@ -386,6 +470,12 @@ def drafter_from_sidecar(
 
 
 def make_drafter_meta(family: str, target_config: TransformerConfig, block_size: int, ff_dim: int) -> DrafterMeta:
+    """DrafterMeta for a NEW drafter matching the target's D/V.
+
+    family: "mtp" | "dspark"; target_config: the TARGET's config (the
+        drafter inherits its D/V/rope and half its heads);
+    block_size: the trained draft length k; ff_dim: the drafter's SwiGLU
+        width."""
     """DrafterMeta for a new drafter matching the target's D/V."""
     return DrafterMeta(
         family=family,

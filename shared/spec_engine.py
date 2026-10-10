@@ -71,7 +71,13 @@ SCHEDULE_TARGET = 0.8
 
 
 class _ChunkModel(Protocol):
-    """The chunk contract the engine consumes (all torch-family tracks)."""
+    """The chunk contract the engine consumes (all torch-family tracks).
+
+    make_cache(batch_size) — an empty per-layer KV cache (one dict per
+        layer; batch_size rows).
+    forward_chunk(input_ids (B, c) int, position int, cache) — ONE pass
+        appends the chunk's K/V and scores all c positions; returns
+        (logits (B, c, V), x_final (B, c, D)) — the verification path."""
 
     def make_cache(self, batch_size: int) -> list[dict[str, torch.Tensor]]: ...
 
@@ -124,6 +130,8 @@ class _SurvivalSchedule:
         self.rounds = 0
 
     def update(self, accepted: int) -> None:
+        """Record one round's outcome: accepted = how many drafted tokens
+        survived (0 = all rejected — still counts as a round of history)."""
         self.rounds += 1
         for length in range(1, accepted + 1):
             self.counts[length] += 1
@@ -191,6 +199,12 @@ class SpeculativeGenerator:
         (its logits (1, 1, V), its final-norm hidden (1, D)) — the next
         round's pending_logits / anchor_hidden.
 
+        cache: the per-layer cache list — MUST hold exactly positions
+            0..position-1 (the caller trims first); mutated in place: ends
+            holding 0..position.
+        position: the absolute token index the committed token occupies.
+        token: the committed token id (the correction or bonus token).
+
         This is the round's SECOND target pass (see the module docstring's
         accounting): the correction/bonus token was never part of the draft
         block, so its K/V row and its hidden state do not exist until this
@@ -210,6 +224,13 @@ class SpeculativeGenerator:
         emitted: list[int],
     ) -> tuple[list[bool], int, torch.Tensor]:
         """Greedy acceptance walk over one draft block.
+
+        pending_logits: (1, 1, V) the ANCHOR position's target logits
+            (carried from the previous commit pass or the prefill);
+        logits_v: (1, k_eff, V) this round's verification logits;
+        draft: (k_eff,) the drafter's proposed token ids; k_eff: this
+            round's draft length; emitted: the committed tokens so far
+            (the repetition guard's view).
 
         pred(j) = the target's logits at the position BEFORE draft token j:
         the anchor's pending logits for j=0, otherwise logits_v[j-1] (the
@@ -256,11 +277,19 @@ class SpeculativeGenerator:
     ) -> tuple[torch.Tensor, dict]:
         """The draft → verify → accept → trim → commit → record loop.
 
-        ``walk(pending_logits, logits_v, draft, k_eff, emitted) ->
-        (mask, a, corr)`` is the verification rule. Everything else — cache
-        trimming, drafter rollback, the round record with the drafter's
-        inputs/outputs — is shared bookkeeping, written exactly once.
-        """
+        prompt: (S,) or (1, S) int — the starting token ids (B=1,
+            asserted; on the model's device).
+        max_new_tokens: the output length cap (truncates mid-round).
+        walk: the verification rule — (pending_logits, logits_v, draft,
+            k_eff, emitted) -> (mask, a, corr) (greedy comparison; the
+            rejection-sampling theorem is NumPy-only).
+        k_req: the draft block size (capped at the drafter's).
+        sched: the DSpark survival schedule (None = unscheduled).
+
+        Everything else — cache trimming, drafter rollback, the round
+        record with the drafter's inputs/outputs — is shared bookkeeping,
+        written exactly once. Returns (seq (1, S+n) int64 on the model's
+        device, stats dict — same keys as the NumPy reference)."""
         ids = torch.as_tensor(prompt, dtype=torch.long).reshape(1, -1)
         assert ids.shape[0] == 1, "speculative engine is single-sequence (see docstring)"
         t = int(ids.shape[1])
@@ -359,6 +388,11 @@ class SpeculativeGenerator:
         """Aggregate the per-round records into the spec stats block (same
         keys as the NumPy reference — the records/UI contract).
 
+        Parameters mirror the NumPy engine's _stats: out_tokens = the
+        committed tokens (excluding the prompt); rounds = the per-round
+        records; t_draft_ms/t_verify_ms = accumulated timings (seconds);
+        scheduled = whether a schedule ran; sched = the schedule object.
+
         n_target_forwards = 1 (prefill) + 2 × n_rounds (verify + commit per
         round) — the honest count; see the module docstring's accounting.
         """
@@ -399,6 +433,33 @@ class SpeculativeGenerator:
              after a full block) is committed as the correction token.
           4. ROLL BACK the target cache to t+a, the drafter to the a kept
              drafts, append the committed token — the new anchor.
+
+        Parameters
+        ----------
+        prompt : torch.Tensor, shape (S,) or (1, S) int
+            The token ids to start from (B=1 — the engine is
+            single-sequence, asserted); placed on the model's device by
+            the caller (compute_device).
+        max_new_tokens : int
+            How many tokens to generate (output truncated here even
+            mid-round).
+        k : int, optional
+            The draft block size (default: the drafter's trained
+            block_size; capped at it).
+        schedule : _SurvivalSchedule, optional
+            An existing survival schedule to keep updating (DSpark gets
+            one automatically).
+
+        Returns
+        -------
+        seq : torch.Tensor, shape (1, S + generated) int64
+            The full sequence INCLUDING the prompt, on the model's device.
+        stats : dict
+            The spec block — same keys as the NumPy reference's
+            (rounds with draft_tokens/accept_mask/committed/timings/the
+            drafter's inputs+outputs, n_rounds, n_target_forwards,
+            n_accepted, accept_rate, mean_accepted,
+            tokens_per_target_forward, schedule state).
         """
         k_req = min(k if k is not None else self.drafter.block_size, self.drafter.block_size)
         sched = schedule if schedule is not None else _SurvivalSchedule(k_req)

@@ -38,7 +38,14 @@ logger = logging.getLogger(__name__)
 
 
 class _StepModel(Protocol):
-    """The KV-step interface the generator consumes (all torch-family tracks)."""
+    """The KV-step interface the generator consumes (all torch-family tracks).
+
+    make_cache(batch_size) — an empty per-layer KV cache (one dict per
+        layer; batch_size rows).
+    forward_prefill(input_ids (B, S) int, cache?) — one full-sequence
+        pass; fills the cache; returns (logits (B, S, V), cache).
+    forward_step(input_ids (B, 1) int, position int, cache) — ONE new
+        token against the cached K/V; returns logits (B, 1, V)."""
 
     def make_cache(self, batch_size: int) -> list[dict[str, torch.Tensor]]: ...
 

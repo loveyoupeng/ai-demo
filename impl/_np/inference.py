@@ -321,7 +321,11 @@ class TextGenerator:
 
     @staticmethod
     def _apply_top_k_mask(logits: np.ndarray, top_k: int) -> np.ndarray:
-        """Mask all logits below the top-k values to minus infinity."""
+        """Mask all logits below the top-k values to minus infinity.
+
+        logits: (B, V) raw logits (one row per sequence); top_k: keep the
+            k largest per row (1 <= top_k <= V). Returns the masked
+            (B, V) logits — the sampler's constrained distribution."""
         batch_size, vocab_size = logits.shape
         sorted_indices = np.argsort(logits, axis=-1)[:, ::-1]
         kth_indices = sorted_indices[:, top_k - 1 : top_k]
@@ -333,6 +337,7 @@ class TextGenerator:
     def _compute_entropy(probs: np.ndarray) -> float:
         """Compute mean entropy of a probability distribution.
 
+        probs: (B, V) or (V,) a probability distribution (rows sum to 1).
         Entropy = -sum(p * log(p)) — low = peaked (confident), high = uniform (uncertain).
         """
         safe_probs = np.clip(probs, 1e-10, 1.0)
@@ -342,6 +347,10 @@ class TextGenerator:
 
     @staticmethod
     def _top_k_values(probs: np.ndarray, k: int) -> list[str]:
+        """Top-k probabilities of batch 0's distribution, as strings.
+
+        probs: (B, V) probabilities (rows sum to 1); k: how many of the
+        largest to report."""
         """Get top-k probability values as formatted strings for batch 0."""
         top_idx = np.argsort(probs[0], axis=-1)[::-1][:k]
         return [f"{probs[0, i]:.4f}" for i in top_idx]

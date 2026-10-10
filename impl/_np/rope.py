@@ -71,11 +71,28 @@ class RoPE:
     """
 
     def forward(self, x: np.ndarray, positions: np.ndarray, rope_dim: int = 0) -> np.ndarray:
-        """Rotate q/k dim-pairs by position-dependent angles. x: (..., H, D), positions: (S,) or (B, S)."""
+        """Rotate q/k dim-pairs by position-dependent angles. x: (..., H, D), positions: (S,) or (B, S).
+
+        x: the (pre-permute) head layout (B, S, H, hd) — H heads, each a
+            hd-wide vector; ONLY q and k arrive here (v bypasses RoPE).
+        positions: (S,) or (B, S) absolute token indices — the ONLY
+            position signal; angle ∝ position.
+        rope_dim: the rotated PREFIX of the head dim (0 = rotate all hd —
+            the standard); pairs are (even, odd) dims within that prefix.
+
+        Contract: preserves vector norms (a rotation, not a scale); makes
+        q·k depend on the RELATIVE position distance. Inverse of backward.
+        """
         rotated, _state = self._forward_state(x, positions, rope_dim)
         return rotated
 
     def _forward_state(self, x: np.ndarray, positions: np.ndarray, rope_dim: int = 0) -> tuple[np.ndarray, dict]:
+        """Rotate + return the angle state the backward needs.
+
+        x: (B, S, H, hd) the (pre-permute) head layout; positions: (S,) or
+        (B, S) absolute indices; rope_dim: the rotated prefix (0 = all of
+        the head dim). Returns (rotated (B, S, H, hd), state with
+        freqs/angles/cos/sin) — the backward inverts the rotations."""
         """Apply RoPE and return the rotation state (the intermediates of forward).
 
         Returns (rotated, state) where state holds:

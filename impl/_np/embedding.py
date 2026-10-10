@@ -56,6 +56,11 @@ class Embedding:
         input_ids: (B, S) → output: (B, S, D).
         NumPy advanced indexing broadcasts the (B, S) index array over the
         rows of W, producing (B, S, D) directly.
+
+
+        Contract: a pure table gather — no arithmetic, and NO position
+        information (the same token id gets the same vector wherever it
+        sits; order enters via RoPE inside attention).
         """
         return self.weight[input_ids]  # (B, S, D)
 

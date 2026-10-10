@@ -81,8 +81,16 @@ class TransformerBlock:
             self.mlp = SwiGLUFFN(embed_dim=D, ff_dim=config.expert_dim, seed=seed + 2)
 
     def forward(self, x: np.ndarray, positions: np.ndarray | None = None, record: dict | None = None) -> np.ndarray:
-        """Block forward. x: (B, S, D) → out: (B, S, D).
+        """Block forward: LN1 → attention → +residual → LN2 → FFN/MoE → +residual.
 
+        x: (B, S, D) → out: (B, S, D).
+
+        Invariant/contract: the block NEVER normalizes the stream itself —
+        only the copies (x̂, ĥ) are normalized; both residuals are plain
+        adds, so ∂out/∂x carries the identity path (the gradient highway).
+        positions: (S,) the absolute token indices for RoPE (None →
+        arange(S) — a fresh sequence starting at position 0); a windowed
+        prefill passes its absolute positions so decode steps stay aligned.
         record: optional dict; when given, it is filled with the block's
             intermediate state (ln1/ln2 outputs, the attention state, the
             FFN/MoE state, h, out) — the same state the analytic backward
@@ -178,17 +186,27 @@ class TransformerBlock:
     ) -> np.ndarray:
         """Process ONE new token (per-token inference path, KV-cached attention).
 
-        x: (B, 1, D) the new token's vector.
-        position: the absolute token index (for RoPE; 0-based).
+        x: (B, 1, D) the new token's vector — B sequences, ONE new position
+            each (S = 1; the token's own embedding from the lookup).
+        position: the absolute token index of the new token (for RoPE;
+            0-based; must equal the cache's current depth or the positions
+            desynchronize).
         cache: per-layer attention cache dict (see MultiHeadAttention.forward_step).
-            Mutated in place; shape depends on quantize.
+            Mutated in place; shape depends on quantize. Contract: the cache
+            must hold exactly the positions 0..position-1 before the call.
         quantize: if True, append the new K/V to the cache in 1-bit TurboQuant
             form and dequantize the full cached tensor before attention; if
             False, append the full-precision K/V (default).
         record: optional dict filled with the step's intermediates (same keys
             as ``forward``) — see that method.
 
-        Returns: (B, 1, D) the block output for the new token.
+        Returns
+        -------
+        np.ndarray, shape (B, 1, D)
+            The block output for the new token. Contract: equal to the
+            matching slice of ``forward`` over the full sequence (the exact
+            KV-step guarantee); the cache ends holding positions
+            0..position.
         """
         ln1_out = self.input_layernorm.forward(x)  # (B, 1, D)
         attn_state: dict | None = {} if record is not None else None
@@ -222,12 +240,23 @@ class TransformerBlock:
         every chunk position is scored in parallel (causal within the chunk).
         Naive cache only; the FFN is chunk-positionwise so it needs no chunk form.
 
-        x: (B, c, D) the chunk's vectors. position: the absolute index of the
-        chunk's first token. cache: per-layer attention cache, mutated in
-        place. record: optional dict filled with the block's intermediates
-        (same keys as ``forward_step``'s record).
+        x: (B, c, D) the chunk's vectors — c = the draft block's length,
+            each a D-wide embedding.
+        position: the absolute index of the chunk's FIRST token; the chunk
+            occupies positions position..position+c-1 (must equal the
+            cache's current depth).
+        cache: per-layer attention cache, mutated in place (the chunk's
+            K/V appended before attention).
+        record: optional dict filled with the block's intermediates
+            (same keys as ``forward_step``'s record).
 
-        Returns: (B, c, D) the block output for the chunk.
+        Returns
+        -------
+        np.ndarray, shape (B, c, D)
+            The block output for every chunk position. Contract: equal to
+            the matching c slices of ``forward`` over the full sequence
+            (chunk parity); the cache ends holding positions
+            0..position+c-1 — the caller trims the rejected tail.
         """
         ln1_out = self.input_layernorm.forward(x)  # (B, c, D)
         attn_state: dict | None = {} if record is not None else None

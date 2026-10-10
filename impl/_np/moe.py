@@ -90,7 +90,16 @@ class MixtureOfExperts:
         self.shared_experts = [SwiGLUFFN(embed_dim, ff_dim, seed=seed + 50 + s) for s in range(n_shared_experts)]
 
     def forward(self, x: np.ndarray) -> np.ndarray:
-        """MoE forward. x: (B, S, D) → out: (B, S, D)."""
+        """MoE forward: router → top-k mask → renormalize → weighted expert sum
+        (+ the always-on shared experts' mean). x: (B, S, D) → out: (B, S, D).
+
+        x: (B, S, D) the post-LN2 stream — B sequences, S positions, D-wide.
+        Contract: computes every expert (weights may be zero — the reference
+        keeps the readable path; see the PROD note in the class docstring);
+        the routed weights sum to 1 per token; shared-expert output is
+        averaged over n_shared_experts (turning the knob 1→2 does not
+        rescale the block output).
+        """
         out, _state = self._forward_state(x)
         return out
 
