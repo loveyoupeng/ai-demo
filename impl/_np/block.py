@@ -29,6 +29,10 @@ class TransformerBlock:
     The canonical block (see LLaMA-2/3, HuggingFace ``LlamaDecoderLayer``):
     RMSNorm *before* each sublayer, with a plain additive residual:
 
+    Shape letters (CONTEXT.md → "Shape notation"): B = batch size (parallel
+    sequences; 1 = one generation), S = sequence length (this pass), D =
+    embed_dim (model width), H = n_heads, G = n_groups, V = vocab_size,
+    E = n_experts, FF = expert_dim, t = KV-cache depth, k = draft length.
         h   = x + attention(rms_norm(x))      # (B, S, D)
         out = h + feed_forward(rms_norm(h))   # (B, S, D)
 

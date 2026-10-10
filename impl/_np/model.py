@@ -5,9 +5,14 @@ Track intent: **how the math works** — every operator is hand-derived
 comments on each matrix operation. This track is the teaching reference the
 other three tracks mirror.
 
+    Shape letters (CONTEXT.md → "Shape notation"): B = batch size (parallel
+    sequences; 1 = one generation), S = sequence length (this pass), D =
+    embed_dim (model width), H = n_heads, G = n_groups, V = vocab_size,
+    E = n_experts, FF = expert_dim, t = KV-cache depth, k = draft length.
+
 Forward pass (the standard LLaMA-style layout):
 
-    input_ids (B, S)
+    input_ids (B, S)   — B independent sequences, S token positions each
     → embed_tokens                          (B, S, D)
     → DecoderStack (n_layers blocks)        (B, S, D)
     → final RMSNorm                         (B, S, D)

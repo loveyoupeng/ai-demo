@@ -51,6 +51,11 @@ class CUDAModel:
 
     Attributes
     ----------
+    Shape letters (CONTEXT.md → "Shape notation"): B = batch size, S =
+    sequence length, D = embed_dim, H = heads, V = vocab_size, E = n_experts,
+    FF = expert_dim, c = a chunk of new tokens (the draft block), t = the
+    KV-cache depth at inference.
+
     embedding_weights : torch.Tensor, shape (V, D)
         Token embedding weight matrix.
     final_norm_gamma : torch.Tensor, shape (D,)

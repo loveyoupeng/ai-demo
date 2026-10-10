@@ -7,6 +7,11 @@ the last iteration?"—and the answer is always the same thing.
 
 ---
 
+Shape letters used below (full definitions: [CONTEXT.md](../../CONTEXT.md) →
+"Shape notation"): **B** = batch size (sequences in parallel), **S** =
+sequence length (token positions in one pass), **D** = `embed_dim` (model
+width), **V** = `vocab_size`.
+
 ## Stage 1 — Pre-Training (what it is)
 
 **Goal:** teach the model the *shape* of the data (syntax, repeated

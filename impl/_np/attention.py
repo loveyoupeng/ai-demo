@@ -29,6 +29,13 @@ class MultiHeadAttention:
     G < H it is GQA and each K/V head is shared by H // G query heads — the
     KV cache shrinks by a factor of H // G at inference.
 
+    Shape letters (defined once in CONTEXT.md → "Shape notation"; the
+    learning page's model-info panel shows the actual numbers):
+    B = batch size (independent sequences in parallel; 1 = one generation),
+    S = sequence length (token positions in THIS pass), D = embed_dim (the
+    model width), H = n_heads, G = n_groups/KV heads, hd = D // H,
+    V = vocab_size, E = n_experts, FF = expert_dim, t = KV-cache depth.
+
     Forward (x: (B, S, D)):
 
         q = x @ Wq        (B, S, H*hd) → (B, H, S, hd)   [transpose]

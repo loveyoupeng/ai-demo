@@ -41,6 +41,10 @@ same shape production MTP serving uses). So::
 and ``tokens_per_target_forward = n_new_tokens / n_target_forwards`` —
 the honest per-target-pass metric the learning page displays.
 
+Shape letters (CONTEXT.md → "Shape notation"): B = batch size (the
+speculative engine is B=1), S = sequence length, D = embed_dim, V =
+vocab_size, k = the drafter's block size, t = KV-cache depth.
+
 Two verification rules:
 
 **Greedy** (all tracks; the production rule at temperature 0):

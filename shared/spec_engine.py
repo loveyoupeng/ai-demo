@@ -27,6 +27,10 @@ NumPy-only, the reference's teaching centerpiece):
 
     accept d_j while argmax(target logits at position t+j-1) == d_j
 
+Shape letters (CONTEXT.md → "Shape notation"): B = batch size (the
+speculative engine is B=1), S = sequence length, D = embed_dim, V =
+vocab_size, k = the drafter's block size, t = KV-cache depth.
+
 The target's token at the first mismatch (or the bonus token after a
 fully accepted block) always wins, so the output is **token-identical to
 plain greedy decoding** — the lossless contract pinned by the parity

@@ -3,8 +3,27 @@
 A guided tour of one forward pass through this repo's decoder-only transformer —
 the same math the [learning page](../../impl/_np/web/index.html) renders interactively.
 Each stage gives the equation (KaTeX), the *why*, and the code that implements it.
-Shapes use the conventions `B` batch, `S` sequence, `D` embed dim, `H` query heads,
-`G` KV groups, `hd = D / H` head dim, `V` vocab size.
+Shapes use these letters — where each value comes from (the learning page's
+model-info panel shows the actual numbers for the served checkpoint):
+
+- **B** — *batch size*: how many independent sequences are processed in
+  parallel (1 = a single generation; this repo's inference paths are B=1).
+- **S** — *sequence length*: the number of token positions in THIS forward
+  pass (a full prompt forward: S = prompt length; a decode step: S = 1; a
+  verification chunk: S = c).
+- **D** — *embed_dim* (`config.embed_dim`): the model width — the length of
+  the vector each token becomes after the embedding lookup.
+- **H** — *n_heads* (`config.n_heads`): query-head count; D splits into H
+  heads of width **hd** = D // H.
+- **G** — *n_groups / kv_heads*: the K/V-head count (G == H → ordinary
+  attention; G < H → GQA, each K/V head shared by H // G query heads).
+- **V** — *vocab_size* (`config.vocab_size`): candidate next tokens —
+  logits are (…, V).
+- **E** — *n_experts*: MoE expert count (1 = dense FFN). **FF** —
+  *expert_dim*: the FFN's hidden width (4·D by default).
+- **T** — B × S flattened (backward reshapes). **t** — KV-cache depth at
+  inference. **c** — a chunk of new tokens (the draft block); **k** — the
+  drafter's block size.
 
 All pointers are in the NumPy track (`impl/_np/`) — the reference implementation with
 hand-rolled math and analytic backward. The PyTorch/Triton/CUDA tracks compute the

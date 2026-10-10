@@ -149,6 +149,9 @@ def expected_drafter_params(meta: DrafterMeta) -> list[tuple[str, tuple[int, ...
 class Drafter(Protocol):
     """The drafter protocol — the one new seam of speculative decoding.
 
+    Shape letters (CONTEXT.md → "Shape notation"): B = batch size, D =
+    embed_dim (model width), V = vocab_size, k = the drafter's block size.
+
     Implementations: NumPy (``impl/_np/drafters.py``), torch family
     (``impl/_torch/drafters.py``). Arrays are ``np.ndarray`` for the NumPy
     track and ``torch.Tensor`` for the torch family — same shapes either way.

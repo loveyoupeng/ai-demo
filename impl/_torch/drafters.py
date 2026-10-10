@@ -1,5 +1,9 @@
 """Torch drafters — the MTP and DSpark draft models for the torch family.
 
+Shape letters (CONTEXT.md → "Shape notation"): B = batch size (the
+speculative engine is B=1), S = sequence length, D = embed_dim, V =
+vocab_size, k = the drafter's block size.
+
 The torch-family counterpart of ``impl/_np/drafters.py`` (the math
 reference): the SAME ``shared.draft.Drafter`` protocol, the SAME sidecar
 key scheme (``shared/draft.py`` — the single owner of the format), and

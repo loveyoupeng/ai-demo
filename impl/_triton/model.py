@@ -37,6 +37,10 @@ class TritonModel(nn.Module):
     the Triton SwiGLU kernel; embedding, norms, and the lm_head are plain
     PyTorch. Parameters are addressed by the ``shared.constants.Keys``
     scheme so weights load across tracks.
+
+    Shape letters (CONTEXT.md → "Shape notation"): B = batch size (the
+    speculative engine is B=1), S = sequence length, D = embed_dim, V =
+    vocab_size, k = the drafter's block size.
     """
 
     def __init__(self, config: TransformerConfig) -> None:

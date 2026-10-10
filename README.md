@@ -104,6 +104,15 @@ see `NumPyModel.make_cache` / `forward_prefill` / `forward_step` in
 
 ### The math and the intuition, per component
 
+Shape letters used below: **S** = the number of token positions in this
+forward pass (the sequence length), **D** = `embed_dim` = 64, the model
+width (the vector length each token becomes), **B** = batch size (how many
+sequences run in parallel — the learning page is B = 1), **V** =
+`vocab_size` = 512 (candidate next tokens), **H** = `n_heads` = 4 (the
+width splits into H heads of 16 = D/H), **E** = `n_experts` (MoE; 1 =
+dense), **FF** = `expert_dim` = 256 (the FFN's inner width). Full
+definitions: [CONTEXT.md](CONTEXT.md) → "Shape notation".
+
 **Embedding** — `x[s] = E[token[s]]`, a pure (512, 64) table row-gather.
 No arithmetic, and *no position information*: the same token id gets the same
 vector wherever it sits. Order enters later, inside attention, via RoPE.

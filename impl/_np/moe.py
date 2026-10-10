@@ -22,6 +22,10 @@ from impl._np.init import xavier_uniform
 class MixtureOfExperts:
     """Mixture of Experts (Shazeer et al. 2017; Switch/Mixtral style).
 
+    Shape letters (CONTEXT.md → "Shape notation"): B = batch size (parallel
+    sequences; 1 = one generation), S = sequence length (this pass), D =
+    embed_dim (model width), H = n_heads, G = n_groups, V = vocab_size,
+    E = n_experts, FF = expert_dim, t = KV-cache depth, k = draft length.
     Instead of one dense feed-forward, the block owns E feed-forward *experts*
     (here SwiGLU FFNs) and a small *router* that picks, per token, which
     experts process it.

@@ -5,6 +5,41 @@ This project implements a decoder-only transformer in four equivalent tracks
 defines the project's vocabulary. Use these terms consistently in code,
 docs, and tests.
 
+## Shape notation
+
+Every tensor shape in this repo's docs, docstrings, and comments uses these
+letters. Where each value comes from:
+
+- **B** — *batch size*: how many independent sequences are processed in
+  parallel (one row per sequence). 1 = a single generation (the learning
+  page and the speculative engine are B=1).
+- **S** — *sequence length*: the number of token positions in THIS forward
+  pass. A full forward over a prompt has S = prompt length; a decode step
+  has S = 1; a verification chunk has S = c.
+- **D** — *embed_dim* (`config.embed_dim`): the model width — the length of
+  the residual-stream vector every token becomes after the embedding lookup.
+- **H** — *n_heads* (`config.n_heads`): the query-head count; the model
+  width D is split into H heads of width hd.
+- **G** — *n_groups / kv_heads* (`config.n_groups`): the K/V-head count.
+  G == H is ordinary multi-head attention; G < H is GQA — each K/V head is
+  shared by H // G query heads, shrinking the KV cache by that factor.
+- **hd** — *head_dim* = D // H: the width of one head (16 in the default
+  learning model).
+- **V** — *vocab_size* (`config.vocab_size`): the vocabulary size — the
+  number of candidate next tokens, so logits are (…, V).
+- **E** — *n_experts* (`config.n_experts`): the MoE expert count; 1 = dense
+  SwiGLU FFN (no MoE).
+- **FF** — *expert_dim* (`config.expert_dim`): the FFN's hidden width
+  (4·D by default) — the "widen" step of widen → non-linearity → narrow.
+- **T** — B × S flattened: the total token count, used in backward reshapes
+  (matrix products over all positions at once).
+- **t** — inference only: the number of positions already in the KV cache
+  (grows by one per decode step, by c per verification chunk).
+- **c** — inference only: a *chunk* of new tokens processed in one pass —
+  the draft block of speculative decoding (its length is k).
+- **k** — inference only: the drafter's block size (`DrafterMeta.block_size`)
+  — candidate tokens proposed per speculative round.
+
 ## Architecture
 
 - **Decoder-only transformer**: a transformer that generates text

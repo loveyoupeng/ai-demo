@@ -22,6 +22,10 @@ summary vector of everything before it (the "hidden state"). Its output
 is a probability distribution over the vocabulary for each proposed
 position — the same kind of row the big model produces, just cheaper.
 
+Shape letters (CONTEXT.md → "Shape notation"): B = batch size (the
+speculative engine is B=1), S = sequence length, D = embed_dim, V =
+vocab_size, k = the drafter's block size, t = KV-cache depth.
+
 Implements the ``shared.draft.Drafter`` protocol (ADR 0003; the ONE new
 seam of the speculative-decoding feature):
 

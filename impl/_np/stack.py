@@ -21,6 +21,10 @@ class DecoderStack:
 
     out = block_{n-1}( ... block_1(block_0(x)) ...)
 
+    Shape letters (CONTEXT.md → "Shape notation"): B = batch size (parallel
+    sequences; 1 = one generation), S = sequence length (this pass), D =
+    embed_dim (model width), H = n_heads, G = n_groups, V = vocab_size,
+    E = n_experts, FF = expert_dim, t = KV-cache depth, k = draft length.
     x: (B, S, D) → out: (B, S, D). Every block draws from the SAME frozen
     ``config.seed``, so identically-shaped parameters initialize identically
     across layers; training is what differentiates them.

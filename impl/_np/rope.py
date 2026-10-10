@@ -62,6 +62,12 @@ class RoPE:
 
     The pass-through suffix (rope_dim < D) contributes its upstream gradient
     unchanged.
+
+    Shape letters (CONTEXT.md → "Shape notation"): B = batch size, S =
+    sequence length (positions), H = heads, D = embed_dim = H · hd. RoPE's
+    own letters: ``d_rot`` = rope_dim (the rotated prefix of the head dim;
+    0 = all of it), ``pair_dim`` = d_rot // 2 — the number of (even, odd)
+    dim-pairs that rotate.
     """
 
     def forward(self, x: np.ndarray, positions: np.ndarray, rope_dim: int = 0) -> np.ndarray:

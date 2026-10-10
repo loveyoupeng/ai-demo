@@ -642,6 +642,10 @@ class DecoderStack(nn.Module):
 class TorchModel(nn.Module):
     """Complete decoder-only transformer in PyTorch.
 
+    Shape letters (CONTEXT.md → "Shape notation"): B = batch size, S =
+    sequence length (this pass), D = embed_dim (model width), H = n_heads,
+    G = n_groups/KV heads, V = vocab_size, E = n_experts, FF = expert_dim.
+
     Forward: tokens → embed_tokens → DecoderStack → final RMSNorm → lm_head
     (D → V, no bias) → logits (B, S, V).
 
