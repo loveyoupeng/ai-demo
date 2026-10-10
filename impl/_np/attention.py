@@ -30,6 +30,35 @@ class MultiHeadAttention:
     G < H it is GQA and each K/V head is shared by H // G query heads — the
     KV cache shrinks by a factor of H // G at inference.
 
+    The (B, S, D) input — where each axis comes from
+    ------------------------------------------------
+    A language model never sees one string; it sees a rectangular block of
+    token ids. Unstacking the three axes:
+
+    - **S** = sequence length = HOW MANY tokens are in THIS forward pass.
+      During training it is the full context window (a fixed slice, e.g.
+      128 positions of a chunked story); during prefill it is the whole
+      prompt; during a decode step it is just the ONE newest token
+      (S = 1, see ``forward_step``). Not "context + 1": the newest token
+      REPLACES the end of the window — the model re-reads all S positions
+      it is given, and each of the S rows is one position.
+    - **B** = batch size = how many INDEPENDENT sequences are stacked and
+      processed side by side. They never interact: every attention matrix,
+      every residual value is computed per sequence — the batch axis only
+      exists so the hardware processes many sequences in one matmul
+      instead of B separate loops. During training B is large (e.g. 32
+      padded chunks from ``make_batch`` in scripts/train_demo_model_v2.py,
+      where B rows = 32 different story chunks, each truncated/padded to
+      the same S). During inference on the learning page B = 1: one
+      generation. The whole attention math below runs identically for
+      every B row — nothing crosses the batch axis.
+    - **D** = embed_dim = the model width: each token position is one
+      D-dimensional vector (D = 64 in the learning model). LN1 produced
+      the ``x`` this operator receives: one (D,) vector per (B, S) cell.
+
+    So ``x: (B, S, D)`` reads: "for each of the B sequences, for each of
+    its S token positions, the current D-vector of the residual stream."
+
     Shape letters (defined once in CONTEXT.md → "Shape notation"; the
     learning page's model-info panel shows the actual numbers):
     B = batch size (independent sequences in parallel; 1 = one generation),
@@ -124,13 +153,25 @@ class MultiHeadAttention:
         Parameters
         ----------
         x : np.ndarray, shape (B, S, D)
-            The block's input vectors: B independent sequences, S token
-            positions each, each a D-wide vector (D = embed_dim; this is
-            the post-LN1 stream). One matrix row per position.
+            The block's input vectors — the post-LN1 stream. Reading the
+            axes: the OUTERMOST B is the batch (independent sequences
+            stacked so one matmul processes them side by side; they never
+            interact — every score/weight below is computed per sequence);
+            the MIDDLE S is this pass's token count (training: a full
+            context window; prefill: the whole prompt; decode: 1); the
+            INNER D is the model width — each (S, D) cell is one token
+            position's current residual-stream vector. A concrete slice:
+            x[b, s] is "sequence b, token s" as a (D,) vector; x[b] alone
+            is that sequence's (S, D) matrix — the matrix the attention
+            math actually runs on (B of them in lockstep).
         positions : np.ndarray, shape (S,) or (B, S)
             The absolute token index of each sequence position (0-based) —
             the ONLY position information in the model; RoPE rotates q and
-            k by angle ∝ positions. None → arange(S) (a fresh sequence).
+            k by angle ∝ positions. (S,) = the same positions for every
+            batch row (the normal case: all sequences start at position 0
+            in training, or share the decode position); (B, S) = per-row
+            positions (a windowed prefill whose rows start at different
+            offsets). None → arange(S).
         causal : bool, default True
             Mask the future (True required for autoregressive generation —
             position i attends only to j <= i). False = bidirectional
@@ -258,8 +299,15 @@ class MultiHeadAttention:
     ) -> np.ndarray:
         """Process ONE new token against the cached K/V (per-token inference path).
 
-        x: (B, 1, D) the new token's embedding (a single step).
-        position: the absolute token index (for RoPE; 0-based).
+        x: (B, 1, D) the new token's embedding — ONE new position per
+            sequence (S = 1). B = the batch (the learning page: 1
+            generation); the token's D-vector came from the embedding
+            lookup. The KV cache is what makes S = 1 possible: the PAST
+            tokens' K/V live in the cache, so this pass forwards only the
+            new position — the "context" is not re-read as tokens at all.
+        position: the absolute token index (for RoPE; 0-based) — must
+            equal the cache's current depth (the cache holds positions
+            0..position-1; the new token becomes position `position`).
         cache: per-layer dict. Two forms:
             Naive (quantize=False): {"k": (B, G, t, hd), "v": (B, G, t, hd)}
                 K/V *per group* (GQA keeps the cache small: G heads, not H).
@@ -404,8 +452,13 @@ class MultiHeadAttention:
         only (TurboQuant is a single-token write path; verification demands
         full precision so the lossless contract holds).
 
-        x: (B, c, D) the chunk's embeddings, c >= 1.
-        position: the absolute index of the chunk's FIRST token (0-based).
+        x: (B, c, D) the chunk's embeddings — c = the draft block's
+            length (k candidate tokens proposed in one speculative round;
+            ADR 0003). Each row is one draft token's D-vector, IN ORDER —
+            row j is the (j+1)-th token after the cache's last position.
+        position: the absolute index of the chunk's FIRST token (0-based;
+            = the cache's current depth — the cache holds positions
+            0..position-1).
         cache: per-layer dict {"k": (B, G, t, hd), "v": (B, G, t, hd)};
             mutated in place — the chunk's K/V are appended before attention.
         state: optional dict; when given it is filled with the same keys as

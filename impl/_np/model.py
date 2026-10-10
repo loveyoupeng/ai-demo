@@ -276,7 +276,12 @@ class NumPyModel:
     ) -> tuple[np.ndarray, list[dict]]:
         """Run a full-sequence forward and fill the per-layer KV cache.
 
-        input_ids: (B, S) int token IDs.
+        input_ids: (B, S) int token IDs — B independent sequences (they
+            never interact; the batch axis exists so one matmul processes
+            them side by side), S token positions each; ids index the
+            embedding table (0..vocab_size-1). Prefill: S = the whole
+            prompt (B = 1 on the learning page); training batches: B =
+            many padded chunks of the same length.
         cache: optional pre-allocated cache (make_cache); created when None.
         position_offset: added to the 0-based RoPE positions — so a windowed
             prompt (longer prompt than the context) prefills at its absolute
@@ -328,7 +333,10 @@ class NumPyModel:
     ) -> np.ndarray:
         """Process ONE token per batch row against the cached K/V.
 
-        input_ids: (B, 1) int token IDs.
+        input_ids: (B, 1) int token IDs — ONE new position per sequence
+            (the KV cache holds the past, so the pass forwards only the
+            newest token; the "context + 1" reading is wrong: the context
+            is IN the cache, never re-fed as tokens).
         position: the absolute token index of the token (0-based).
         cache: the per-layer cache; the token's K/V are *appended* to each
             layer's cache before attention runs.
