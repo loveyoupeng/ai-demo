@@ -63,9 +63,14 @@ def flash_attention(
     Parameters
     ----------
     q : torch.Tensor, shape (B, H, Sq, D)
-        Query tensor.
+        Query tensor. B = batch size — independent sequences that never
+        interact (attention mixes information only WITHIN a sequence);
+        the axis exists so the GPU grid below can launch one program per
+        (B, H, S-tile) — B×H×tiles programs in PARALLEL across the
+        streaming multiprocessors. B = 1 leaves the GPU idle; production
+        serving batches many sequences for exactly this reason.
     k : torch.Tensor, shape (B, H, Sk, D)
-        Key tensor.
+        Key tensor (per-batch K — never crossed with another row's q).
     v : torch.Tensor, shape (B, H, Sk, D)
         Value tensor.
     is_causal : bool, default False

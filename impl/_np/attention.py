@@ -33,7 +33,10 @@ class MultiHeadAttention:
     The (B, S, D) input — where each axis comes from
     ------------------------------------------------
     A language model never sees one string; it sees a rectangular block of
-    token ids. Unstacking the three axes:
+    token ids. Unstacking the three axes (and note: B is NOT about
+    FlashAttention or any kernel — the axis exists at the model level, in
+    the NumPy reference too; kernels merely exploit it for GPU
+    parallelism — see docs/theory/transformer-walkthrough.md §4.1.1):
 
     - **S** = sequence length = HOW MANY tokens are in THIS forward pass.
       During training it is the full context window (a fixed slice, e.g.
@@ -51,7 +54,10 @@ class MultiHeadAttention:
       where B rows = 32 different story chunks, each truncated/padded to
       the same S). During inference on the learning page B = 1: one
       generation. The whole attention math below runs identically for
-      every B row — nothing crosses the batch axis.
+      every B row — nothing crosses the batch axis. (Why a kernel cares:
+      FlashAttention launches one program per (B, H, S-tile) — B×H×tiles
+      programs run in parallel across the GPU's multiprocessors, so B=1
+      leaves the GPU idle; see impl/_triton/flash_attn.py.)
     - **D** = embed_dim = the model width: each token position is one
       D-dimensional vector (D = 64 in the learning model). LN1 produced
       the ``x`` this operator receives: one (D,) vector per (B, S) cell.

@@ -105,9 +105,15 @@ see `NumPyModel.make_cache` / `forward_prefill` / `forward_step` in
 ### The math and the intuition, per component
 
 Shape letters used below: **S** = the number of token positions in this
-forward pass (the sequence length), **D** = `embed_dim` = 64, the model
-width (the vector length each token becomes), **B** = batch size (how many
-sequences run in parallel — the learning page is B = 1), **V** =
+forward pass (the sequence length — prefill: the whole prompt; a decode
+step: 1, the past lives in the KV cache and is never re-fed), **D** =
+`embed_dim` = 64, the model width (the vector length each token becomes),
+**B** = batch size (how many *independent* sequences run side by side —
+they never interact; the axis exists so one matmul processes them
+together instead of B separate loops. Training batches ~32 chunks; the
+learning page is B = 1. It is not a kernel trick: the NumPy reference
+has it too — FlashAttention merely exploits it, launching one GPU
+program per (B, H, tile)), **V** =
 `vocab_size` = 512 (candidate next tokens), **H** = `n_heads` = 4 (the
 width splits into H heads of 16 = D/H), **E** = `n_experts` (MoE; 1 =
 dense), **FF** = `expert_dim` = 256 (the FFN's inner width). Full
