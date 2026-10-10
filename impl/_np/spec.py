@@ -81,6 +81,16 @@ def _scaled(probs_or_logits: np.ndarray, temperature: float, *, is_logits: bool)
 class _SurvivalSchedule:
     """Online per-prefix survival estimate (the DSpark schedule state).
 
+    Plain words: a little bookkeeper that watches past rounds and counts,
+    for each prefix length, how often the verifier kept at least that
+    many words. counts[length] / rounds is the observed fraction of rounds
+    where a draft of that length survived — the empirical probability.
+    The engine asks "how long may the drafter run this round?" and the
+    answer is the longest length whose survival fraction still clears
+    the 0.8 bar (at least 1 — always draft something). The point: stop
+    paying verification compute on block suffixes that history says
+    almost never survive (the DSpark paper's throughput observation).
+
     counts[length] = rounds whose accepted length was >= length;
     rounds = total.  p(length) = counts[length] / rounds is the empirical
     probability that a draft prefix of that length survives verification.

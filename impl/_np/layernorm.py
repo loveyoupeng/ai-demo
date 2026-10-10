@@ -66,7 +66,7 @@ class RMSNorm:
         self.gamma: np.ndarray = np.ones(embed_dim, dtype=np.float32)
 
     def forward(self, x: np.ndarray) -> np.ndarray:
-        """Apply RMSNorm. x: (..., D) → out: (..., D)."""
+        """Scale each row to unit RMS, then re-scale per channel by γ. x: (..., D) → out: (..., D)."""
         rms = np.sqrt(np.mean(x**2, axis=-1, keepdims=True) + self.eps)  # (..., 1)
         return (x / rms) * self.gamma  # (..., D)
 

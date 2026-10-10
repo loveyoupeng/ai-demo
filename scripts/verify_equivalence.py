@@ -113,6 +113,18 @@ SCENARIOS: list[Scenario] = [
         kwargs=_cfg(),
         backends=["numpy", "torch"],
     ),
+    Scenario(
+        name="cuda_shared_weights",
+        description="CUDA track: shared-weight load + forward validity",
+        kwargs=_cfg(),
+        backends=["cuda"],
+    ),
+    Scenario(
+        name="all_four_backends",
+        description="All four tracks run the same weights (full interchange)",
+        kwargs=_cfg(),
+        backends=["numpy", "torch", "triton", "cuda"],
+    ),
 ]
 
 

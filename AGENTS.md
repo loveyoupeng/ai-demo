@@ -92,7 +92,7 @@ compare tab: `learning_base`, `learning_sft`). The legacy char-level MoE demo
 | `impl/_cuda/` | NVRTC bare-metal kernels: `compiler.py`, `attention.py`, `layernorm.py`, `rope.py`, `ffn.py`, `moe.py`, `model.py`, `training.py`, `sft.py`, `learning.py`, `cli.py` |
 | `shared/` | Cross-track backbone: `config.py` (`TransformerConfig`), `constants.py` (Keys), `registry.py`, `checkpoint.py`, `generator.py`, `draft.py` (Drafter protocol + sidecar scheme), `spec_engine.py` (torch-family speculative engine), `sft_data.py`, `tokenizer.py`, `dataset.py`, `utils/` |
 | `scripts/` | Unified `train.py`/`infer.py`/`learning.py` (all backends), `verify_equivalence.py` (9 scenarios incl. `spec_mtp_np_torch`/`spec_dspark_np_torch`), `sft.py`, `train_tokenizer.py`, `download_sft_data.py`, `train_real_tinystories.py`, `train_demo_model.py`, `train_demo_model_v2.py`, `train_drafters.py` (drafter distillation), `download_tinystories.py` |
-| `tests/` | `unit/` (root: shared, scripts, registry; plus `_np`, `_torch`, `_triton`, `_cuda`) and `cross_backend/` (49 parity tests) |
+| `tests/` | `unit/` (root: shared, scripts, registry; plus `_np`, `_torch`, `_triton`, `_cuda`) and `cross_backend/` (62 parity tests) |
 | `docs/` | `specs/architecture-fixes.md` (spec + progress of record), `theory/transformer-walkthrough.md` (forward-pass tour), `theory/training-pipeline.md` (pretrain→SFT→tool pipeline), `seam_triton_to_torch.md`, `docstring_style.md`, `adr/`, `design.md` |
 | `resource/` | **git-ignored**: TinyStories JSON + `models/{numpy,torch,triton,cuda}_real`, the `models/learning_{base,sft,tool}` pipeline checkpoints, and `models/learning_demo` (legacy char-level demo) — recreate via scripts |
 | `CONTEXT.md` | Domain glossary |
@@ -253,11 +253,11 @@ uv run pytest tests/ -q -m "not gpu"
 - Every unit test must have a timeout (the global 300 s default applies;
   GPU suites keep an explicit `--timeout=120`).
 - Parity tests: float64, tiered tolerances (rule 2). `tests/cross_backend/`
-  has 49 tests: dense/GQA/MoE parity, GPU/CUDA parity, 3-way equivalence.
+  has 62 tests: dense/GQA/MoE parity, speculative decoding (chunk parity, lossless greedy, sidecar round-trip), GPU/CUDA parity, 3-way equivalence.
 - Gradient correctness: `tests/unit/_np/test_gradient_check.py` — analytic
   backward vs finite differences at ~1e-10 (incl. MoE kink handling).
 - End-to-end equivalence: `uv run python -m scripts.verify_equivalence` —
-  7 scenarios (`dense_np_torch`, `gqa_np_torch`, `moe_np_torch`, `moe_shared_experts_np_torch`, `gqa_torch_triton`,
-  `cuda_shared_weights`, `all_four_backends`); greedy outputs must match.
+  9 scenarios (`dense_np_torch`, `gqa_np_torch`, `moe_np_torch`, `moe_shared_experts_np_torch`, `gqa_torch_triton`,
+  `spec_mtp_np_torch`, `spec_dspark_np_torch`, `cuda_shared_weights`, `all_four_backends`); greedy outputs must match.
 - Round-trip guarantee to preserve: save from any backend → load into any
   other → identical logits.

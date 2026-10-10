@@ -77,7 +77,7 @@ class SwiGLUFFN:
         self.down_proj = xavier_uniform(rng, ff_dim, embed_dim)  # (FF, D)
 
     def forward(self, x: np.ndarray) -> np.ndarray:
-        """SwiGLU forward. x: (..., D) → out: (..., D)."""
+        """SwiGLU forward: gate⊙up then project down. x: (..., D) → out: (..., D)."""
         out, _state = self._forward_state(x)
         return out
 

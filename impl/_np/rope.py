@@ -65,7 +65,7 @@ class RoPE:
     """
 
     def forward(self, x: np.ndarray, positions: np.ndarray, rope_dim: int = 0) -> np.ndarray:
-        """Apply RoPE to q or k. x: (..., H, D), positions: (S,) or (B, S)."""
+        """Rotate q/k dim-pairs by position-dependent angles. x: (..., H, D), positions: (S,) or (B, S)."""
         rotated, _state = self._forward_state(x, positions, rope_dim)
         return rotated
 

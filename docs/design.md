@@ -1,7 +1,7 @@
 # Design Document: Decoder-Only Transformer Learning Project
 
-**Date:** 2026-06-26 (last synced: 2026-10-05)
-**Goal:** Build a fully functional decoder-only transformer LLM in 4 equivalent implementations (NumPy, PyTorch, Triton, CUDA) for educational purposes.
+**Date:** 2026-06-26 (last synced: 2026-10-09)
+**Goal:** Build a fully functional decoder-only transformer LLM in 4 equivalent implementations (NumPy, PyTorch, Triton, CUDA) for educational purposes — covering the modern production surface: RoPE, GQA, SwiGLU, opt-in MoE (with shared experts), exact KV cache, TurboQuant, and speculative decoding (MTP + DSpark drafters).
 
 ## Track intent (doctrine)
 
@@ -35,9 +35,16 @@ Known deltas, kept consciously:
   ones. The torch/triton/cuda generators are thin aliases over
   `shared/generator.py`'s generator (the single deep implementation), not
   parallel teaching artifacts — they've collapsed, not diverged.
-- Every track publicizes the KV-step interface; the full-sequence
-  `forward` stays as a parity oracle only (no re-forward anywhere at
-  generation time).
+- Every track publicizes the KV-step interface (`make_cache` /
+  `forward_prefill` / `forward_step`) plus `forward_chunk` — k tokens'
+  K/V appended in ONE pass, the speculative-decoding verification path
+  (ADR 0003). The full-sequence `forward` stays as a parity oracle only
+  (no re-forward anywhere at generation time).
+- Drafters implement the `shared/draft.py` Drafter protocol and live as
+  **sidecar checkpoints** (`<model>/draft_{mtp,dspark}/`) — the target's
+  `ParameterRegistry` key set is untouched, so pre-ADR-0003 checkpoints
+  stay valid and the drafter loads on all four tracks (round-trip:
+  torch-distilled → NumPy-verified).
 - `CUDAModel` is not an `nn.Module` — bare-metal track, plain tensor
   attributes; training collects grads by walking the block's tensor
   attributes (fixed 2026-09 — an earlier collector walked stale names).
@@ -81,6 +88,8 @@ project/
 │   ├── generator.py  # one deep TextGenerator over the KV-step interface
 │   │                 #   (torch/triton/cuda consume it; numpy keeps its own
 │   │                 #   teaching generator)
+│   ├── draft.py      # Drafter protocol + sidecar checkpoint scheme (ADR 0003)
+│   ├── spec_engine.py # torch-family speculative engine (greedy verification)
 │   └── checkpoint.py # save/restore helpers (config.json + model.npz + vocab.json)
 ├── impl/
 │   ├── _np/          # NumPy track (reference: hand-rolled math + backward)
@@ -93,13 +102,16 @@ project/
 │   │   ├── model.py      # NumPyModel (embedding → stack → final norm → lm_head;
 │   │   │                 #   make_cache / forward_prefill / forward_step)
 │   │   ├── inference.py  # TextGenerator (greedy / sampled decoding)
+│   │   ├── drafters.py    # MTP + DSpark drafters (the math reference)
+│   │   ├── spec.py        # speculative engine: greedy verify + rejection sampling
 │   │   ├── training.py / optimizer.py / cross_entropy.py / sft.py / gradcheck.py
 │   │   ├── learning.py   # instrumented_forward + generate_with_records (records)
 │   │   ├── learning_server.py # learning-mode HTTP server
 │   │   └── web/          # the learning page (vanilla JS + KaTeX, no framework)
 │   ├── _torch/       # PyTorch track (production ops: F.scaled_dot_product_attention)
-│   │   ├── layers.py     # TorchModel + all nn.Module components
-│   │   ├── learning.py   # torch record adapter (same JSON shapes as the np one)
+│   │   ├── layers.py     # TorchModel + all nn.Module components (+ forward_chunk)
+│   │   ├── drafters.py   # torch MTP + DSpark drafters (sidecar scheme, shared W_lm)
+│   │   ├── learning.py   # torch record adapter + the shared spec-record helper
 │   │   └── inference.py / training.py / sft.py / cli.py
 │   ├── _triton/      # Triton GPU kernels (attn.py, flash_attn.py online softmax,
 │   │                 #   ffn.py, moe.py; transformer.py + learning.py + sft.py)
@@ -107,7 +119,8 @@ project/
 │   └── (per-track) cli.py entry points: uv run python -m impl._<track>.cli
 ├── tests/
 │   ├── unit/         # per-backend unit tests (_np/, _torch/, _triton/, _cuda/) + shared
-│   └── cross_backend/ # parity tests between tracks (3-way, GPU parity; 49 tests)
+│   └── cross_backend/ # parity tests between tracks (dense/GQA/MoE/spec
+│                      #   decoding, GPU parity, 3-way; 62 tests)
 └── docs/             # design.md, docstring_style.md, adr/, specs/, theory/
 ```
 
@@ -121,6 +134,7 @@ project/
 | PyTorch | Complete (all layers match NumPy) | All pass | ✅ Complete |
 | Triton | Complete (all kernels match NumPy) | All pass | ✅ Complete |
 | CUDA | Complete (all kernels compiled + execute) | All pass | ✅ Complete |
+| Speculative decoding | Complete on all four tracks: forward_chunk, MTP + DSpark drafters (NumPy + torch), greedy + rejection-sampling engines, sidecar checkpoints, distillation, learning-page integration | 62 parity + 21 np spec tests pass; 9/9 verify scenarios | ✅ Complete |
 
 ### NumPy Layer Summary
 
@@ -131,6 +145,9 @@ project/
 - **SwiGLU FFN**: gated linear unit variant with SiLU activation
 - **MoE**: Mixture of Experts — multiple feed-forward expert sub-layers, gated routing
 - **GQA**: Grouped-Query Attention — groups query heads into key/value groups for KV cache efficiency
+- **MoE router/shared expert**: softmax-over-all → top-k mask → renormalize; shared experts always-on, ungated, averaged (ADR 0002)
+- **Speculative drafters**: MTP (one conditioned block, own KV cache, sequential) and DSpark (parallel non-causal backbone + causal refinement, learned block-position embeddings) — `impl/_np/drafters.py`
+- **Speculative engine**: greedy acceptance walk (repetition-guarded argmax comparison) + the rejection-sampling theorem; DSpark survival schedule — `impl/_np/spec.py`
 - **Residual**: standard additive skip connection `out = x + f(ln(x))` (see [ADR-0001](adr/0001-gated-residual-abandonment.md))
 - **TransformerBlock**: one layer — RMSNorm → MHA → residual → RMSNorm → FFN → residual
 - **DecoderStack**: N-layer stack; the model applies embedding → stack → final RMSNorm → lm_head
@@ -176,6 +193,14 @@ project/
   path (`forward_prefill` + `forward_step`) is exact, one token per
   iteration. TurboQuant (1-bit quantized cache) is a documented,
   parity-budgeted alternative behind `forward_step(quantize=True)`.
+- **Speculative decoding** (ADR 0003): a distilled drafter proposes a k-token
+  block; the target verifies it in one `forward_chunk` pass; the longest
+  agreeing prefix commits (greedy: token-identical to plain decoding — the
+  lossless contract; NumPy also implements the rejection-sampling theorem
+  for temperature mode). Drafters: MTP (sequential, k=4) and DSpark
+  (semi-AR parallel + causal refine, k=8, confidence-scheduled verification
+  at a 0.8 survival target), sidecar checkpoints, both sharing the target's
+  embedding + lm_head. See docs/specs/speculative-decoding.md.
 
 ---
 
@@ -204,3 +229,7 @@ project/
    quantization as the documented alternative; LRU/LFU multi-level caching
    was explicitly rejected as out of scope
 8. **PyTorch nn.Module wrapper** — PyTorch/Triton models are `nn.Module` instances (training via `.parameters()`); `CUDAModel` is a plain class whose tensor attributes carry `requires_grad`
+9. **Drafter sidecars, not registry keys** — draft weights live outside the
+   target's `model.npz` (ADR 0003): the checkpoint format and every
+   existing checkpoint stay untouched; drafters load per request and the
+   same sidecar runs on all four tracks

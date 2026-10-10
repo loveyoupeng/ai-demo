@@ -1,5 +1,27 @@
 """NumPy drafters — the MTP and DSpark draft models (the math reference).
 
+**The problem, in plain words.** Generating text with a transformer is a
+repeating loop: feed the model everything written so far, it computes a
+score (a "logit") for every possible next word, pick one, append it,
+repeat. The expensive part is the model forward — and it buys only ONE
+word per pass. The speculative idea: let a *tiny* model (the drafter)
+write several candidate words first — cheaply, possibly badly — then run
+the big model ONCE over the whole candidate block. Wherever the big model
+agrees, several words are confirmed for the price of one pass; at the
+first disagreement the big model's own word wins and the rest of the
+draft is thrown away. The output is exactly what the big model alone
+would have written — the tiny model can only affect *speed*, never
+content (that guarantee is checked by tests, not promised).
+
+**What the drafter is made of.** A small stack of the same parts the big
+model uses (an input projection, one or two transformer blocks, a final
+scale, and the big model's own word-matching matrix borrowed — so it
+scores words in exactly the big model's vocabulary). Its two inputs are
+the anchor: the last confirmed word id, and the big model's internal
+summary vector of everything before it (the "hidden state"). Its output
+is a probability distribution over the vocabulary for each proposed
+position — the same kind of row the big model produces, just cheaper.
+
 Implements the ``shared.draft.Drafter`` protocol (ADR 0003; the ONE new
 seam of the speculative-decoding feature):
 
@@ -15,14 +37,16 @@ handed in at construction, never copied into the sidecar).
 **MTP** (multi-token prediction, DeepSeek-V3 style — sequential drafting):
 
     h_norm = RMSNorm(h_anchor)                       (B, D)
-    x_0    = in_proj(concat(h_norm, emb(anchor)))     (B, D)
-    ...then for j = 0..k-1 (one transformer-block step per drafted token,
-    each conditioned on the previous drafted token — its own tiny KV cache):
-        x_{j+1} = block.step(x_j, emb(draft_j), pos = anchor_pos + j)
+    x_anchor = block.step(in_proj([h_norm; emb(anchor)]))   — seeds the
+               drafter's own tiny KV cache with the anchor position
+    ...then for j = 0..k-1, ONE block step per drafted token, each step
+    conditioned on h_norm AND the previous drafted token t_j:
+        x_{j+1}  = block.step(in_proj([h_norm; emb(t_j)]), pos = anchor+j)
         logits_j = out_norm(x_{j+1}) @ W_lm           (B, V)
-        draft_{j+1} = argmax(logits_j)  (greedy) or sampled
-    The drafter proposes one token per block step — sequential drafting,
-    the DSpark paper's "MTP-1" baseline generalized to k steps.
+        t_{j+1}   = argmax(logits_j)                  (the proposal)
+    where t_0 = the anchor token. Every step's input is the SAME anchor
+    hidden state paired with the *latest* token so far — one proposal per
+    block step, sequential by construction.
 
 **DSpark** (arXiv 2607.05147 — semi-autoregressive parallel drafting):
 
@@ -133,10 +157,18 @@ class _DrafterBlock:
 class MTPDrafter:
     """Sequential MTP drafter (DeepSeek-V3 style; the DSpark paper's baseline).
 
-    One transformer block, conditioned on the target's final hidden state,
-    drafts one token per step with its own tiny KV cache. ``draft`` runs k
-    steps; each step feeds the previously drafted token back in — the
-    sequential dependency the parallel drafters approximate.
+    How it works, mechanically: ONE small transformer block (the same
+    parts the target uses, just fewer of them) keeps its own tiny memory
+    of past positions (the K/V cache). ``draft`` runs that block k times:
+    each step reads the anchor summary vector + the newest word proposed
+    so far, and outputs a distribution over the next word. Because step
+    j's *output word* becomes step j+1's *input*, order is automatic —
+    word 3 can only be proposed after words 1 and 2 exist.
+
+    Why "sequential" matters: this is the same left-to-right chain as
+    ordinary generation, in miniature — the proposal quality per word is
+    as good as the tiny block can make it, but the *latency* is k block
+    runs per draft block (the cost DSpark trades away for parallelism).
     """
 
     family = MTP
@@ -241,11 +273,21 @@ class MTPDrafter:
 class DSparkDrafter:
     """Semi-autoregressive parallel drafter (arXiv 2607.05147, teaching scale).
 
-    The whole draft block in ONE forward: a non-causal parallel backbone
-    predicts all k positions at once from the anchor hidden state + learned
-    block-position embeddings, then a lightweight causal sequential module
-    refines the block for intra-token dependency (the semi-AR coupling that
-    mitigates suffix decay). Stateless across rounds — rollback is a no-op.
+    How it works, mechanically: two small transformer blocks run over the
+    k draft slots AT ONCE. The first (the *parallel backbone*) has no
+    left-to-right mask: every slot sees every other slot, so k words are
+    proposed in a single pass. Slots are told apart only by learned
+    position vectors (pos_emb), one per slot. The second block (the
+    *causal refine*) DOES have the left-to-right mask: slot j re-reads
+    slots 0..j-1 and repairs its own proposal — that is the
+    "semi-autoregressive" part.
+
+    Why two passes: a fully parallel proposal is fast but blind to
+    word order inside its own block — later slots drift (suffix decay,
+    the DSpark paper's motivating observation). The causal repair pass
+    reintroduces order at a fraction of the sequential cost: 2 passes
+    for k words instead of k. Stateless across rounds — rollback is a
+    no-op (nothing is cached between draft calls).
     """
 
     family = DSHARK

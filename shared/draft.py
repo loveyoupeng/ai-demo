@@ -164,9 +164,10 @@ class Drafter(Protocol):
                          (tokens (B, k'), probs: k' distributions (B, V)) —
                          the drafter's own next-token distribution per drafted
                          position (needed by the rejection-sampling rule).
-        rollback(keep) — drop all but the first ``keep`` of the LAST draft
-                         call's internal state (KV cache alignment after a
-                         rejected verification). Stateless drafters no-op.
+        rollback(keep) — align internal state after a rejected verification:
+                         keep the anchor + the first ``keep`` accepted drafts
+                         of the LAST call, drop the rest (KV-cache alignment;
+                         MTP keeps 1+keep rows). Stateless drafters no-op.
         reset()        — clear all internal state for a fresh sequence.
     """
 
