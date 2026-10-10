@@ -39,8 +39,12 @@ class TestHonestForwardAccounting:
     @pytest.mark.parametrize("family,k", [(MTPDrafter, 4), (DSparkDrafter, 8)])
     def test_forwards_counted_honestly(self, family: type, k: int) -> None:
         model = _model()
-        drafter = family(make_drafter_meta("mtp" if family is MTPDrafter else "dspark", model.config, k, 48),
-                         model.embedding.weight, model.lm_head_weight, seed=5)
+        drafter = family(
+            make_drafter_meta("mtp" if family is MTPDrafter else "dspark", model.config, k, 48),
+            model.embedding.weight,
+            model.lm_head_weight,
+            seed=5,
+        )
         gen = SpeculativeGenerator(model, drafter)
 
         calls = {"n": 0}
@@ -72,7 +76,9 @@ class _HandlerHarness:
 
     def __new__(cls, backend: str = "numpy"):
         model, vocab, cfg, tok = load_learning_model("resource/models/learning_tool", backend="numpy")
-        Handler = make_handler(model, vocab, backend="numpy", model_dir="resource/models/learning_tool", default_spec="mtp")
+        Handler = make_handler(
+            model, vocab, backend="numpy", model_dir="resource/models/learning_tool", default_spec="mtp"
+        )
         inst = Handler.__new__(Handler)
         inst.model = model
         inst.vocab = vocab
@@ -86,12 +92,15 @@ class _HandlerHarness:
 class TestEndpointValidation:
     """Both endpoints answer 'what requests are legal' identically."""
 
-    @pytest.mark.parametrize("body,match", [
-        ({"spec": "bogus"}, "spec must be"),
-        ({"spec": "mtp", "k": 99}, "k must be"),
-        ({"spec": "mtp", "k": 0}, "k must be"),
-        ({"spec": "mtp", "k": -1}, "k must be"),
-    ])
+    @pytest.mark.parametrize(
+        "body,match",
+        [
+            ({"spec": "bogus"}, "spec must be"),
+            ({"spec": "mtp", "k": 99}, "k must be"),
+            ({"spec": "mtp", "k": 0}, "k must be"),
+            ({"spec": "mtp", "k": -1}, "k must be"),
+        ],
+    )
     def test_bad_requests_raise(self, body: dict, match: str) -> None:
         inst = _HandlerHarness()
         with pytest.raises(ValueError, match=match):
@@ -111,6 +120,4 @@ class TestEndpointValidation:
         tm, *_ = load_learning_model("resource/models/learning_tool", backend="torch")
         inst.model = tm
         with pytest.raises(ValueError, match="NumPy track only"):
-            inst._run_record(
-                {"text": "Once upon a time", "n_tokens": 6, "temperature": 0.8, "spec": "mtp", "k": 4}
-            )
+            inst._run_record({"text": "Once upon a time", "n_tokens": 6, "temperature": 0.8, "spec": "mtp", "k": 4})

@@ -183,8 +183,10 @@ docs, and tests.
   the block is discarded.
 
 - **Acceptance / accepted length**: how many drafted tokens survive
-  verification in a round. The speedup lever: tokens per target forward,
-  minus the drafter's cost.
+  verification in a round. The speedup lever: one round costs two target
+  passes (verify + commit) and confirms `accepted + 1` tokens — so
+  speculation wins while acceptance beats ~1 token/round; the engine's
+  `n_target_forwards` counts what actually runs.
 
 - **MTP** (multi-token prediction): a small head conditioned on the target's
   final hidden state that drafts the *next* token; drafts a block by

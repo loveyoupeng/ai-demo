@@ -131,14 +131,19 @@ freed to specialize because the common patterns live in the shared one.
 (`impl/_np/moe.py`; demonstrated end-to-end by the `learning_demo`
 checkpoint.)
 
-**Speculative decoding — several tokens per target forward** (ADR 0003) —
-generation's bottleneck is that the target must run a full forward per
-*one* token. Speculation splits the work: a tiny **drafter** proposes k
-candidate tokens; the **target verifies them all in ONE parallel pass**
-(`forward_chunk` appends all k tokens' K/V at once — chunk parity guarantees
-the scores equal step-by-step decoding); the longest agreeing prefix is
-committed, the target's own token fixes the first disagreement, and the
-rejected tail is rolled back out of the KV cache. Two drafter families,
+**Speculative decoding — aiming at several tokens per target forward**
+(ADR 0003) — generation's bottleneck is that the target must run a full
+forward per *one* token. Speculation splits the work: a tiny **drafter**
+proposes k candidate tokens; the **target verifies them all in ONE
+parallel pass** (`forward_chunk` appends all k tokens' K/V at once —
+chunk parity guarantees the scores equal step-by-step decoding); the
+longest agreeing prefix is committed, the target's own token fixes the
+first disagreement, and the rejected tail is rolled back out of the KV
+cache. One round costs two target passes (verify + the commit pass that
+forwards the correction token and computes the next anchor's hidden), so
+the win arrives only when the drafter's acceptance beats ~1 token/round —
+the engine's `n_target_forwards` stat counts what actually runs, and the
+learning page shows the measured tokens/sec honestly. Two drafter families,
 deliberately different architectures: **MTP** (DeepSeek-V3 style — one tiny
 block run k times sequentially, order from recurrence) and **DSpark**
 (arXiv 2607.05147 — a *non-causal* parallel backbone predicts all k slots

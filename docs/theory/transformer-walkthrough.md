@@ -280,12 +280,21 @@ target — no target budget is spent on suffixes that almost never survive.
 
 ### Where the speedup comes from (and why this demo shows it honestly)
 
-Tokens confirmed **per target forward** is the lever: plain greedy is
-always 1; speculation is `1 + mean_accepted` minus the drafting cost. On
-the D=64 teaching model the drafter's per-round Python overhead outweighs
-the accepted-prefix savings, so the page's tokens/sec panel shows the
-*measured* comparison (spec vs a paired plain run) rather than a promised
-speedup — the mechanism is real, the scale is honest.
+Tokens confirmed **per target forward** is the lever. Plain greedy: one
+pass per token. One speculative round costs TWO target passes — the
+verify chunk over the draft block, plus a commit pass that appends the
+correction/bonus token and computes the next anchor's hidden (the drafter
+conditions on the target's hidden *at* the anchor; the correction token's
+hidden does not exist until it is forwarded) — and confirms
+`accepted + 1` tokens. So speculation wins only while
+`accepted + 1 > 2`, i.e. mean acceptance above 1: with a strong drafter
+one pass buys 3–4 tokens; with a weak one it degenerates toward plain
+decoding. On the D=64 teaching model the distilled drafters sit below
+that bar and the drafter's per-round Python overhead adds more, so the
+page's tokens/sec panel shows the *measured* comparison (spec vs a paired
+plain run) rather than a promised speedup — the mechanism is real, the
+scale is honest, and the engine's `n_target_forwards` stat counts what
+actually runs (verified by a counting-stub test).
 
 ## Paper → repo map
 

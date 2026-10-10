@@ -10,11 +10,24 @@ forward → one word. This engine repeats a fatter loop instead:
      model's word instead, throw the rest of the draft away, and erase
      the thrown-away positions' internal memory (the KV cache) so the
      next round starts clean.
-Accepted words + the correction word all become part of the output, so
-one big-model forward can confirm up to k+1 words. If the drafter is
-terrible, almost everything is rejected — the loop then just degenerates
-to ordinary generation speed, never slower *in content*: the committed
-words are always the big model's own choices.
+Accepted words + the correction word all become part of the output. If
+the drafter is terrible, almost everything is rejected — the loop then
+just degenerates to ordinary generation speed, never slower *in
+content*: the committed words are always the big model's own choices.
+
+**Target-forward accounting (honest):** each round is TWO target passes —
+the verify chunk over the draft block, plus the commit pass that appends
+the correction/bonus token and computes the next anchor's hidden state
+(the drafter conditions on the target's hidden AT the anchor; the
+correction token's hidden does not exist until it is forwarded — the
+same shape production MTP serving uses). So::
+
+    n_target_forwards = 1 (prefill) + 2 × n_rounds
+
+and ``tokens_per_target_forward = n_new_tokens / n_target_forwards`` —
+the honest per-target-pass metric the learning page displays. Speculation
+therefore wins while acceptance beats ~1 token/round; a counting-stub
+test pins the stat to reality.
 
 **Target-forward accounting (honest):** each round is TWO target passes —
 the verify chunk over the draft block, plus the commit pass that appends
@@ -309,13 +322,26 @@ class SpeculativeGenerator:
             return accept_mask, a, resid / max(float(resid.sum()), 1e-12)
         return accept_mask, a, _scaled(logits_v[0, k_eff - 1], T, is_logits=True)
 
+    @staticmethod
+    def _drafter_record(anchor_token: np.ndarray, anchor_hidden: np.ndarray, d_probs: list[np.ndarray]) -> dict:
+        """The drafter's own inputs/outputs for one round (the learning
+        page's drafter-node views): its two inputs (anchor token id +
+        anchor hidden) and its per-position output distributions, trimmed
+        to top-8 per position (the page shows distributions, not a k×V wall)."""
+        return {
+            "anchor_token": int(anchor_token.reshape(-1)[0]),
+            "anchor_hidden": [round(float(x), 6) for x in np.asarray(anchor_hidden).reshape(-1)],
+            "draft_probs_top": [_top_slice(p) for p in d_probs],
+        }
+
     # ── the ONE round loop (both walks drive it) ───────────────────────────
     def _generate(
         self,
         prompt: np.ndarray,
         max_new_tokens: int,
         walk,
-        sample: bool,
+        propose,
+        nxt_pick,
         temperature: float,
         rng: np.random.Generator,
         k_req: int,
@@ -355,15 +381,7 @@ class SpeculativeGenerator:
             # 1. DRAFT (+ sample the proposals when the walk is stochastic).
             t0 = time.perf_counter()
             draft_tokens, d_probs = self.drafter.draft(anchor_token, anchor_hidden, k_eff)
-            if sample:
-                # The drafter SAMPLES its proposal from p_d^(1/T) renormalized
-                # (= its temperature-scaled softmax; see the module docstring).
-                d = np.empty(k_eff, dtype=np.int64)
-                for j in range(k_eff):
-                    pd = _scaled(d_probs[j][0], temperature, is_logits=False)  # (V,)
-                    d[j] = int(rng.choice(pd.shape[0], p=pd))
-            else:
-                d = np.asarray(draft_tokens)[0]  # (k_eff,) greedy proposals
+            d = propose(draft_tokens, d_probs)
             t1 = time.perf_counter()
 
             # 2. VERIFY: one parallel pass scores every drafted position.
@@ -374,30 +392,16 @@ class SpeculativeGenerator:
             t_draft_ms += t1 - t0
             t_verify_ms += t2 - t1
 
-            # 3. ACCEPT (the walk) + the correction/bonus token.
-            if sample:
-                accept_mask, a, nxt = walk(
-                    pending_logits, logits_v, d, k_eff, emitted=out_tokens,
-                    draft_probs=d_probs, temperature=temperature, rng=rng,
-                )
-            else:
-                accept_mask, a, nxt = walk(pending_logits, logits_v, d, k_eff, emitted=out_tokens)
-            if sample:
-                new_token = int(rng.choice(nxt.shape[0], p=nxt))
-            else:
-                new_token = int(np.argmax(nxt))
+            # 3. ACCEPT (the walk) + the correction/bonus token. Both walks
+            #    share the 5-arg head (the sampled extras — draft_probs,
+            #    temperature, rng — ride through a partial built per mode).
+            accept_mask, a, nxt = walk(pending_logits, logits_v, d, k_eff, emitted=out_tokens)
+            new_token = nxt_pick(nxt)
             committed = [int(x) for x in d[:a]] + [new_token]
             committed = committed[:remaining]
             n_new = len(committed)
 
-            # The drafter's own inputs/outputs for this round (the learning
-            # page's drafter-node views): its two inputs (anchor token id +
-            # anchor hidden) and its per-position output distributions.
-            round_drafter = {
-                "anchor_token": int(anchor_token.reshape(-1)[0]),
-                "anchor_hidden": [round(float(x), 6) for x in np.asarray(anchor_hidden).reshape(-1)],
-                "draft_probs_top": [_top_slice(p) for p in d_probs],
-            }
+            round_drafter = self._drafter_record(anchor_token, anchor_hidden, d_probs)
 
             # 4. ROLL BACK the target cache to t+a (the rejected tail), then
             #    COMMIT the correction/bonus token — the round's second
@@ -493,7 +497,8 @@ class SpeculativeGenerator:
             prompt,
             max_new_tokens,
             walk=self._greedy_walk,
-            sample=False,
+            propose=lambda draft_tokens, d_probs: np.asarray(draft_tokens)[0],  # the argmax row
+            nxt_pick=lambda p_next: int(np.argmax(p_next)),
             temperature=1.0,
             rng=np.random.default_rng(0),
             k_req=k_req,
@@ -528,13 +533,42 @@ class SpeculativeGenerator:
         """
         T = max(temperature, 1e-8)
         k_req = min(k if k is not None else self.drafter.block_size, self.drafter.block_size)
+        rng = np.random.default_rng(seed)
+
+        round_state: dict = {}
+
+        def _propose_sampled(draft_tokens, d_probs):
+            # The drafter SAMPLES its proposal from p_d^(1/T) renormalized
+            # (= its temperature-scaled softmax; see the module docstring).
+            # The walk consumes the same per-position distributions — stash
+            # them where the partial below can hand them over.
+            round_state["draft_probs"] = d_probs
+            d = np.empty(len(d_probs), dtype=np.int64)
+            for j in range(len(d_probs)):
+                pd = _scaled(d_probs[j][0], T, is_logits=False)  # (V,)
+                d[j] = int(rng.choice(pd.shape[0], p=pd))
+            return d
+
+        def _sampled_walk_bound(pending_logits, logits_v, draft, k_eff, emitted):
+            return self._sampled_walk(
+                pending_logits,
+                logits_v,
+                draft,
+                k_eff,
+                emitted,
+                draft_probs=round_state["draft_probs"],
+                temperature=T,
+                rng=rng,
+            )
+
         seq, stats = self._generate(
             prompt,
             max_new_tokens,
-            walk=self._sampled_walk,
-            sample=True,
+            walk=_sampled_walk_bound,
+            propose=_propose_sampled,
+            nxt_pick=lambda p_next: int(rng.choice(p_next.shape[0], p=p_next)),
             temperature=T,
-            rng=np.random.default_rng(seed),
+            rng=rng,
             k_req=k_req,
             sched=None,
         )
