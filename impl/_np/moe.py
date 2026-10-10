@@ -17,6 +17,7 @@ import numpy as np
 
 from impl._np.ffn import SwiGLUFFN
 from impl._np.init import xavier_uniform
+from shared.result import Result
 
 
 class MixtureOfExperts:
@@ -103,15 +104,24 @@ class MixtureOfExperts:
         out, _state = self._forward_state(x)
         return out
 
-    def _forward_state(self, x: np.ndarray) -> tuple[np.ndarray, dict]:
-        """MoE forward + the router state the record and the backward need.
+    def _forward_state(self, x: np.ndarray) -> Result[np.ndarray, dict]:
+        """MoE forward; return THE result + the captured context.
 
-        Returns (out, state) where state holds:
+        Returns a ``Result`` (shared/result.py): ``.value`` = the MoE
+        output; ``.ctx.backward`` = the router state the analytic backward
+        recomputes from; ``.ctx.display`` = the per-expert outputs the
+        learning-mode record shows; tuple unpacking still works.
+
+        x: (B, S, D) the post-LN2 stream.
+
+        .ctx.backward (the router/backward state):
             scores      : (B, S, E) stable-softmax input (after the max subtract)
             probs       : (B, S, E) after the top-k mask (raw softmax if top_k == E)
             topk_idx    : (B, S, k) the selected expert per token
             weights     : (B, S, E) renormalized routing weights
+        .ctx.display (the record-only captures):
             expert_outs : E × (B, S, D) all expert outputs (intentionally full)
+            shared_outs : N_s × (B, S, D) per-shared-expert outputs ([] when absent)
         """
         E = self.n_experts
 
@@ -149,15 +159,19 @@ class MixtureOfExperts:
             out = out + shared_sum / len(shared_outs)
         else:
             shared_outs = []
-        state = {
-            "scores": scores,
-            "probs": probs,
-            "topk_idx": topk_idx,
-            "weights": weights,
-            "expert_outs": expert_outs,
-            "shared_outs": shared_outs,
-        }
-        return out, state
+        return Result.capture(
+            out,
+            backward={
+                "scores": scores,
+                "probs": probs,
+                "topk_idx": topk_idx,
+                "weights": weights,
+            },
+            display={
+                "expert_outs": expert_outs,
+                "shared_outs": shared_outs,
+            },
+        )
 
     def backward(self, dout: np.ndarray, x: np.ndarray) -> tuple[np.ndarray, dict]:
         """Analytic backward.

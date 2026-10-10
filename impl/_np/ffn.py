@@ -16,6 +16,7 @@ from __future__ import annotations
 import numpy as np
 
 from impl._np.init import xavier_uniform
+from shared.result import Result
 
 
 def silu(x: np.ndarray) -> np.ndarray:
@@ -86,10 +87,20 @@ class SwiGLUFFN:
         out, _state = self._forward_state(x)
         return out
 
-    def _forward_state(self, x: np.ndarray) -> tuple[np.ndarray, dict]:
-        """SwiGLU forward + the intermediates the record and the backward need.
+    def _forward_state(self, x: np.ndarray) -> Result[np.ndarray, dict]:
+        """SwiGLU forward; return THE result + the captured context.
 
-        Returns (out, state) where state holds:
+        Returns a ``Result`` (shared/result.py): ``.value`` = the SwiGLU
+        output; ``.ctx.backward`` = the intermediates the analytic backward
+        recomputes from; tuple unpacking still works.
+
+        x: (B, S, D) (or any leading dims) — the post-LN2 stream, D-wide.
+
+        Contract: out = (SiLU(x@Wg) ⊙ (x@Wu)) @ Wd — two parallel
+        projections meet at the elementwise product; positionwise (no
+        cross-token mixing).
+
+        .ctx.backward:
             pre_gate : (..., FF) raw gate logits (x @ W_gate)
             gate     : (..., FF) gate after SiLU
             up       : (..., FF) up projection (x @ W_up)
@@ -100,8 +111,11 @@ class SwiGLUFFN:
         up = x @ self.up_proj  # (..., FF)
         gated = gate * up  # (..., FF)
         out = gated @ self.down_proj  # (..., D)
-        state = {"pre_gate": pre_gate, "gate": gate, "up": up, "gated": gated}
-        return out, state
+        return Result.capture(
+            out,
+            backward={"pre_gate": pre_gate, "gate": gate, "up": up, "gated": gated},
+            display={},
+        )
 
     def backward(self, dout: np.ndarray, x: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """Analytic backward.

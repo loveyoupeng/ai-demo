@@ -54,7 +54,7 @@ class TestInstrumentedForward:
         model = tiny_model()
         x = sample_ids(model)
         ref = model.forward(x)
-        rec = instrumented_forward(model, x)
+        rec, _rec_ctx = instrumented_forward(model, x)
         got = np.array(rec["logits"])
         assert got.shape == ref.shape
         assert np.abs(got - ref).max() < 1e-6
@@ -63,7 +63,7 @@ class TestInstrumentedForward:
     def test_softmax_rows_sum_to_one(self):
         """Every softmax row in the record sums to 1 and covers the vocab."""
         model = tiny_model()
-        rec = instrumented_forward(model, sample_ids(model))
+        rec, _rec_ctx = instrumented_forward(model, sample_ids(model))
         p = np.array(rec["softmax"])
         assert p.shape == (1, 5, model.vocab_size)
         assert np.abs(p.sum(axis=-1) - 1.0).max() < 1e-6
@@ -73,7 +73,7 @@ class TestInstrumentedForward:
     def test_record_structure_moe(self):
         """MoE model record has every block/field the page needs."""
         model = tiny_model()
-        rec = instrumented_forward(model, sample_ids(model, 4))
+        rec, _rec_ctx = instrumented_forward(model, sample_ids(model, 4))
         assert sorted(rec.keys()) == [
             "blocks",
             "embedding",
@@ -131,7 +131,7 @@ class TestInstrumentedForward:
     def test_record_structure_dense(self):
         """Dense (no-MoE) model record exposes the ffn field instead of moe."""
         model = NumPyModel(TransformerConfig(vocab_size=8, embed_dim=8, n_layers=1, n_heads=2, seed=1))
-        rec = instrumented_forward(model, sample_ids(model, 4))
+        rec, _rec_ctx = instrumented_forward(model, sample_ids(model, 4))
         for block in rec["blocks"]:
             assert "ffn" in block and "moe" not in block
             assert sorted(block["ffn"].keys()) == ["ff_dim", "gate", "gated", "out", "pre_gate", "up"]
@@ -140,7 +140,7 @@ class TestInstrumentedForward:
     def test_top_tokens_sorted(self):
         """top_tokens at the last position is sorted by descending probability."""
         model = tiny_model()
-        rec = instrumented_forward(model, sample_ids(model, 4))
+        rec, _rec_ctx = instrumented_forward(model, sample_ids(model, 4))
         top = rec["top_tokens"]
         probs = [p for _, p in top]
         assert probs == sorted(probs, reverse=True)

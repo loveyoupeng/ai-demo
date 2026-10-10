@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from shared.result import Result
+
 
 class RoPE:
     """Rotary Position Embedding (Su et al., 2021, "RoFormer").
@@ -86,20 +88,30 @@ class RoPE:
         rotated, _state = self._forward_state(x, positions, rope_dim)
         return rotated
 
-    def _forward_state(self, x: np.ndarray, positions: np.ndarray, rope_dim: int = 0) -> tuple[np.ndarray, dict]:
-        """Rotate + return the angle state the backward needs.
+    def _forward_state(self, x: np.ndarray, positions: np.ndarray, rope_dim: int = 0) -> Result[np.ndarray, dict]:
+        """Apply RoPE; return THE result (the rotated q/k) + the captured
+        context (the angle state the analytic backward inverts).
 
-        x: (B, S, H, hd) the (pre-permute) head layout; positions: (S,) or
-        (B, S) absolute indices; rope_dim: the rotated prefix (0 = all of
-        the head dim). Returns (rotated (B, S, H, hd), state with
-        freqs/angles/cos/sin) — the backward inverts the rotations."""
-        """Apply RoPE and return the rotation state (the intermediates of forward).
+        Returns a ``Result`` (shared/result.py): ``.value`` = the rotated
+        tensor; ``.ctx.backward`` = the angle state (freqs/angles/cos/sin)
+        — the backward's inputs; tuple unpacking still works.
 
-        Returns (rotated, state) where state holds:
-            freqs : (D//2,)      — one theta per pair
-            angles: (B, S, D//2) — pos * theta per pair
-            cos   : (B, S, D//2)
-            sin   : (B, S, D//2)
+        x: (B, S, H, hd) the (pre-permute) head layout — H heads, each a
+            hd-wide vector; ONLY q and k arrive here (v bypasses RoPE).
+        positions: (S,) or (B, S) absolute token indices — the ONLY
+            position signal; angle ∝ position.
+        rope_dim: the rotated PREFIX of the head dim (0 = rotate all hd —
+            the standard); pairs are (even, odd) dims within that prefix.
+
+        Contract: preserves vector norms (a rotation, not a scale); makes
+        q·k depend on the RELATIVE position distance; the inverse of
+        backward.
+
+        .ctx.backward:
+            freqs : (pair_dim,)  — one theta per (even, odd) pair,
+                    pair_dim = rope_dim//2 (or hd//2 when rope_dim == 0)
+            angles: (B, S, pair_dim) — pos · theta per pair
+            cos, sin: (B, S, pair_dim)
         """
         d = x.shape[-1]
 
@@ -142,8 +154,11 @@ class RoPE:
 
         if x_pass is not None:
             rotated = np.concatenate([rotated, x_pass], axis=-1)  # (B, S, H, D)
-        state = {"freqs": freqs, "angles": angles, "cos": cos, "sin": sin}
-        return rotated, state
+        return Result.capture(
+            rotated,
+            backward={"freqs": freqs, "angles": angles, "cos": cos, "sin": sin},
+            display={},
+        )
 
     def backward(self, dout: np.ndarray, x: np.ndarray, positions: np.ndarray, rope_dim: int = 0) -> np.ndarray:
         """Analytic backward (inverse rotations).

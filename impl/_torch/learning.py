@@ -29,6 +29,7 @@ import torch.nn.functional as F
 
 from impl._torch.layers import MixtureOfExperts, MultiHeadAttention, SwiGLUFFN
 from shared.constants import REP_PENALTY
+from shared.result import Result
 
 if TYPE_CHECKING:
     # Record shape contract: the JSON shapes are owned by the NumPy track.
@@ -297,18 +298,20 @@ def _moe_record(mlp: MixtureOfExperts, x: torch.Tensor, out: torch.Tensor) -> Mo
     }
 
 
-def instrumented_forward(model: TorchModel, input_ids: torch.Tensor) -> ForwardRecord:
-    """One forward pass with every intermediate captured (the step record).
+def instrumented_forward(model: TorchModel, input_ids: torch.Tensor) -> Result[ForwardRecord, dict]:
+    """One forward pass; return THE result + the captured record (the same
+    ``Result`` contract as the NumPy track — shared/result.py).
 
-    Same record shape as ``impl._np.learning.instrumented_forward``; the
-    attention block's intermediates are the explicit display path (see
-    ``_attn_record``) since the production SDPA call exposes none of them.
+    ``.value`` = the ForwardRecord (the step record: logits/softmax/
+    top_tokens and every block intermediate — the display capture IS the
+    record here, since the production SDPA call exposes no intermediates
+    and this adapter recomputes them via ``_attn_record``); ``.ctx`` =
+    the real result tensors separated out (logits (B, S, V), softmax
+    (B, S, V) — the tensors the page's token-strip and top-token bars
+    actually consume). Same record shape as the NumPy adapter.
 
-    Returns a nested dict (all arrays as nested float lists):
-      input_ids, embedding, positions,
-      blocks[i]: {ln1, attn, h, ln2, ffn|moe, out},
-      final_norm, logits, softmax, top_tokens
-    """
+    Returns (all arrays as nested float lists)."""
+
     x = input_ids
     S = x.shape[1]
     positions = torch.arange(S, dtype=torch.long, device=x.device)
@@ -357,7 +360,7 @@ def instrumented_forward(model: TorchModel, input_ids: torch.Tensor) -> ForwardR
     top_idx = torch.argsort(p[0, -1], descending=True)[:top_n]  # top-10 at the last position
     top_tokens = [[int(i), float(p[0, -1, i])] for i in top_idx.tolist()]
 
-    return {
+    record: ForwardRecord = {
         "input_ids": x.tolist(),
         "embedding": arr(emb),
         "positions": positions.tolist(),
@@ -367,6 +370,11 @@ def instrumented_forward(model: TorchModel, input_ids: torch.Tensor) -> ForwardR
         "softmax": arr(p),
         "top_tokens": top_tokens,
     }
+    return Result.capture(
+        record,
+        backward={},
+        display={"logits": record["logits"], "softmax": record["softmax"], "top_tokens": top_tokens},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +469,7 @@ def generate_with_records(
 
     # ---- Step 0: prefill the prompt (full forward, initializes the caches)
     x = torch.tensor([seq[-ctx:]], dtype=torch.int64)
-    rec = instrumented_forward(model, x)
+    rec, _rec_ctx = instrumented_forward(model, x)
     tok = _pick(np.asarray(rec["softmax"], dtype=np.float64)[0][-1])
     emitted.append(tok)
     steps.append(
@@ -633,7 +641,7 @@ def _generate_with_spec_records(
         if cls_name == "TritonModel"
         else cuda_if(model, x)
         if cls_name == "CUDAModel"
-        else instrumented_forward(model, x)
+        else instrumented_forward(model, x)[0]
     )
     tok0 = out_tokens[0] if out_tokens else int(np.argmax(np.asarray(rec["softmax"], dtype=np.float64)[0][-1]))
     steps.append(
@@ -663,7 +671,7 @@ def _generate_with_spec_records(
                 if cls_name == "TritonModel"
                 else cuda_if(model, torch.tensor([window], dtype=torch.long, device=device))
                 if cls_name == "CUDAModel"
-                else instrumented_forward(model, torch.tensor([window], dtype=torch.long, device=device))
+                else instrumented_forward(model, torch.tensor([window], dtype=torch.long, device=device))[0]
             )
         tok = int(r["committed"][-1]) if r["committed"] else draft[0]
         steps.append(

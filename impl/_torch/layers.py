@@ -31,6 +31,7 @@ import torch.nn.functional as F
 from shared.config import TransformerConfig
 from shared.constants import Attn, Keys, LayerNorm, Mlp
 from shared.registry import ParameterRegistry
+from shared.result import Result
 
 logger = logging.getLogger(__name__)
 
@@ -208,19 +209,17 @@ class MultiHeadAttention(nn.Module):
         out, _state = self._forward_state(x, positions)
         return out
 
-    def _forward_state(
-        self, x: torch.Tensor, positions: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """Forward pass plus the raw K/V intermediates the cache needs.
+    def _forward_state(self, x: torch.Tensor, positions: torch.Tensor | None = None) -> Result[torch.Tensor, dict]:
+        """Forward pass; return THE result + the captured context (the same
+        ``Result`` contract as the NumPy reference — shared/result.py).
 
-        Mirrors ``impl._np.attention.MultiHeadAttention._forward_state``:
-        ``forward`` calls this and drops the state; ``forward_prefill``
-        (via the block) requests it and backfills the per-layer cache —
-        no second pass.
+        ``.value`` = the attention output (B, S, D); ``.ctx.display`` = the
+        cache-backfill capture (the per-group, RoPE'd K and un-rotated V —
+        what ``forward_prefill`` consumes, no second pass);
+        ``.ctx.backward`` is empty (autograd owns the gradient context on
+        this track); tuple unpacking (``out, state = ...``) still works.
 
-        Returns (out (B, S, D), state) where the state holds the per-group,
-        RoPE'd K and the un-rotated V:
-            "k_group": (B, G, S, hd)  "v_group": (B, G, S, hd)
+        Mirrors ``impl._np.attention.MultiHeadAttention._forward_state``.
         """
         batch_size, seq_len, _ = x.shape
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
@@ -249,7 +248,11 @@ class MultiHeadAttention(nn.Module):
         ctx = F.scaled_dot_product_attention(q, k_full, v_full, is_causal=True)  # (B, H, S, hd)
         ctx = ctx.permute(0, 2, 1, 3).reshape(batch_size, seq_len, H * hd)
         out = self.o_proj(ctx)  # (B, S, D)
-        return out, {"k_group": k_group, "v_group": v_group}
+        return Result.capture(
+            out,
+            backward={},
+            display={"k_group": k_group, "v_group": v_group},
+        )
 
     def forward_step(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
         """Process ONE new token against the cached K/V (per-token inference path).

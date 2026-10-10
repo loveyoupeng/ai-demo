@@ -114,8 +114,10 @@ class TestRecordParity:
         np_model, vocab = _load_numpy()
         torch_model, _ = _load_torch()
         ids = np.array([PROMPT], dtype=np.int32)
-        np_logits = np_forward(np_model, ids)["logits"]
-        torch_logits = torch_learning.instrumented_forward(torch_model, torch.tensor([PROMPT]))["logits"]
+        np_record, _np_ctx = np_forward(np_model, ids)
+        np_logits = np_record["logits"]
+        torch_record, _torch_ctx = torch_learning.instrumented_forward(torch_model, torch.tensor([PROMPT]))
+        torch_logits = torch_record["logits"]
         assert np.allclose(np_logits, torch_logits, rtol=1e-3, atol=1e-3)
 
     @pytest.mark.timeout(120)

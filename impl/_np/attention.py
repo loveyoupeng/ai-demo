@@ -16,6 +16,7 @@ import numpy as np
 
 from impl._np.init import xavier_uniform
 from impl._np.rope import RoPE
+from shared.result import Result
 
 
 class MultiHeadAttention:
@@ -101,16 +102,23 @@ class MultiHeadAttention:
         # (H*hd, D) output projection (mixes the heads back into one vector)
         self.o_proj = xavier_uniform(rng, n_heads * hd, embed_dim)
 
-    def _forward_state(self, x: np.ndarray, positions: np.ndarray, causal: bool = True) -> tuple[np.ndarray, dict]:
-        """Run the attention forward and return every intermediate the
-        analytic backward and the learning-mode record need.
+    def _forward_state(self, x: np.ndarray, positions: np.ndarray, causal: bool = True) -> Result[np.ndarray, dict]:
+        """Run the attention forward; return THE result + the captured context.
 
-        Invariant/contract: the returned ``out`` is bit-identical whether or
-        not ``state`` is captured (the record is an overlay, not a second
-        code path); ``positions[i]`` is the absolute RoPE position of
-        sequence position i (relative distances drive q·k); GQA repeat (when
-        G < H) happens BEFORE the score computation, so the returned ``k``
-        is post-repeat (B, H, S, hd) while ``k_group`` stays per-group
+        Returns a ``Result`` (shared/result.py): ``.value`` is THE answer
+        (the attention output); ``.ctx`` is the captured context,
+        sub-grouped by consumer — ``.ctx.backward`` = what the analytic
+        backward recomputes from (the gradient chain's inputs);
+        ``.ctx.display`` = what ONLY the learning-mode record shows (never
+        touched by gradients); tuple unpacking (``out, state = ...``)
+        still works and returns the pre-wrapper flat dict.
+
+        Invariant/contract: ``.value`` is bit-identical whether or not the
+        context is captured (the record is an overlay, not a second code
+        path); ``positions[i]`` is the absolute RoPE position of sequence
+        position i (relative distances drive q·k); GQA repeat (when G < H)
+        happens BEFORE the score computation, so the returned ``k`` is
+        post-repeat (B, H, S, hd) while ``k_group`` stays per-group
         (B, G, S, hd) — the cache-ready view.
 
         Parameters
@@ -131,19 +139,20 @@ class MultiHeadAttention:
 
         Returns
         -------
-        out : np.ndarray, shape (B, S, D)
-            The attention output (the residual-stream delta, pre-add).
-        state : dict
-            Every intermediate, keyed for the backward and the record:
-            q_pre, k_pre, v_pre : (B, S, ·) projections before head permute
-            q_rope_in, k_rope_in: pre-RoPE q/k in head layout
-            q, k, v             : (B, H, S, hd) after RoPE / GQA repeat
-            k_group, v_group    : (B, G, S, hd) per-group K/V (cache-ready)
-            attn                : (B, H, S, S) attention weights (softmax out)
-            ctx                 : (B, S, H*hd) merged context (pre Wo)
-            scale               : float, sqrt(hd) — the scores divisor
-            rope                : RoPE state (freqs/angles/cos/sin)
-            scores, scores_masked, causal_mask : the score-matrix history
+        Result[np.ndarray, dict]
+            .value — the attention output, shape (B, S, D) (the
+            residual-stream delta, pre-add).
+            .ctx.backward — the backward's inputs:
+                q_pre, k_pre, v_pre : (B, S, ·) projections before head permute
+                q_rope_in, k_rope_in: pre-RoPE q/k in head layout
+                q, k, v             : (B, H, S, hd) after RoPE / GQA repeat
+                attn                : (B, H, S, S) attention weights
+                ctx                 : (B, S, H*hd) merged context (pre Wo)
+                scale               : float, sqrt(hd) — the scores divisor
+                rope                : RoPE state (freqs/angles/cos/sin)
+            .ctx.display — the record-only captures:
+                k_group, v_group    : (B, G, S, hd) per-group K/V (cache-ready)
+                scores, scores_masked, causal_mask : the score-matrix history
         """
         batch_size, seq_len, _ = x.shape
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
@@ -204,26 +213,30 @@ class MultiHeadAttention:
         # Merge heads back: (B, H, S, hd) → (B, S, H*hd)
         ctx = ctx.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, H * hd)  # (B, S, H*hd)
         out = ctx @ self.o_proj  # (B, S, D)
-        state = {
-            "q_pre": q_pre,
-            "k_pre": k_pre,
-            "v_pre": v_pre,
-            "q_rope_in": q_heads,
-            "k_rope_in": k_heads,
-            "q": q,
-            "k": k,
-            "v": v,
-            "k_group": k_group,
-            "v_group": v_group,
-            "attn": attn,
-            "ctx": ctx,
-            "scale": scale,
-            "rope": rope,
-            "scores": scores,
-            "scores_masked": scores_masked,
-            "causal_mask": causal_mask,
-        }
-        return out, state
+        return Result.capture(
+            out,
+            backward={
+                "q_pre": q_pre,
+                "k_pre": k_pre,
+                "v_pre": v_pre,
+                "q_rope_in": q_heads,
+                "k_rope_in": k_heads,
+                "q": q,
+                "k": k,
+                "v": v,
+                "attn": attn,
+                "ctx": ctx,
+                "scale": scale,
+                "rope": rope,
+            },
+            display={
+                "k_group": k_group,
+                "v_group": v_group,
+                "scores": scores,
+                "scores_masked": scores_masked,
+                "causal_mask": causal_mask,
+            },
+        )
 
     def forward(self, x: np.ndarray, positions: np.ndarray | None = None, causal: bool = True) -> np.ndarray:
         """Multi-head attention forward pass (the plain path — no cache).

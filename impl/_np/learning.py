@@ -27,6 +27,7 @@ from impl._np.block import TransformerBlock
 from impl._np.model import NumPyModel
 from impl._np.moe import MixtureOfExperts
 from shared.constants import REP_PENALTY
+from shared.result import Result
 
 # ---------------------------------------------------------------------------
 # Tensor → JSON helpers
@@ -309,22 +310,28 @@ def _forward_record(model: NumPyModel, raw: dict, input_ids: np.ndarray) -> Forw
 # ---------------------------------------------------------------------------
 
 
-def instrumented_forward(model: NumPyModel, input_ids: np.ndarray) -> ForwardRecord:
-    """One forward pass with every intermediate captured (the step record).
+def instrumented_forward(model: NumPyModel, input_ids: np.ndarray) -> Result[ForwardRecord, dict]:
+    """One forward pass; return THE result + the captured record (the same
+    ``Result`` contract as the torch adapter — shared/result.py).
 
-    The output tensors are identical to ``model.forward(input_ids)`` — the
-    capture rides on the track's own state hooks (the same ``_forward_state``
-    the analytic backward uses), so no intermediate is recomputed here.
-
-    Returns a nested dict (all arrays as nested float lists):
-      input_ids, embedding, positions,
-      blocks[i]: {ln1, attn, h, ln2, ffn|moe, out},
-      final_norm, logits, softmax, top_tokens
+    ``.value`` = the ForwardRecord (the step record: logits/softmax/
+    top_tokens and every block intermediate); ``.ctx`` = the real result
+    tensors separated out (logits (B, S, V), softmax (B, S, V) — the
+    tensors the page consumes). The output tensors are identical to
+    ``model.forward(input_ids)`` — the capture rides on the track's own
+    state hooks (the same ``_forward_state`` the analytic backward uses),
+    so no intermediate is recomputed here. Same record shape as the torch
+    adapter (all arrays as nested float lists).
     """
     x = np.asarray(input_ids, dtype=np.int32)
     raw: dict = {}
     model.forward_with_trace(x, None, record=raw)
-    return _forward_record(model, raw, x)
+    record: ForwardRecord = _forward_record(model, raw, x)
+    return Result.capture(
+        record,
+        backward={},
+        display={"logits": record["logits"], "softmax": record["softmax"], "top_tokens": record["top_tokens"]},
+    )
 
 
 # ---------------------------------------------------------------------------
