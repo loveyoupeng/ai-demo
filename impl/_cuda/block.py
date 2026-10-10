@@ -243,13 +243,13 @@ class CuTransformerBlock:
         out = h + ff_out  # (B, S, D)
         return out
 
-    def _forward_state(
+    def forward_state(
         self, x: torch.Tensor, positions: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Block forward plus the attention K/V state the cache needs.
 
-        Mirrors ``impl._torch.layers.TransformerBlock._forward_state`` (which
-        mirrors ``impl._np.block.TransformerBlock._forward_state``): the
+        Mirrors ``impl._torch.layers.TransformerBlock.forward_state`` (which
+        mirrors ``impl._np.block.TransformerBlock.forward_state``): the
         prefill path requests the state and backfills the per-layer cache —
         no second pass.
 

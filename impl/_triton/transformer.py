@@ -106,12 +106,12 @@ class TritonMultiHeadAttention(nn.Module):
         ctx = ctx.permute(0, 2, 1, 3).reshape(B, S, H * hd)
         return self.o_proj(ctx)  # (B, S, D)
 
-    def _forward_state(
+    def forward_state(
         self, x: torch.Tensor, positions: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Forward pass plus the raw K/V intermediates the cache needs.
 
-        Mirrors ``impl._torch.layers.MultiHeadAttention._forward_state``:
+        Mirrors ``impl._torch.layers.MultiHeadAttention.forward_state``:
         ``forward`` calls this and drops the state; the prefill path
         (via the block) requests it and backfills the per-layer cache —
         no second pass.
@@ -439,18 +439,18 @@ class TritonTransformerBlock(nn.Module):
         ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, S, D)
         return h + ff_out  # (B, S, D)
 
-    def _forward_state(
+    def forward_state(
         self, x: torch.Tensor, positions: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Block forward plus the attention K/V state the cache needs.
 
-        Mirrors ``impl._torch.layers.TransformerBlock._forward_state``:
+        Mirrors ``impl._torch.layers.TransformerBlock.forward_state``:
         ``forward`` calls this and drops the state; the prefill path
         requests it and backfills the per-layer cache — no second pass.
 
         Returns (out (B, S, D), {"k_group": (B, G, S, hd), "v_group": (B, G, S, hd)}).
         """
-        attn_out, attn_state = self.self_attn._forward_state(self.input_layernorm(x), positions)
+        attn_out, attn_state = self.self_attn.forward_state(self.input_layernorm(x), positions)
         h = x + attn_out  # (B, S, D)
         ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, S, D)
         return h + ff_out, attn_state
@@ -537,12 +537,12 @@ class TritonDecoderStack(nn.Module):
             out = block(out, positions)
         return out
 
-    def _forward_state(
+    def forward_state(
         self, x: torch.Tensor, positions: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
         """Forward through all blocks, capturing each block's attention state.
 
-        Mirrors ``impl._torch.layers.DecoderStack._forward_state``:
+        Mirrors ``impl._torch.layers.DecoderStack.forward_state``:
         ``forward`` drops the state; the model's prefill requests it and
         backfills the per-layer cache — no second pass.
 
@@ -552,7 +552,7 @@ class TritonDecoderStack(nn.Module):
         states: list[dict[str, torch.Tensor]] = []
         out = x
         for block in self.blocks:
-            out, block_state = block._forward_state(out, positions)
+            out, block_state = block.forward_state(out, positions)
             states.append(block_state)
         return out, states
 

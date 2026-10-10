@@ -71,12 +71,9 @@ BLOCK_SIZE selection
 
 Triton kernel design
 --------------------
-Two-kernel approach:
-  1. _rope_kernel: Rotates the first head_dim dimensions
-  2. _rope_copy_kernel: Passes through remaining dimensions unchanged
-
-The separation allows different BLOCK_SIZE parameters for the rotation
-(32) vs pass-through (tuned to tail_dim).
+One kernel rotates the first rope_dim dimensions; the un-rotated tail
+passes through via a plain torch.cat (a copy kernel would launch more
+threads to move bytes the concatenation moves for free).
 
 Reference
 ---------
@@ -242,7 +239,6 @@ def _rope_kernel(
     tl.store(out_ptr + inner_offset + 1, out_vals2, mask=pair_mask)  # Odd dim
 
 
-@triton.jit
 def _rope_copy_kernel(
     x_ptr,  # pyright: ignore[reportInvalidTypeForm]
     out_ptr,  # pyright: ignore[reportInvalidTypeForm]

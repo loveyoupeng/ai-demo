@@ -101,10 +101,10 @@ class MixtureOfExperts:
         averaged over n_shared_experts (turning the knob 1→2 does not
         rescale the block output).
         """
-        out, _state = self._forward_state(x)
+        out = self.forward_state(x).unwrap()
         return out
 
-    def _forward_state(self, x: np.ndarray) -> Result[np.ndarray, dict]:
+    def forward_state(self, x: np.ndarray) -> Result[np.ndarray, dict]:
         """MoE forward; return THE result + the captured context.
 
         Returns a ``Result`` (shared/result.py): ``.value`` = the MoE

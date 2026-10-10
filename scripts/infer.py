@@ -280,7 +280,7 @@ def generate_speculative(
 
     vocab_size = model.config.vocab_size
     prompt_tokens = encode_prompt(prompt_text, vocab_size)[: model.config.context_length]
-    meta, params = load_drafter(sidecar_dir(model_path, spec))
+    meta, params = load_drafter(sidecar_dir(model_path, spec))  # type: ignore[arg-type]
     if isinstance(model, NumPyModel):
         from impl._np.drafters import DSparkDrafter as NpDSpark
         from impl._np.drafters import MTPDrafter as NpMTP

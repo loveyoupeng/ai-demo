@@ -85,10 +85,9 @@ class RoPE:
         Contract: preserves vector norms (a rotation, not a scale); makes
         q·k depend on the RELATIVE position distance. Inverse of backward.
         """
-        rotated, _state = self._forward_state(x, positions, rope_dim)
-        return rotated
+        return self.forward_state(x, positions, rope_dim).unwrap()
 
-    def _forward_state(self, x: np.ndarray, positions: np.ndarray, rope_dim: int = 0) -> Result[np.ndarray, dict]:
+    def forward_state(self, x: np.ndarray, positions: np.ndarray, rope_dim: int = 0) -> Result[np.ndarray, dict]:
         """Apply RoPE; return THE result (the rotated q/k) + the captured
         context (the angle state the analytic backward inverts).
 

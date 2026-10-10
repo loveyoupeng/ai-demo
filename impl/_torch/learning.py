@@ -21,7 +21,7 @@ autoregressive decode steps that embed ONLY the new token.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -469,7 +469,7 @@ def generate_with_records(
 
     # ---- Step 0: prefill the prompt (full forward, initializes the caches)
     x = torch.tensor([seq[-ctx:]], dtype=torch.int64)
-    rec, _rec_ctx = instrumented_forward(model, x)
+    rec: ForwardRecord = instrumented_forward(model, x).unwrap()
     tok = _pick(np.asarray(rec["softmax"], dtype=np.float64)[0][-1])
     emitted.append(tok)
     steps.append(
@@ -568,6 +568,7 @@ def generate_with_records(
         "prompt": {"tokens": list(prompt_ids), "text": "".join(vocab[t] for t in prompt_ids)},
         "steps": steps,
         "generated": {"tokens": seq[len(prompt_ids) :], "text": "".join(vocab[t] for t in seq[len(prompt_ids) :])},
+        "spec": {},
     }
 
 
@@ -613,12 +614,19 @@ def _generate_with_spec_records(
     # The step captures are per-track (each adapter's display path): the
     # torch capture here, the triton/cuda captures in their own adapters.
     # All three produce the same record schema, so the spec path dispatches
-    # on the model class.
+    # on the model class through ONE typed callable (no possibly-unbound
+    # branches; the TorchModel-typed params of the other adapters' capture
+    # are structural — any track's model exposes the same attrs).
     cls_name = type(model).__name__
+    capture: Any = instrumented_forward
     if cls_name == "TritonModel":
         from impl._triton.learning import instrumented_forward as triton_if
+
+        capture = triton_if
     elif cls_name == "CUDAModel":
         from impl._cuda.learning import instrumented_forward as cuda_if
+
+        capture = cuda_if
 
     # Follow the model's device (one deep helper — see shared/device_util.py).
     from shared.device_util import compute_device
@@ -636,13 +644,7 @@ def _generate_with_spec_records(
 
     # ---- Step 0: the prefill (same capture as the classic record).
     x = torch.tensor([prompt_ids[-ctx:]], dtype=torch.long, device=device)
-    rec = (
-        triton_if(model, x)
-        if cls_name == "TritonModel"
-        else cuda_if(model, x)
-        if cls_name == "CUDAModel"
-        else instrumented_forward(model, x)[0]
-    )
+    rec: ForwardRecord = cast(ForwardRecord, capture(model, x)[0] if cls_name != "TorchModel" else instrumented_forward(model, x).unwrap())
     tok0 = out_tokens[0] if out_tokens else int(np.argmax(np.asarray(rec["softmax"], dtype=np.float64)[0][-1]))
     steps.append(
         {
@@ -666,26 +668,20 @@ def _generate_with_spec_records(
         prefix = list(prompt_ids) + out_tokens[: pos - len(prompt_ids)]
         window = (prefix + draft)[-ctx:]
         with torch.no_grad():
-            rec = (
-                triton_if(model, torch.tensor([window], dtype=torch.long, device=device))
-                if cls_name == "TritonModel"
-                else cuda_if(model, torch.tensor([window], dtype=torch.long, device=device))
-                if cls_name == "CUDAModel"
-                else instrumented_forward(model, torch.tensor([window], dtype=torch.long, device=device))[0]
-            )
+            win_t = torch.tensor([window], dtype=torch.long, device=device)
+            rec = cast(ForwardRecord, capture(model, win_t)[0] if cls_name != "TorchModel" else instrumented_forward(model, win_t).unwrap())
         tok = int(r["committed"][-1]) if r["committed"] else draft[0]
-        steps.append(
-            {
-                "step": r_idx,
-                "kind": "verify",
-                "position": len(prefix),
-                "input_tokens": draft,
-                "forward": rec,
-                "top_tokens": rec["top_tokens"],
-                "token": tok,
-                "text": vocab[tok],
-            }
-        )
+        step_rec: StepRecord = {
+            "step": r_idx,
+            "kind": "verify",
+            "position": len(prefix),
+            "input_tokens": draft,
+            "forward": cast(ForwardRecord, rec),
+            "top_tokens": rec["top_tokens"],
+            "token": tok,
+            "text": vocab[tok],
+        }
+        steps.append(step_rec)
         pos += len(r["committed"])
 
     spec_block = {"mode": spec, "k": k, **stats}

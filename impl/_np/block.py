@@ -101,12 +101,12 @@ class TransformerBlock:
             positions = np.arange(x.shape[1], dtype=np.int32)
         # Stream 1: attention with pre-norm and residual.
         ln1_out = self.input_layernorm.forward(x)  # (B, S, D)
-        attn_out, attn_state = self.self_attn._forward_state(ln1_out, positions)  # (B, S, D)
+        attn_out, attn_state = self.self_attn.forward_state(ln1_out, positions).unwrap_with()  # (B, S, D)
         h = x + attn_out  # (B, S, D)
 
         # Stream 2: feed-forward (dense or MoE) with pre-norm and residual.
         ln2_out = self.post_attention_layernorm.forward(h)  # (B, S, D)
-        ff_out, ff_state = self.mlp._forward_state(ln2_out)  # (B, S, D)
+        ff_out, ff_state = self.mlp.forward_state(ln2_out).unwrap_with()  # (B, S, D)
         out = h + ff_out  # (B, S, D)
         if record is not None:
             record.update(
@@ -213,7 +213,7 @@ class TransformerBlock:
         attn_out = self.self_attn.forward_step(ln1_out, position, cache, quantize=quantize, state=attn_state)
         h = x + attn_out  # (B, 1, D)
         ln2_out = self.post_attention_layernorm.forward(h)  # (B, 1, D)
-        ff_out, ff_state = self.mlp._forward_state(ln2_out)  # (B, 1, D)
+        ff_out, ff_state = self.mlp.forward_state(ln2_out).unwrap_with()  # (B, 1, D)
         out = h + ff_out  # (B, 1, D)
         if record is not None:
             record.update(
@@ -263,7 +263,7 @@ class TransformerBlock:
         attn_out = self.self_attn.forward_chunk(ln1_out, position, cache, state=attn_state)
         h = x + attn_out  # (B, c, D)
         ln2_out = self.post_attention_layernorm.forward(h)  # (B, c, D)
-        ff_out, ff_state = self.mlp._forward_state(ln2_out)  # (B, c, D)
+        ff_out, ff_state = self.mlp.forward_state(ln2_out).unwrap_with()  # (B, c, D)
         out = h + ff_out  # (B, c, D)
         if record is not None:
             record.update(

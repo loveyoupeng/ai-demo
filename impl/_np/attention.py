@@ -102,7 +102,7 @@ class MultiHeadAttention:
         # (H*hd, D) output projection (mixes the heads back into one vector)
         self.o_proj = xavier_uniform(rng, n_heads * hd, embed_dim)
 
-    def _forward_state(self, x: np.ndarray, positions: np.ndarray, causal: bool = True) -> Result[np.ndarray, dict]:
+    def forward_state(self, x: np.ndarray, positions: np.ndarray, causal: bool = True) -> Result[np.ndarray, dict]:
         """Run the attention forward; return THE result + the captured context.
 
         Returns a ``Result`` (shared/result.py): ``.value`` is THE answer
@@ -169,7 +169,8 @@ class MultiHeadAttention:
 
         # RoPE rotates q and k (position information). RoPE's contract shape
         # is (B, S, H, D), so permute, rotate, permute back.
-        q, rope = RoPE()._forward_state(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim)
+        rope_res = RoPE().forward_state(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim)
+        q, rope = rope_res.unwrap_with()
         q = q.transpose(0, 2, 1, 3)  # (B, H, S, hd)
         k = RoPE().forward(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim)
         k = k.transpose(0, 2, 1, 3)  # (B, G, S, hd)
@@ -250,8 +251,7 @@ class MultiHeadAttention:
         """
         if positions is None:
             positions = np.arange(x.shape[1], dtype=np.int32)
-        out, _state = self._forward_state(x, positions, causal=causal)
-        return out
+        return self.forward_state(x, positions, causal=causal).unwrap()
 
     def forward_step(
         self, x: np.ndarray, position: int, cache: dict, quantize: bool = False, state: dict | None = None
@@ -280,7 +280,7 @@ class MultiHeadAttention:
             budget test) while shrinking the KV memory by ≈4x (int8 bits
             plus one float scale per (batch, head) per token-write).
         state: optional dict; when given it is filled with the same
-            intermediate keys as ``_forward_state``'s state (the
+            intermediate keys as ``forward_state``'s state (the
             learning-mode record) — the math is bit-identical either way.
 
         Returns
@@ -320,9 +320,9 @@ class MultiHeadAttention:
         k_heads = k_pre.reshape(batch_size, 1, G, hd).transpose(0, 2, 1, 3)  # (B, G, 1, hd)
         v = v_pre.reshape(batch_size, 1, G, hd).transpose(0, 2, 1, 3)  # (B, G, 1, hd)
 
-        q, rope_state = RoPE()._forward_state(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim)
+        q, rope_state = RoPE().forward_state(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).unwrap_with()
         q = q.transpose(0, 2, 1, 3)  # (B, H, 1, hd)
-        k, _ = RoPE()._forward_state(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim)
+        k = RoPE().forward_state(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).unwrap()
         k = k.transpose(0, 2, 1, 3)  # (B, G, 1, hd)
 
         if quantize:
@@ -365,7 +365,7 @@ class MultiHeadAttention:
 
         # Learning-mode record: the same intermediates the dense path keeps,
         # taken from THIS step (the cache after the append is what the query
-        # attended to). The dense path's state is filled by _forward_state;
+        # attended to). The dense path's state is filled by forward_state;
         # here we fill the parallel keys from the step-local variables.
         if state is not None:
             k_exp = np.repeat(k, H // G, axis=1) if G != H else k  # (B, H, 1, hd)
@@ -448,9 +448,9 @@ class MultiHeadAttention:
         v = v_pre.reshape(B, c, G, hd).transpose(0, 2, 1, 3)  # (B, G, c, hd)
 
         # RoPE the whole chunk at once (the operator's (B, S, H, hd) view).
-        q, rope_state = RoPE()._forward_state(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim)
+        q, rope_state = RoPE().forward_state(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).unwrap_with()
         q = q.transpose(0, 2, 1, 3)  # (B, H, c, hd)
-        k, _ = RoPE()._forward_state(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim)
+        k = RoPE().forward_state(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).unwrap()
         k = k.transpose(0, 2, 1, 3)  # (B, G, c, hd)
 
         # Append the chunk's per-group K/V to the cache.
@@ -571,7 +571,7 @@ class MultiHeadAttention:
         """
         if positions is None:
             positions = np.arange(x.shape[1], dtype=np.int32)
-        _out, st = self._forward_state(x, positions)
+        st = self.forward_state(x, positions).ctx.merged()
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
         B, S, _D = x.shape
         scale = st["scale"]

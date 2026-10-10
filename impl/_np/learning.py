@@ -1,7 +1,7 @@
 """Learning mode — instrumented forward pass + inference records.
 
 The **instrumented forward** runs the track's own state paths — the same
-``_forward_state`` hooks the analytic backward uses — so every displayed
+``forward_state`` hooks the analytic backward uses — so every displayed
 number is a value the operators actually computed (bit-identical to
 ``NumPyModel.forward``), not a re-derivation. This module is the thin
 serializer between the raw state the track captures and the JSON shapes the
@@ -24,6 +24,7 @@ from typing import TypedDict
 import numpy as np
 
 from impl._np.block import TransformerBlock
+from impl._np.drafters import DSparkDrafter, MTPDrafter
 from impl._np.model import NumPyModel
 from impl._np.moe import MixtureOfExperts
 from shared.constants import REP_PENALTY
@@ -142,7 +143,8 @@ class StepRecord(TypedDict):
     kind: str
     position: int
     input_tokens: list
-    forward: ForwardRecord
+    forward: ForwardRecord  # the CUDA adapter's verification capture has
+    # the same keys (its own TypedDict shape is structurally identical)
     top_tokens: list
     token: int
     text: str
@@ -155,12 +157,13 @@ class TokenSpan(TypedDict):
     text: str
 
 
-class GenerationRecord(TypedDict, total=False):
+class GenerationRecord(TypedDict):
     """The complete inference record the page displays and exports.
 
-    Optional top-level key (speculative decoding, ADR 0003): ``spec`` —
-    present ONLY when the request picked a drafter family (mtp/dspark);
-    spec-off records keep the exact classic shape (byte-identical schema).
+    ``spec`` is the speculative-decoding block (ADR 0003): an EMPTY dict
+    ({}) for plain decoding — spec-off records keep the classic shape plus
+    this always-present key; a drafter run fills it with the spec stats.
+    (TypedDict keys are required so consumers can index without guards.)
     """
 
     config: dict
@@ -176,13 +179,13 @@ class GenerationRecord(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 
 
-def _rmsnorm_record(gamma: np.ndarray, x: np.ndarray, eps: float, out: np.ndarray) -> NormRecord:
+def _rmsnorm_record(gamma: np.ndarray, x: np.ndarray, eps: float | None, out: np.ndarray) -> NormRecord:
     """Capture an RMSNorm: the rms scalar per row, gamma, output.
 
     The one-line ``rms = sqrt(mean(x^2) + eps)`` is the only formula kept in
     this module; it is a display scalar, not a multi-step operator.
     """
-    rms = np.sqrt(np.mean(x**2, axis=-1, keepdims=True) + eps)  # (B, S, 1)
+    rms = np.sqrt(np.mean(x**2, axis=-1, keepdims=True) + (eps or 1e-6))  # (B, S, 1)
     return {"rms": arr(rms), "gamma": arr(gamma), "out": arr(out)}
 
 
@@ -199,7 +202,7 @@ def _rope_record(rope_state: dict) -> RopeRecord:
 def _attn_record(state: dict, attn_out: np.ndarray) -> AttnRecord:
     """Serialize the attention state the operator already computed.
 
-    ``state`` is either the dense ``_forward_state`` dict or the
+    ``state`` is either the dense ``forward_state`` dict or the
     ``forward_step`` state dict; both carry the same keys (the step state
     additionally carries ``k_cache``/``v_cache`` — the full GQA-expanded
     cache the query attended to — which the dense path derives from the
@@ -319,7 +322,7 @@ def instrumented_forward(model: NumPyModel, input_ids: np.ndarray) -> Result[For
     tensors separated out (logits (B, S, V), softmax (B, S, V) — the
     tensors the page consumes). The output tensors are identical to
     ``model.forward(input_ids)`` — the capture rides on the track's own
-    state hooks (the same ``_forward_state`` the analytic backward uses),
+    state hooks (the same ``forward_state`` the analytic backward uses),
     so no intermediate is recomputed here. Same record shape as the torch
     adapter (all arrays as nested float lists).
     """
@@ -349,7 +352,7 @@ def generate_with_records(
     seed: int = 42,
     spec: str | None = None,
     k: int | None = None,
-    drafter: object = None,
+    drafter: MTPDrafter | DSparkDrafter | None = None,
 ) -> GenerationRecord:
     """Generate ``n_tokens`` with a real KV cache, recording every step.
 
@@ -396,6 +399,7 @@ def generate_with_records(
       }
     """
     if spec in ("mtp", "dspark"):
+        assert drafter is not None, "speculative records need a drafter (load a sidecar via shared.draft)"
         return _generate_with_spec_records(model, vocab, prompt_ids, n_tokens, temp, top_k, seed, spec, k, drafter)
     rng = np.random.default_rng(seed)
     ctx = model.config.context_length
@@ -483,6 +487,7 @@ def generate_with_records(
         "prompt": {"tokens": list(prompt_ids), "text": "".join(vocab[t] for t in prompt_ids)},
         "steps": steps,
         "generated": {"tokens": seq[len(prompt_ids) :], "text": "".join(vocab[t] for t in seq[len(prompt_ids) :])},
+        "spec": {},
     }
 
 
@@ -501,7 +506,7 @@ def _generate_with_spec_records(
     seed: int,
     spec: str,
     k: int | None,
-    drafter: object,
+    drafter: MTPDrafter | DSparkDrafter,
 ) -> GenerationRecord:
     """Spec-mode record: the spec engine makes the tokens; the record shows
     the VERIFICATION passes — one captured ``forward_chunk`` per round.

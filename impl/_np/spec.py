@@ -308,9 +308,10 @@ class SpeculativeGenerator:
         draft: np.ndarray,
         k_eff: int,
         emitted: list[int],
+        *,
         draft_probs: list[np.ndarray],
-        temperature: float = 1.0,
-        rng: np.random.Generator = None,
+        temperature: float,
+        rng: np.random.Generator,
     ) -> tuple[list[bool], int, np.ndarray]:
         """Rejection-sampling acceptance walk (the theorem; NumPy only).
 

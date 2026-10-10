@@ -220,13 +220,16 @@ class MTPDrafter:
         self.out_norm = RMSNorm(D)
         self.reset()
 
+    _cache: dict[str, np.ndarray]
+
     def reset(self) -> None:
         """Fresh sequence: empty the drafter's KV cache."""
         B, G, hd = 1, self.block.self_attn.n_groups, self.block.self_attn.head_dim
-        self._cache = {
+        cache: dict[str, np.ndarray] = {
             "k": np.zeros((B, G, 0, hd), dtype=np.float32),
             "v": np.zeros((B, G, 0, hd), dtype=np.float32),
         }
+        self._cache = cache
 
     def draft(self, anchor_token: np.ndarray, anchor_hidden: np.ndarray, k: int) -> tuple[np.ndarray, list[np.ndarray]]:
         """Propose up to k tokens after the anchor, sequentially.
@@ -309,8 +312,10 @@ class MTPDrafter:
             Contract: the cache ends holding 1+keep rows, aligned with the
             committed sequence; the engine calls this after every round."""
         n = 1 + keep
-        self._cache["k"] = self._cache["k"][:, :, :n]
-        self._cache["v"] = self._cache["v"][:, :, :n]
+        cache_k = self._cache["k"]
+        cache_v = self._cache["v"]
+        self._cache["k"] = np.ascontiguousarray(cache_k[:, :, :n])
+        self._cache["v"] = np.ascontiguousarray(cache_v[:, :, :n])
 
     # ── sidecar I/O ────────────────────────────────────────────────────────
     def get_all_parameters(self) -> dict[str, np.ndarray]:

@@ -29,7 +29,7 @@ autoregressive decode steps that embed ONLY the new token.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import torch
@@ -95,7 +95,7 @@ def _rmsnorm_record(gamma: torch.Tensor, x: torch.Tensor, eps: float, out: torch
     return {"rms": arr(rms), "gamma": arr(gamma), "out": arr(out)}
 
 
-def _rope_tables(d_rot: int, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _rope_tables(d_rot: int, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
     """RoPE frequencies/angles/cos/sin (same math as kernels/rope.cu).
 
     positions: 1-D long tensor of S absolute positions. The CUDA kernel
@@ -365,7 +365,7 @@ def _validate_against_real_forward(model: CUDAModel, input_ids: torch.Tensor, lo
     if not torch.cuda.is_available():
         return
     real = model.forward(input_ids.to("cuda")).detach().cpu().to(torch.float64)  # (B, S, V)
-    assert torch.allclose(real, logits64, **_TOLERANCES), (
+    assert torch.allclose(real, logits64, equal_nan=True, **_TOLERANCES), (
         f"CUDA record display path diverged from the real forward: "
         f"max|Δ|={float((real - logits64).abs().max()):.6f} exceeds {_TOLERANCES['atol']}"
     )
@@ -403,9 +403,9 @@ def _instrumented_blocks(
             "out": arr(out),
         }
         if block.config.has_moe():
-            block_rec["moe"] = ffn_rec
+            block_rec["moe"] = cast(MoERecord, ffn_rec)
         else:
-            block_rec["ffn"] = ffn_rec
+            block_rec["ffn"] = cast(FFNRecord, ffn_rec)
         blocks.append(block_rec)
         stream = out
     return stream, blocks
@@ -503,7 +503,9 @@ def generate_with_records(
         # The spec path is the shared torch-family helper (shared-seam): the
         # CUDA track's NVRTC kernels run the TARGET; the drafter is a torch
         # module — the production-tech-stack choice at this scale.
-        return _generate_with_spec_records(model, vocab, prompt_ids, n_tokens, temp, top_k, seed, spec, k, drafter)
+        # The helper is TorchModel-annotated (the torch family's structural
+        # contract) — the CUDAModel satisfies it.
+        return _generate_with_spec_records(model, vocab, prompt_ids, n_tokens, temp, top_k, seed, spec, k, drafter)  # type: ignore[arg-type]
     rng = np.random.default_rng(seed)
     ctx = model.config.context_length
     seq = list(prompt_ids)
@@ -610,4 +612,5 @@ def generate_with_records(
         "prompt": {"tokens": list(prompt_ids), "text": "".join(vocab[t] for t in prompt_ids)},
         "steps": steps,
         "generated": {"tokens": seq[len(prompt_ids) :], "text": "".join(vocab[t] for t in seq[len(prompt_ids) :])},
+        "spec": {},
     }

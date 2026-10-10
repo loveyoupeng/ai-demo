@@ -57,9 +57,9 @@ def arr(t: torch.Tensor) -> list:
 # ---------------------------------------------------------------------------
 
 
-def _rmsnorm_record(gamma: torch.Tensor, x: torch.Tensor, eps: float, out: torch.Tensor) -> NormRecord:
+def _rmsnorm_record(gamma: torch.Tensor, x: torch.Tensor, eps: float | None, out: torch.Tensor) -> NormRecord:
     """Capture an RMSNorm: the rms scalar per row, gamma, output."""
-    rms = torch.sqrt(torch.mean(x * x, dim=-1, keepdim=True) + eps)  # (B, S, 1)
+    rms = torch.sqrt(torch.mean(x * x, dim=-1, keepdim=True) + (eps or 1e-6))  # (B, S, 1)
     return {"rms": arr(rms), "gamma": arr(gamma), "out": arr(out)}
 
 
@@ -417,7 +417,9 @@ def generate_with_records(
       }
     """
     if spec in ("mtp", "dspark"):
-        return _generate_with_spec_records(model, vocab, prompt_ids, n_tokens, temp, top_k, seed, spec, k, drafter)
+        # The helper is TorchModel-annotated (the torch family's structural
+        # contract) — the TritonModel satisfies it.
+        return _generate_with_spec_records(model, vocab, prompt_ids, n_tokens, temp, top_k, seed, spec, k, drafter)  # type: ignore[arg-type]
     ctx = model.config.context_length
     seq = list(prompt_ids)
     steps: list[StepRecord] = []
@@ -530,7 +532,7 @@ def generate_with_records(
         top_idx = torch.argsort(p[0, 0], descending=True)[:top_n]  # top-10 (single position)
         top_tokens = [[int(k), float(p[0, 0, k])] for k in top_idx.tolist()]
 
-        rec = {
+        rec: ForwardRecord = {
             "input_ids": x1.tolist(),
             "embedding": arr(emb),
             "positions": [t],
@@ -562,4 +564,5 @@ def generate_with_records(
         "prompt": {"tokens": list(prompt_ids), "text": "".join(vocab[t] for t in prompt_ids)},
         "steps": steps,
         "generated": {"tokens": seq[len(prompt_ids) :], "text": "".join(vocab[t] for t in seq[len(prompt_ids) :])},
+        "spec": {},
     }

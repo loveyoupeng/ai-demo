@@ -48,6 +48,7 @@ production engine, the counterpart of ``impl/_np/spec.py``).
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 
 import numpy as np
 import torch
@@ -223,7 +224,7 @@ class _DrafterBlock(nn.Module):
 
 def _load_into_binding(
     meta: DrafterMeta,
-    params: dict[str, torch.Tensor | np.ndarray],
+    params: Mapping[str, torch.Tensor | np.ndarray],
     binding: dict[str, torch.Tensor],
 ) -> None:
     """Copy sidecar arrays into their owning tensors, transposing the keys
@@ -364,7 +365,7 @@ class TorchMTPDrafter(nn.Module):
         flags = {key: t for key, _shape, t in expected_drafter_params(self.meta)}
         return {k: (v.T if flags[k] else v).detach().cpu().numpy() for k, v in self._sidecar_binding().items()}
 
-    def load_from_numpy_dict(self, params: dict[str, torch.Tensor | np.ndarray]) -> None:
+    def load_from_numpy_dict(self, params: Mapping[str, torch.Tensor | np.ndarray]) -> None:
         """Copy sidecar arrays into the modules (transposes applied)."""
         _load_into_binding(self.meta, params, self._sidecar_binding())
 
@@ -457,14 +458,14 @@ class TorchDSparkDrafter(nn.Module):
         flags = {key: t for key, _shape, t in expected_drafter_params(self.meta)}
         return {k: (v.T if flags[k] else v).detach().cpu().numpy() for k, v in self._sidecar_binding().items()}
 
-    def load_from_numpy_dict(self, params: dict[str, torch.Tensor | np.ndarray]) -> None:
+    def load_from_numpy_dict(self, params: Mapping[str, torch.Tensor | np.ndarray]) -> None:
         """Copy sidecar arrays into the modules (transposes applied)."""
         _load_into_binding(self.meta, params, self._sidecar_binding())
 
 
 def drafter_from_sidecar(
     meta: DrafterMeta,
-    params: dict[str, torch.Tensor | np.ndarray],
+    params: Mapping[str, torch.Tensor | np.ndarray],
     embedding_weight: torch.Tensor,
     lm_head_weight: torch.Tensor,
 ) -> TorchMTPDrafter | TorchDSparkDrafter:

@@ -115,12 +115,12 @@ class CuDecoderStack:
             out = block.forward(out, positions=positions)
         return out
 
-    def _forward_state(
+    def forward_state(
         self, x: torch.Tensor, positions: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
         """Forward through all blocks, capturing each block's attention state.
 
-        Mirrors ``impl._torch.layers.DecoderStack._forward_state``: the
+        Mirrors ``impl._torch.layers.DecoderStack.forward_state``: the
         model's prefill requests the state and backfills the per-layer
         cache — no second pass.
 
@@ -129,7 +129,7 @@ class CuDecoderStack:
         states: list[dict[str, torch.Tensor]] = []
         out = x
         for block in self.blocks:
-            out, block_state = block._forward_state(out, positions)
+            out, block_state = block.forward_state(out, positions)
             states.append(block_state)
         return out, states
 

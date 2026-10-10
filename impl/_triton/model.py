@@ -103,7 +103,7 @@ class TritonModel(nn.Module):
         states: list[dict[str, torch.Tensor]] = []
         x = self.embedding(input_ids)  # (B, S, D)
         for block in self.stack.blocks:
-            x, block_state = block._forward_state(x, positions)
+            x, block_state = block.forward_state(x, positions)
             states.append(block_state)
         x_final = self.final_norm(x)  # (B, S, D)
         logits = self.lm_head(x_final)  # (B, S, V)

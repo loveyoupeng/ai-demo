@@ -86,9 +86,9 @@ class TestTorchFamilyChunkParity:
 
             model = CUDAModel(cfg)
             device = torch.device("cuda")
-        model.load_from_numpy_dict({k: v.copy() for k, v in _params_np(ref).items()})
+        model.load_from_numpy_dict({k: v.copy() for k, v in _params_np(ref).items()})  # type: ignore
         if hasattr(model, "eval"):
-            model.eval()
+            model.eval()  # type: ignore
 
         cache = model.make_cache(1)
         ids_t = torch.tensor(ids, dtype=torch.int64, device=device)

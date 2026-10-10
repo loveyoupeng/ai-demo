@@ -449,7 +449,7 @@ class _RoPECudaFunction(torch.autograd.Function):
     def backward(
         ctx: Any,
         *grad_outputs: torch.Tensor,
-    ) -> tuple[torch.Tensor, None]:
+    ) -> tuple[torch.Tensor, None, None]:
         """Backward pass: apply inverse rotation to gradient tensor.
 
         The backward of RoPE is the transpose of the forward rotation:

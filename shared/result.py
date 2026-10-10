@@ -110,16 +110,31 @@ class Result(Generic[R, C]):
         return cls(value, Context(backward, display, record or {}))
 
     # ── the tuple-unpacking migration path ────────────────────────────────
+    # ── access methods (the typed interface — no dual-mode overloading) ────
+    def unwrap(self) -> R:
+        """THE result. The primary access for callers that don't read the
+        capture."""
+        return self.value
+
+    def unwrap_with(self) -> tuple[R, dict]:
+        """The migration form: (value, flat merged ctx) — the pre-wrapper
+        tuple shape, for tests/one-off callers that index the flat dict.
+        New code reads .ctx.backward / .ctx.display directly."""
+        return self.value, self.ctx.merged()
+
     def __iter__(self):
-        """``out, state = result`` returns (value, flat merged ctx) — the
-        pre-wrapper shape, so existing callers/tests keep working."""
+        """Tuple unpacking: ``out, state = result`` yields
+        (value, flat merged ctx) — the pre-wrapper shape, so existing
+        callers/tests keep working. (Legacy __getitem__-based iteration
+        would also work, but an explicit __iter__ is the typed contract.)"""
         return iter((self.value, self.ctx.merged()))
 
     def __getitem__(self, key: int | str):
         """Two access modes, both contract: an int is the tuple position
-        (0 = value, 1 = the flat merged ctx — the migration path); a str
-        is a capture-key lookup into the flat merged ctx (so
-        ``result["logits"]`` works like the pre-wrapper flat dict did)."""
+        (0 = value, 1 = the flat merged ctx — also the legacy-iteration
+        fallback for unpacking); a str is a capture-key lookup into the
+        flat merged ctx (so result["logits"] works like the pre-wrapper
+        flat dict did)."""
         if isinstance(key, str):
             return self.ctx.merged()[key]
         return (self.value, self.ctx.merged())[key]

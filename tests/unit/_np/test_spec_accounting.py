@@ -17,6 +17,8 @@ Two contracts pinned here (from the 2026-10-09 architecture review):
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -72,21 +74,30 @@ class TestHonestForwardAccounting:
 
 
 class _HandlerHarness:
-    """A handler instance without a socket (endpoint methods callable)."""
+    """A wrapper around a socketless handler instance (endpoint methods
+    callable). The wrapped handler's attrs are typed on _LearningHandler;
+    the harness re-exposes the three methods the tests call, delegating to
+    the wrapped instance — pyright sees real types on both sides.
+    """
 
-    def __new__(cls, backend: str = "numpy"):
-        model, vocab, cfg, tok = load_learning_model("resource/models/learning_tool", backend="numpy")
+    def __init__(self, backend: str = "numpy"):
+        model, vocab, _cfg, tok = load_learning_model("resource/models/learning_tool", backend="numpy")
         Handler = make_handler(
             model, vocab, backend="numpy", model_dir="resource/models/learning_tool", default_spec="mtp"
         )
-        inst = Handler.__new__(Handler)
-        inst.model = model
-        inst.vocab = vocab
-        inst.tokenizer = tok
-        inst.backend = backend
-        inst.model_dir = "resource/models/learning_tool"
-        inst._drafter_cache = {}
-        return inst
+        self._inst: Any = Handler.__new__(Handler)
+        self._inst.model = model
+        self._inst.vocab = vocab
+        self._inst.tokenizer = tok
+        self._inst.backend = backend
+        self._inst.model_dir = "resource/models/learning_tool"
+        self._inst._drafter_cache = {}
+
+    def _decode_spec_params(self, body: dict) -> tuple[str, int | None]:
+        return self._inst._decode_spec_params(body)  # type: ignore[attr-defined]
+
+    def _run_record(self, body: dict) -> dict:
+        return self._inst._run_record(body)  # type: ignore[attr-defined]
 
 
 class TestEndpointValidation:
@@ -118,6 +129,6 @@ class TestEndpointValidation:
         torch-family model must raise (same answer as /api/inference)."""
         inst = _HandlerHarness()
         tm, *_ = load_learning_model("resource/models/learning_tool", backend="torch")
-        inst.model = tm
+        inst._inst.model = tm
         with pytest.raises(ValueError, match="NumPy track only"):
             inst._run_record({"text": "Once upon a time", "n_tokens": 6, "temperature": 0.8, "spec": "mtp", "k": 4})

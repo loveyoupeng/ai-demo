@@ -84,10 +84,9 @@ class SwiGLUFFN:
         Contract: out = (SiLU(x@Wg) ⊙ (x@Wu)) @ Wd — two parallel
         projections meet at the elementwise product; Wd compresses back
         to D. Positionwise (no cross-token mixing)."""
-        out, _state = self._forward_state(x)
-        return out
+        return self.forward_state(x).unwrap()
 
-    def _forward_state(self, x: np.ndarray) -> Result[np.ndarray, dict]:
+    def forward_state(self, x: np.ndarray) -> Result[np.ndarray, dict]:
         """SwiGLU forward; return THE result + the captured context.
 
         Returns a ``Result`` (shared/result.py): ``.value`` = the SwiGLU

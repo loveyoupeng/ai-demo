@@ -186,7 +186,7 @@ class CUDAModel:
         x = self.embedding_weights.to(device)[input_ids]  # (B, S, D)
         # Capture each block's attention state while forwarding (no second pass).
         for block in self.stacking.blocks:
-            x, block_state = block._forward_state(x, positions)
+            x, block_state = block.forward_state(x, positions)
             states.append(block_state)
         x = _rmsnorm(x, self.final_norm_gamma.to(device), eps=self.config.norm_eps)  # (B, S, D)
         logits = x @ self.lm_head_weight.to(device)  # (B, S, V)

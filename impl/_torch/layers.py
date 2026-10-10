@@ -206,10 +206,9 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, positions: torch.Tensor | None = None) -> torch.Tensor:
         """Multi-head attention forward. x: (B, S, D) → out: (B, S, D)."""
-        out, _state = self._forward_state(x, positions)
-        return out
+        return self.forward_state(x, positions).unwrap()
 
-    def _forward_state(self, x: torch.Tensor, positions: torch.Tensor | None = None) -> Result[torch.Tensor, dict]:
+    def forward_state(self, x: torch.Tensor, positions: torch.Tensor | None = None) -> Result[torch.Tensor, dict]:
         """Forward pass; return THE result + the captured context (the same
         ``Result`` contract as the NumPy reference — shared/result.py).
 
@@ -219,7 +218,7 @@ class MultiHeadAttention(nn.Module):
         ``.ctx.backward`` is empty (autograd owns the gradient context on
         this track); tuple unpacking (``out, state = ...``) still works.
 
-        Mirrors ``impl._np.attention.MultiHeadAttention._forward_state``.
+        Mirrors ``impl._np.attention.MultiHeadAttention.forward_state``.
         """
         batch_size, seq_len, _ = x.shape
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
@@ -512,18 +511,19 @@ class TransformerBlock(nn.Module):
         ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, S, D)
         return h + ff_out  # (B, S, D)
 
-    def _forward_state(
+    def forward_state(
         self, x: torch.Tensor, positions: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Block forward plus the attention K/V state the cache needs.
 
-        Mirrors ``impl._np.block.TransformerBlock._forward_state``:
+        Mirrors ``impl._np.block.TransformerBlock.forward_state``:
         ``forward`` calls this and drops the state; the prefill path
         requests it and backfills the per-layer cache — no second pass.
 
         Returns (out (B, S, D), {"k_group": (B, G, S, hd), "v_group": (B, G, S, hd)}).
         """
-        attn_out, attn_state = self.self_attn._forward_state(self.input_layernorm(x), positions)
+        attn_res = self.self_attn.forward_state(self.input_layernorm(x), positions)
+        attn_out, attn_state = attn_res.unwrap_with()
         h = x + attn_out  # (B, S, D)
         ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, S, D)
         return h + ff_out, attn_state
@@ -588,7 +588,7 @@ class DecoderStack(nn.Module):
             out = block(out, positions)
         return out
 
-    def _forward_state(
+    def forward_state(
         self, x: torch.Tensor, positions: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
         """Forward through all blocks, capturing each block's attention state.
@@ -602,7 +602,7 @@ class DecoderStack(nn.Module):
         states: list[dict[str, torch.Tensor]] = []
         out = x
         for block in self.blocks:
-            out, block_state = block._forward_state(out, positions)
+            out, block_state = block.forward_state(out, positions)
             states.append(block_state)
         return out, states
 
@@ -727,7 +727,7 @@ class TorchModel(nn.Module):
         states: list[dict[str, torch.Tensor]] = []
         x = self.embedding(input_ids)  # (B, S, D)
         for block in self.stack.blocks:
-            x, block_state = block._forward_state(x, positions)
+            x, block_state = block.forward_state(x, positions)
             states.append(block_state)
         x_final = self.final_norm(x)  # (B, S, D)
         logits = self.lm_head(x_final)  # (B, S, V)

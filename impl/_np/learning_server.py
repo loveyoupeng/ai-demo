@@ -223,7 +223,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
         try:
             ckpt_dir = os.environ.get("AI_DEMO_LEARNING_MODEL", DEFAULT_MODEL_DIR)
             # Same factory the CLI uses; returns (model, vocab, cfg, tokenizer).
-            model, _vocab, _cfg, _tok = load_learning_model(ckpt_dir, backend=backend)
+            model, _vocab, _cfg, _tok = load_learning_model(ckpt_dir, backend=backend)  # type: ignore
             return model
         except Exception:
             logger.exception("backend %r not loadable on this host", backend)
@@ -339,7 +339,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
         fam = "np" if isinstance(self.model, NumPyModel) else "torch"
         sub = ""
         if fam == "torch":
-            p = next(self.model.parameters(), None) if hasattr(self.model, "parameters") else None
+            p = next(self.model.parameters(), None) if hasattr(self.model, "parameters") else None  # type: ignore
             if p is not None:
                 sub = f":{p.device}:{p.dtype}"
         key = f"{fam}{sub}:{family}"
@@ -358,7 +358,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
             from shared.device_util import compute_device, shared_embedding_and_head
 
             emb, lm = shared_embedding_and_head(self.model)
-            drafter = drafter_from_sidecar(meta, params, emb, lm)
+            drafter = drafter_from_sidecar(meta, params, emb, lm)  # type: ignore
             drafter = drafter.to(device=compute_device(self.model))
             if hasattr(drafter, "eval"):
                 drafter.eval()
@@ -693,7 +693,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
                 from impl._triton import learning as triton_learning
 
                 record = triton_learning.generate_with_records(
-                    model,
+                    model,  # type: ignore
                     self.vocab or [],
                     list(ids),
                     n,
@@ -708,7 +708,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
                 from impl._cuda import learning as cuda_learning
 
                 record = cuda_learning.generate_with_records(
-                    model,
+                    model,  # type: ignore
                     self.vocab or [],
                     list(ids),
                     n,

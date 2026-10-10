@@ -308,6 +308,7 @@ class TestRoPECUDA:
         y = apply_rope(x, positions, rope_dim=rope_dim)
         y.backward(torch.tensor(dout_np, dtype=torch.float64, device="cuda"))
         dx_cuda = x.grad
+        assert dx_cuda is not None  # x requires_grad — the autograd engine filled it
 
         # NumPy analytic backward (verified reference)
         dx_ref = RoPE().backward(dout_np, x_np, pos_np.astype(np.int32), rope_dim=rope_dim)
