@@ -127,4 +127,4 @@ instead of the tool call.
 
 What they do *not* model is RoPE + GQA and why they're required to make
 the response logits cross the sequence boundary at pocket scale. See
-`docs/specs/architecture-fixes.md`.
+`docs/architecture/design.md`.

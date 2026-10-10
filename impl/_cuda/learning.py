@@ -95,7 +95,9 @@ def _rmsnorm_record(gamma: torch.Tensor, x: torch.Tensor, eps: float, out: torch
     return {"rms": arr(rms), "gamma": arr(gamma), "out": arr(out)}
 
 
-def _rope_tables(d_rot: int, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+def _rope_tables(
+    d_rot: int, positions: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
     """RoPE frequencies/angles/cos/sin (same math as kernels/rope.cu).
 
     positions: 1-D long tensor of S absolute positions. The CUDA kernel

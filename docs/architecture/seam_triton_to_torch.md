@@ -33,8 +33,10 @@ through a third location, hiding the fact that the Triton track is a PyTorch
 model with a Triton attention core. The explicit import from `impl._torch`
 makes the dependency visible at the import site (a one-line comment:
 `# shared-seam: torch building block reused by triton`), and it makes the
-one-way rule easy to enforce: the PyTorch track has *no* imports from the
-Triton track (verified by a grep), so a cycle is impossible.
+one-way rule easy to enforce: the PyTorch track's *model* code has *no*
+imports from the Triton track (verified by a grep below; the one reverse
+import is the documented learning-record dispatch above), so a math cycle
+is impossible.
 
 ## Rules
 
@@ -61,8 +63,11 @@ Triton track (verified by a grep), so a cycle is impossible.
 ## Verifying the seam
 
 ```bash
-# The PyTorch track must not import from the Triton track (one-way rule).
-grep -r "from impl._triton" impl/_torch/   # expect: no matches
+# The PyTorch track's model code must not import from the Triton track
+# (one-way rule). The learning-record dispatch is the only allowed reverse
+# import, and it is function-local in impl/_torch/learning.py.
+grep -rn "from impl._triton" impl/_torch/ --include="*.py" | grep -v "learning.py"
+# expect: no matches (learning.py holds the documented dispatch)
 
 # The Triton track's cross-track imports (the seam, documented).
 grep -rn "from impl._torch" impl/_triton/  # expect: the RoPE import above

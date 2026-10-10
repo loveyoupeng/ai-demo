@@ -1,5 +1,5 @@
 """Speculative decoding tests — the lossless contract, chunk parity, and
-sidecar round-trips (ADR 0003; docs/specs/speculative-decoding.md).
+sidecar round-trips (ADR 0003; docs/architecture/adr/0003-speculative-decoding-drafters.md).
 
 The seams (highest first, per the spec's Testing Decisions):
 

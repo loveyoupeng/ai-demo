@@ -1,7 +1,7 @@
 # ADR 0001: Abandon "gated residual" for the standard additive residual
 
 **Status**: Accepted (2026-09-14)
-**Related**: [architecture-fixes.md](../specs/architecture-fixes.md)
+**Related**: [design.md](../design.md)
 
 ## Context
 

@@ -44,7 +44,7 @@ out = (Σ_s E_shared_s(x)) / n_shared_experts + Σ_j∈topk wⱼ·E_j(x)
   probability mass from the softmax and entangles the shared expert's gradient
   with the routing distribution — pedagogically muddier, and numerically no
   better in the literature.
-- **Per-layer choice of shared/routed (some layers dense)**: rejected — one
+- **Per-layer choice of shared vs routed (some layers dense)**: rejected — one
   knob for all layers keeps the config legible; this is a teaching repo.
 - **NumPy-track-only implementation**: rejected; it would break the
   cross-backend equivalence invariant that justifies the repo's existence.

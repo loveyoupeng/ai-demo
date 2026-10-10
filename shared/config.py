@@ -45,7 +45,7 @@ class TransformerConfig:
     top_k: int = 1  # Top-k experts per token (1 <= top_k <= n_experts)
     expert_dim: int = 0  # FFN hidden dimension; 0 = 4 * embed_dim (standard)
     # n_shared_experts > 0 (MoE only) → DeepSeek-style always-on ungated
-    # experts: out = mean(E_shared(x)) + Σ wⱼ·E_j(x). See docs/adr/0002.
+    # experts: out = mean(E_shared(x)) + Σ wⱼ·E_j(x). See docs/architecture/adr/0002-shared-expert-moe.md.
     n_shared_experts: int = 0
 
     # Training

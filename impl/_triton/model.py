@@ -3,7 +3,7 @@
 Track intent: **how to write the kernels** — memory-traffic-aware GPU
 kernels (online softmax / FlashAttention in ``flash_attn.py``) over the
 PyTorch model skeleton. The RoPE operator is imported from the PyTorch track
-via the documented shared seam (``docs/seam_triton_to_torch.md``).
+via the documented shared seam (``docs/architecture/seam_triton_to_torch.md``).
 
 Forward (same layout as the NumPy/PyTorch tracks):
 

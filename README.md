@@ -28,20 +28,21 @@ Each track answers a different question about the *same* model:
 Because all four implement bit-comparable behavior on one checkpoint format,
 you can trace the same tensor through four increasingly low-level lenses.
 
-See [CONTEXT.md](CONTEXT.md) for the domain glossary,
-[docs/theory/transformer-walkthrough.md](docs/theory/transformer-walkthrough.md)
-for a stage-by-stage tour of the forward pass (equations + code pointers,
-including speculative decoding),
-[docs/theory/training-pipeline.md](docs/theory/training-pipeline.md) for the
-pre-train → SFT → tool-call pipeline and the drafter-distillation stage,
-[docs/specs/architecture-fixes.md](docs/specs/architecture-fixes.md) for the
-architecture spec and progress,
-[docs/specs/speculative-decoding.md](docs/specs/speculative-decoding.md)
-for the speculative-decoding spec,
-[docs/seam_triton_to_torch.md](docs/seam_triton_to_torch.md) for the
-documented Triton→PyTorch shared seam, the [ADRs](docs/adr/) for the
-irreversible decisions (residual, shared-expert MoE, drafter sidecars), and
-[AGENTS.md](AGENTS.md) for repository guidelines and development rules.
+## Where to read what
+
+| Question | One owner |
+| --- | --- |
+| What does *GQA / RoPE / SwiGLU / KV cache* mean? | [CONTEXT.md](CONTEXT.md) — the domain glossary + shape notation |
+| How does the forward pass work, equation by equation? | [docs/math/transformer-walkthrough.md](docs/math/transformer-walkthrough.md) |
+| How were the demo checkpoints trained (pre-train → SFT → tool)? | [docs/math/training-pipeline.md](docs/math/training-pipeline.md) |
+| Why these design decisions? Which are irreversible? | [docs/architecture/design.md](docs/architecture/design.md) + the [ADRs](docs/architecture/adr/) |
+| What is the Triton→PyTorch seam? | [docs/architecture/seam_triton_to_torch.md](docs/architecture/seam_triton_to_torch.md) |
+| What docstring style does the code follow? | [docs/reference/docstring_style.md](docs/reference/docstring_style.md) |
+| How do I develop here (rules, tooling, tests)? | [AGENTS.md](AGENTS.md) |
+
+Finished task specs are deleted — the git history is the record.
+`uv run python -m scripts.check_docs` verifies the docs against the code
+(referenced paths exist, claimed counts match the source).
 
 ## The learning-mode example model
 
@@ -102,77 +103,12 @@ whole prompt, each decode appends one row), but the math above is unchanged —
 see `NumPyModel.make_cache` / `forward_prefill` / `forward_step` in
 `impl/_np/model.py`.
 
-### The math and the intuition, per component
-
-Shape letters used below: **S** = the number of token positions in this
-forward pass (the sequence length — prefill: the whole prompt; a decode
-step: 1, the past lives in the KV cache and is never re-fed), **D** =
-`embed_dim` = 64, the model width (the vector length each token becomes),
-**B** = batch size (how many *independent* sequences run side by side —
-they never interact; the axis exists so one matmul processes them
-together instead of B separate loops. Training batches ~32 chunks; the
-learning page is B = 1. It is not a kernel trick: the NumPy reference
-has it too — FlashAttention merely exploits it, launching one GPU
-program per (B, H, tile)), **V** =
-`vocab_size` = 512 (candidate next tokens), **H** = `n_heads` = 4 (the
-width splits into H heads of 16 = D/H), **E** = `n_experts` (MoE; 1 =
-dense), **FF** = `expert_dim` = 256 (the FFN's inner width). Full
-definitions: [CONTEXT.md](CONTEXT.md) → "Shape notation".
-
-**Embedding** — `x[s] = E[token[s]]`, a pure (512, 64) table row-gather.
-No arithmetic, and *no position information*: the same token id gets the same
-vector wherever it sits. Order enters later, inside attention, via RoPE.
-(`impl/_np/embedding.py`)
-
-**Two RMSNorms per block (LN1, LN2)** — math: `x̂_d = x_d / sqrt(mean_d(x²) + ε)`, then `y = γ ⊙ x̂` (64 learned gains per norm; no mean subtraction, no bias). *Why two?* Because two sublayers read the residual stream at different points: attention reads `x`, the FFN reads `h = x + attn(x)` — different scales, so each gets its own calibration. Attention is especially scale-sensitive: `q·k` grows quadratically with input magnitude, and softmax saturates (gradients die) on large scores. *Why pre-norm?* The norm sits **inside** the branch, not on the stream: `x` and `h` are never rewritten, only their copies are — the identity path through all 3 blocks stays exact. RMSNorm vs LayerNorm: the same stabilizing effect with one fewer statistic. (`impl/_np/layernorm.py`)
-
-**Attention (MHA)** — `q = x̂·Wq, k = x̂·Wk, v = x̂·Wv` turn one input into three roles (what I look for / what I advertise / what I pass on); `s_ij = q_i·k_j/√16` measures alignment — the `√16` keeps pre-softmax scores near unit variance; the causal mask sets `s_ij = −∞` for `j > i` so a position can only read its past; `A = softmax(s)` turns scores into a mixing recipe (rows sum to 1); `ctx_i = Σ_j A_ij·v_j` mixes content; `attn_out = ctx·Wo` merges the 4 heads back to width 64. This is the **only** stage where tokens exchange information — everything else is per-position. (`impl/_np/attention.py`)
-
-**RoPE** — head dims are grouped into pairs and rotated by `angle = position · 10000^(−2i/16)`. After rotation, `q·k` depends on the *relative distance* between positions, so attention can prefer nearby or fixed-offset tokens without any positions stored in the weights — which is why the embedding needs no position table. (`impl/_np/rope.py`)
-
-**Two residual adds** — `h = x + attn(LN1(x))`, `out = h + ffn(LN2(h))`. Each sublayer follows the same contract — *read the stream through its own norm, compute a delta, add it back* — so after 3 blocks the hidden state is `x + Σ(every block's two deltas)`; nothing is ever overwritten. The math of why depth trains: `∂h/∂x = I + ∂attn/∂x`, and the identity term carries gradients to the earliest block unshrunk (the "gradient highway"). Intuition: each block is a small correction, not a rewrite. (`impl/_np/block.py`)
-
-**Dense SwiGLU FFN (64 → 256 → 64)** — `out = (SiLU(x̂·Wg) ⊙ x̂·Wu)·Wd` with `SiLU(z) = z·σ(z)`. Two parallel projections: one computes *content*, the other a smooth *gate* (smooth at 0, unlike ReLU — no dead zones); their element-wise product is the non-linearity, and `Wd` compresses back to 64. Attention routes information *between* tokens; the FFN is where each token's content is actually processed — most parameters live here (49,152 of 65,664 per block). (`impl/_np/ffn.py`)
-
-**MoE — capacity without the compute** (opt-in, `n_experts > 1`) — the dense
-FFN's `Wg/Wu/Wd` are cloned E times (E experts); a tiny router scores every
-expert per token (`s = x̂·W_gate`), keeps the top-k, renormalizes
-(`w_j = p_j / Σ_topk p`), and the block computes
-`out = Σ_j w_j · E_j(x̂)` — every token pays for only k experts while the
-*parameter* count grows with E. With `n_shared_experts > 0` (ADR 0002) a
-few experts are always-on and ungated:
-`out = mean_s(E_shared_s(x̂)) + Σ_j w_j·E_j(x̂)` — the routed experts are
-freed to specialize because the common patterns live in the shared one.
-(`impl/_np/moe.py`; demonstrated end-to-end by the `learning_demo`
-checkpoint.)
-
-**Speculative decoding — aiming at several tokens per target forward**
-(ADR 0003) — generation's bottleneck is that the target must run a full
-forward per *one* token. Speculation splits the work: a tiny **drafter**
-proposes k candidate tokens; the **target verifies them all in ONE
-parallel pass** (`forward_chunk` appends all k tokens' K/V at once —
-chunk parity guarantees the scores equal step-by-step decoding); the
-longest agreeing prefix is committed, the target's own token fixes the
-first disagreement, and the rejected tail is rolled back out of the KV
-cache. One round costs two target passes (verify + the commit pass that
-forwards the correction token and computes the next anchor's hidden), so
-the win arrives only when the drafter's acceptance beats ~1 token/round —
-the engine's `n_target_forwards` stat counts what actually runs, and the
-learning page shows the measured tokens/sec honestly. Two drafter families,
-deliberately different architectures: **MTP** (DeepSeek-V3 style — one tiny
-block run k times sequentially, order from recurrence) and **DSpark**
-(arXiv 2607.05147 — a *non-causal* parallel backbone predicts all k slots
-at once, a causal refinement module repairs intra-block order, and the
-verify length is scheduled from online survival statistics at a 0.8
-target). Both share the target's embedding + lm_head and live as sidecar
-checkpoints distilled from the frozen target. Greedy spec output is
-**token-identical to plain greedy** — a bad drafter only costs speed, never
-correctness (`impl/_np/spec.py`, `shared/spec_engine.py`,
-`impl/_np/drafters.py`).
-
-**Final norm + lm_head** — the fully accumulated stream is RMSNormed once more, then `logits[s] = normed[s]·W_lm ∈ R^512`: every position is scored against every vocabulary row. The largest logit of the last position is the model's next-token guess; softmax (+ temperature / top-k) turns it into the sampling distribution. `lm_head` is deliberately *not* tied to the embedding — 512×64 parameters each, two separate matrices. (`impl/_np/model.py`)
-
-**Training pipeline** — same weights and architecture throughout; only the data changes: TinyStories → English fluency, code instructions → instruction→code behavior, tool calls → OpenAI-style JSON tool messages (teacher-forced next-token loss, AdamW; `scripts/train_demo_model_v2.py`, ~minutes on the Jetson).
+The **per-component math and intuition** (embedding → RMSNorm → attention →
+RoPE → residuals → SwiGLU → MoE → speculative decoding → lm_head, each with
+the equation, the *why*, and the code anchor) lives in one place:
+[docs/math/transformer-walkthrough.md](docs/math/transformer-walkthrough.md)
+(§1–§9). Shape letters (B, S, D, H, G, hd, V, E, FF) are defined once in
+[CONTEXT.md](CONTEXT.md) → "Shape notation".
 
 ## Features
 
@@ -204,7 +140,7 @@ correctness (`impl/_np/spec.py`, `shared/spec_engine.py`,
   `backward(dout, x) -> (dinput, dparams)`; `check_model_gradients` verifies
   it against finite differences (float64, ~1e-10, MoE top-k kink-aware).
 - **Cross-backend parity**: three-tier tolerance policy (see AGENTS.md rule
-  2); 62 cross-backend tests cover dense/GQA/MoE parity, speculative
+  2); the cross-backend suite covers dense/GQA/MoE parity, speculative
   decoding (chunk parity, spec-greedy ≡ plain-greedy, sidecar round-trip
   across tracks), GPU parity, and a 3-way equivalence demo;
   `scripts.verify_equivalence` runs 9 end-to-end scenarios (incl.
@@ -219,12 +155,12 @@ correctness (`impl/_np/spec.py`, `shared/spec_engine.py`,
   predecessors/successors) and per-block numbers, and downloadable JSON
   inference records of every intermediate tensor. The page runs records on
   all four backends via an in-page dropdown; the CLI `--backend numpy|torch`
-  only picks which track the startup load materializes. All record adapters
+  only picks the track the startup load materializes. All record adapters
   emit the same JSON shapes, so the page consumes any backend
   interchangeably.
 - **Real-data training**: TinyStories (GPT-2 BPE, vocab 50,257) dataset
-  pipeline in `shared/dataset.py`, plus a char-level tokenizer for the tiny
-  demo model; unified train/infer scripts for all four backends.
+  pipeline in `shared/dataset.py`; unified train/infer scripts for all four
+  backends.
 
 ## Installation
 
@@ -260,7 +196,7 @@ uv run python -m impl._torch.cli \
 # Unified script (any backend, any checkpoint)
 uv run python -m scripts.infer --model resource/models/torch_real/ --backend torch --prompt "hello"
 
-# Speculative decoding (drafters distilled from the target; Sidecars land
+# Speculative decoding (drafters distilled from the target; sidecars land
 # under <model>/draft_{mtp,dspark}/)
 uv run python -m scripts.train_drafters                                  # distill both drafters
 uv run python -m scripts.infer --model resource/models/learning_tool/ --backend numpy \
@@ -268,7 +204,7 @@ uv run python -m scripts.infer --model resource/models/learning_tool/ --backend 
 uv run python -m scripts.infer --model resource/models/learning_tool/ --backend numpy \
     --spec dspark --prompt "Once upon a time"                             # DSpark
 uv run python -m scripts.infer --model resource/models/learning_tool/ --backend numpy \
-    --spec plain --prompt "Once upon a time"                              # no drafter (comparison)
+    --spec plain --prompt "Once upon a time"                             # no drafter (comparison)
 ```
 
 ### Learning mode (web page)
@@ -276,9 +212,9 @@ uv run python -m scripts.infer --model resource/models/learning_tool/ --backend 
 ```bash
 # Serves http://0.0.0.0:8080 by default; a first run bootstraps the
 # target via scripts.train_demo_model_v2 AND the drafter sidecars via
-# scripts.train_drafters. The page opens in MTP mode when sidecars exist
-# (the trained demo ships speculative); --spec plain|mtp|dspark picks
-# the startup mode.
+# scripts.train_drafters. The page starts in MTP mode when sidecars exist
+# (the trained demo ships speculative); --spec plain|mtp|dspark picks the
+# startup mode.
 uv run python -m scripts.learning
 uv run python -m scripts.learning --spec dspark
 
@@ -340,12 +276,15 @@ uv run python -m scripts.verify_equivalence
 # Quick mode / single scenario
 uv run python -m scripts.verify_equivalence --fast
 uv run python -m scripts.verify_equivalence --scenario gqa
+
+# Doc-vs-code alignment (paths + counts claimed in the docs)
+uv run python -m scripts.check_docs
 ```
 
 ### Testing
 
 ```bash
-# All CPU unit tests (NumPy + PyTorch + shared/root)
+# All CPU unit tests (NumPy + PyTorch + the shared package + repo-root tests)
 uv run pytest tests/unit/ -q --timeout=120 \
     --ignore=tests/unit/_cuda --ignore=tests/unit/_triton
 
@@ -381,20 +320,20 @@ shared/
 ├── draft.py     # Drafter protocol + sidecar checkpoint scheme (ADR 0003)
 ├── spec_engine.py # torch-family speculative engine (greedy verification)
 ├── sft_data.py  # SFT dataset helpers (prompt-masked targets)
-├── tokenizer.py # GPT-2 BPE + char-level tokenizers
+├── tokenizer.py # GPT-2 BPE tokenizer (AutoTokenizer factory)
 ├── dataset.py   # TinyStories pipeline
+├── device_util.py # compute-device helper
 └── utils/logger_setup.py
 docs/
-├── design.md                     # This-repo design document (tracks, seams, status)
-├── specs/architecture-fixes.md   # Architecture spec + progress of record
-├── specs/speculative-decoding.md # Spec-decoding spec + implementation record
-├── theory/transformer-walkthrough.md  # Forward-pass tour (incl. speculative decoding)
-├── theory/training-pipeline.md   # Pre-train → SFT → tool pipeline + drafter distillation
-├── seam_triton_to_torch.md       # Documented shared seam
-├── docstring_style.md            # numpydoc + shape convention
-├── adr/0001-gated-residual-abandonment.md
-├── adr/0002-shared-expert-moe.md
-└── adr/0003-speculative-decoding-drafters.md
+├── architecture/          # design + decisions
+│   ├── design.md          # doctrine, cross-track naming, key design decisions
+│   ├── seam_triton_to_torch.md  # the documented Triton→PyTorch shared seam
+│   └── adr/               # 0001 residual, 0002 shared experts, 0003 drafter sidecars
+├── math/                  # derivations + background
+│   ├── transformer-walkthrough.md  # forward-pass tour (incl. speculative decoding)
+│   └── training-pipeline.md        # pre-train → SFT → tool pipeline + drafter distillation
+└── reference/
+    └── docstring_style.md  # numpydoc + shape-comment convention
 scripts/
 ├── train.py               # Training loop (all backends)
 ├── infer.py               # Inference (all backends; --spec plain|mtp|dspark)
@@ -407,10 +346,11 @@ scripts/
 ├── train_real_tinystories.py
 ├── train_demo_model.py    # legacy char-level MoE demo model
 ├── train_demo_model_v2.py # learning_base/_sft/_tool pipeline
-└── download_tinystories.py
+├── download_tinystories.py
+└── check_docs.py          # doc-vs-code alignment check (paths + counts)
 tests/
-├── unit/           # Per-track unit tests + shared/root tests (incl. spec decoding)
-└── cross_backend/  # Parity tests (dense/GQA/MoE/spec decoding, GPU, 3-way; 62 tests)
+├── unit/           # Per-track unit tests + shared & repo-root tests (incl. spec decoding)
+└── cross_backend/  # Parity tests (dense/GQA/MoE/spec decoding, GPU, 3-way)
 resource/           # git-ignored: TinyStories data + model checkpoints
 ```
 
@@ -418,9 +358,11 @@ resource/           # git-ignored: TinyStories data + model checkpoints
 
 ```bash
 uv run ruff format . && uv run ruff check .
-uv run pyright .   # pyright config strictly includes shared/
+uv run pyright .   # repo-wide, 0 errors + 0 warnings
+uv run python -m scripts.check_docs
 uv run pytest tests/ -v
 ```
 
 All code must be free of `ruff` and `pyright` issues; all unit tests must
-carry a `pytest-timeout` timeout (see AGENTS.md).
+carry a `pytest-timeout` timeout. Development rules live in
+[AGENTS.md](AGENTS.md).

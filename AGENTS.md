@@ -7,14 +7,29 @@ NumPy (manual math + analytic backward — the teaching reference), PyTorch
 (autograd idiom), Triton (FlashAttention-style kernels over a PyTorch model),
 and CUDA (bare-metal NVRTC kernels). All tracks share one architecture, one
 config (`shared/config.py`), and one checkpoint key scheme
-(`shared/constants.py` + `shared/registry.py`), so a checkpoint trained on one
-track loads and runs on any other. Code is deliberately heavy on math
+(`shared/constants.py` + `shared/registry.py`), so a checkpoint trained on
+one track loads and runs on any other. Code is deliberately heavy on math
 documentation: formulas cite references and every matrix operation carries a
 shape comment.
 
-See [docs/specs/architecture-fixes.md](docs/specs/architecture-fixes.md) for the spec
-+ progress of record and [CONTEXT.md](CONTEXT.md)
-for the domain glossary.
+**Where each kind of knowledge lives** (docs reorganization of 2026-10-10 —
+link, never duplicate):
+
+- `CONTEXT.md` (root) — the domain glossary: every term defined once, shape
+  notation included. The single owner of definitions.
+- `README.md` (root) — project interface: what this is, quickstart, the
+  learning-mode model card, the full project-structure tree, usage.
+- `docs/architecture/` — `design.md` (doctrine + decisions), the
+  `seam_triton_to_torch.md` shared-seam contract, `adr/` (irreversible
+  decisions).
+- `docs/math/` — `transformer-walkthrough.md` (the forward-pass derivation
+  tour, code-anchored), `training-pipeline.md` (pre-train → SFT → tool
+  pipeline + drafter distillation).
+- `docs/reference/` — `docstring_style.md` (the numpydoc + shape-comment
+  convention this repo's docstrings follow).
+- Finished task specs are **deleted** — the git history is the record.
+  Doc-vs-code alignment is enforced by `scripts/check_docs.py` (referenced
+  paths must exist; claimed counts must match the source).
 
 ## Architecture & Data Flow
 
@@ -42,8 +57,9 @@ live as sidecar checkpoints (`<model>/draft_mtp/`, `<model>/draft_dspark/`
 token-identical to plain greedy (the lossless contract; NumPy additionally
 implements the rejection-sampling theorem for temperature mode). Drafters
 train by distillation (`scripts/train_drafters.py`, bootstrapped by
-learning mode); learning mode ships with MTP active (`--spec
-plain|mtp|dspark`), showing acceptance/TPS vs a paired plain run.
+learning mode); learning mode starts in MTP mode when sidecars exist
+(`--spec plain|mtp|dspark` overrides), showing acceptance/TPS vs a paired
+plain run.
 
 **NumPy backward:** every operator has a closed-form
 `backward(dout, x) -> (dinput, dparams)` (stateless — recomputes
@@ -66,7 +82,7 @@ differences (float64, ~1e-10, MoE top-k flip-aware).
 backends, selected per request via the in-page dropdown; each track has its
 own record adapter (`impl/_np/learning.py`, `impl/_torch/learning.py`,
 `impl/_triton/learning.py`, `impl/_cuda/learning.py`). The NumPy one consumes
-the track's own `_forward_state` hooks (bit-identical to the forward); the
+the track's own `forward_state` hooks (bit-identical to the forward); the
 PyTorch one runs the track's real forward and recomputes the attention
 intermediates with explicit ops (a documented display path, since the fused
 SDPA call exposes none). All four serialize into one shared JSON shape ("step
@@ -82,20 +98,8 @@ compare tab: `learning_base`, `learning_sft`). The legacy char-level MoE demo
 (`learning_demo`, `D=8, H=4, L=3, E=3+1 shared, V=20`,
 `scripts/train_demo_model.py`) can still be served via `--model`.
 
-## Key Directories
-
-| Path | Purpose |
-| --- | --- |
-| `impl/_np/` | NumPy reference track: per-operator modules, `model.py` (analytic backward + KV-step dict cache), `training.py`, `inference.py`, `spec.py` (speculative engine: greedy verify + rejection sampling), `drafters.py` (MTP/DSpark drafters), `sft.py`, `gradcheck.py`, `cli.py`, learning mode |
-| `impl/_torch/` | PyTorch track: `layers.py` (all nn.Modules, `TorchModel`), `training.py`, `inference.py`, `sft.py`, `learning.py`, `cli.py` |
-| `impl/_triton/` | Triton kernels over a PyTorch model: `attn.py`, `flash_attn.py` (online softmax), `ffn.py`, `moe.py`, `transformer.py`, `sft.py`, `learning.py`, `training.py`, `cli.py` |
-| `impl/_cuda/` | NVRTC bare-metal kernels: `compiler.py`, `attention.py`, `layernorm.py`, `rope.py`, `ffn.py`, `moe.py`, `model.py`, `training.py`, `sft.py`, `learning.py`, `cli.py` |
-| `shared/` | Cross-track backbone: `config.py` (`TransformerConfig`), `constants.py` (Keys), `registry.py`, `checkpoint.py`, `generator.py`, `draft.py` (Drafter protocol + sidecar scheme), `spec_engine.py` (torch-family speculative engine), `sft_data.py`, `tokenizer.py`, `dataset.py`, `utils/` |
-| `scripts/` | Unified `train.py`/`infer.py`/`learning.py` (all backends), `verify_equivalence.py` (9 scenarios incl. `spec_mtp_np_torch`/`spec_dspark_np_torch`), `sft.py`, `train_tokenizer.py`, `download_sft_data.py`, `train_real_tinystories.py`, `train_demo_model.py`, `train_demo_model_v2.py`, `train_drafters.py` (drafter distillation), `download_tinystories.py` |
-| `tests/` | `unit/` (root: shared, scripts, registry; plus `_np`, `_torch`, `_triton`, `_cuda`) and `cross_backend/` (62 parity tests) |
-| `docs/` | `specs/architecture-fixes.md` (spec + progress of record), `theory/transformer-walkthrough.md` (forward-pass tour), `theory/training-pipeline.md` (pretrain→SFT→tool pipeline), `seam_triton_to_torch.md`, `docstring_style.md`, `adr/`, `design.md` |
-| `resource/` | **git-ignored**: TinyStories JSON + `models/{numpy,torch,triton,cuda}_real`, the `models/learning_{base,sft,tool}` pipeline checkpoints, and `models/learning_demo` (legacy char-level demo) — recreate via scripts |
-| `CONTEXT.md` | Domain glossary |
+The full directory tree lives in [README.md](README.md) → "Project
+structure" (one owner, kept aligned by `scripts/check_docs.py`).
 
 ## Development Commands
 
@@ -104,39 +108,15 @@ uv sync   # Python 3.10; torch==2.13.0+cu132 via the pinned custom uv index
 
 # Lint / format / typecheck (must stay clean)
 uv run ruff format . && uv run ruff check .
-uv run pyright .   # pyright config include = ["shared"] only
+uv run pyright .   # repo-wide, 0 errors + 0 warnings
 
-# Inference (any track; defaults are a tiny model: vocab 256, D=16, L=1, H=2)
-uv run python -m impl._np.cli    --prompt "the" --max_new_tokens 10
-uv run python -m impl._torch.cli --prompt "the" --max_new_tokens 10
-uv run python -m impl._triton.cli --prompt "the" --max_new_tokens 10   # GPU
-uv run python -m impl._cuda.cli  --prompt "the" --max_new_tokens 10   # GPU
-uv run python -m impl._torch.cli --prompt "Once upon a" --max_new_tokens 50 \
-    --temperature 0.9 --top_k 20 --embed_dim 64 --n_layers 4 --n_heads 8
-
-# Learning mode (web page; bootstraps the learning_tool checkpoint via
-# scripts.train_demo_model_v2 AND the drafter sidecars via
-# scripts.train_drafters on first run; --spec plain|mtp|dspark picks the
-# startup decoding mode — default auto: mtp when sidecars exist)
-uv run python -m scripts.learning                        # http://0.0.0.0:8080
-uv run python -m scripts.learning --backend torch        # PyTorch-backend records
-uv run python -m scripts.learning --spec dspark          # start in DSpark mode
-
-# Speculative decoding (drafters distilled from the frozen target; sidecars
-# land under <model>/draft_{mtp,dspark}/)
-uv run python -m scripts.train_drafters
-uv run python -m scripts.infer --model resource/models/learning_tool/ --backend numpy \
-    --spec mtp --prompt "Once upon a time"
-
-# Training / data / verification (unified scripts, --backend numpy|torch|triton|cuda)
-uv run python -m scripts.train --backend torch [--synthetic] [--n_layers 2 --embed_dim 128]
-uv run python -m scripts.infer --model resource/models/torch_real/ --backend torch --prompt "hello"
-uv run python -m scripts.verify_equivalence [--fast] [--scenario gqa]
-uv run python -m scripts.train_real_tinystories              # ~150 MB, 4 backends
-uv run python -m scripts.train_real_tinystories --backends numpy,torch --num_batches 5 --suffix tmp
-uv run python -m scripts.train_demo_model [--backend cuda]   # learning-mode demo model
-uv run python -m scripts.download_tinystories
+# Doc-vs-code alignment check (paths/counts claimed in md must match reality)
+uv run python -m scripts.check_docs
 ```
+
+Full inference / training / learning-mode / verification commands live in
+[README.md](README.md) → "Usage" (one owner). The four commands above are
+the dev loop.
 
 ## Code Conventions & Common Patterns
 
@@ -159,15 +139,20 @@ uv run python -m scripts.download_tinystories
 4. **Strict type hints** on all interfaces; `from __future__ import
    annotations` at the top of every module.
 5. **Docstrings + shape comments** — numpydoc style (see
-   `docs/docstring_style.md`); math code cites its formula reference; matrix
-   ops carry shape comments, e.g. `# (B,S,H,hd) @ (H,hd,hd) -> (B,S,H,hd)`.
+   `docs/reference/docstring_style.md`); math code cites its formula
+   reference; matrix ops carry shape comments, e.g.
+   `# (B,S,H,hd) @ (H,hd,hd) -> (B,S,H,hd)`.
    Required in the NumPy track, encouraged elsewhere.
 6. **One storage binding per track** — checkpoint save/load walks
    `ParameterRegistry.entries`; adding a parameter means extending the
    registry, not a key list in a track.
-7. **Cross-track imports** — the only allowed seam is `impl/_triton →
-   impl/_torch` (RoPE); it is documented in `docs/seam_triton_to_torch.md`
-   with a `# shared-seam:` marker. Do not add other cross-track imports.
+7. **Cross-track imports** — the only allowed *model-math* seam is
+   `impl/_triton → impl/_torch` (RoPE); it is documented in
+   `docs/architecture/seam_triton_to_torch.md`
+   with a `# shared-seam:` marker. One documented reverse exception: the
+   learning-record dispatch (`impl/_torch/learning.py` function-locally
+   imports the triton/cuda record adapters, dispatching on model class) —
+   display plumbing, not model math. Do not add other cross-track imports.
 8. **Logging** — `logger = logging.getLogger(__name__)` per module; dotted
    logger names map 1:1 to file paths (`impl._np.attention` =
    `impl/_np/attention.py`). Educational logs show the math in motion (shape
@@ -176,39 +161,38 @@ uv run python -m scripts.download_tinystories
    the readable path instead of the production one, mark it with a one-line
    `# PROD: <what production would do> — <why/where>` comment; where the repo
    contains the production version, point at it (see
-   `docs/docstring_style.md`).
+   `docs/reference/docstring_style.md`).
 10. **Entry-point contract** — per-track `cli.py` files are single-track
     smoke demos on random weights (no checkpoint loading, no learning mode);
     all checkpoint-based or cross-backend entry points live in `scripts/`
     (`train.py`, `infer.py`, `learning.py`). New user-facing commands go in
     `scripts/`, never into a track's `cli.py`.
-11. After any change: `ruff format`, `ruff check`, and `pyright` must be
-    clean. If a request is unclear or has materially different approaches,
-    confirm with the user first; do not make technical or business
-    assumptions.
+11. After any change: `ruff format`, `ruff check`, `pyright`, and
+    `scripts.check_docs` must be clean. If a request is unclear or has
+    materially different approaches, confirm with the user first; do not
+    make technical or business assumptions.
 12. **Subagents** — never run more than 3 subagents in parallel at a time.
 
 ## Important Files
 
 - `shared/config.py` — `TransformerConfig`: single source of truth for every
-  dimension (GQA, RoPE, MoE); validated in
-  `__post_init__`, derived fields computed.
+  dimension (GQA, RoPE, MoE); validated in `__post_init__`, derived fields
+  computed.
 - `shared/constants.py` + `shared/registry.py` — the checkpoint contract
   (HF-Llama key scheme; format owner with `validate()`).
-- `shared/checkpoint.py` — `save_checkpoint` / `load_checkpoint`
-  (`config.json` + `model.npz`).
 - `impl/_np/model.py` — reference `NumPyModel` (forward, analytic backward,
-  `load_from_numpy_dict`); `impl/_np/cli.py` — single-track inference demo on
-  random weights (learning mode lives in `scripts/learning.py`).
+  `load_from_numpy_dict`); per-track `cli.py` files are single-track
+  inference demos on random weights.
 - `impl/_torch/layers.py` — PyTorch operator mirror (SDPA, GQA repeat before
   SDPA); `impl/_triton/transformer.py` — Triton stack + the documented seam.
-- `scripts/train.py`, `scripts/infer.py` — unified 4-backend entry points;
-  `scripts/verify_equivalence.py` — 7-scenario parity check.
-- `tests/conftest.py` (GPU isolation fixture) and
-  `tests/unit/_cuda/conftest.py` (NVRTC per-file context isolation).
-- `docs/specs/architecture-fixes.md` — spec + progress of record;
-  `docs/adr/0001-gated-residual-abandonment.md` — why the block uses the
-  standard additive residual.
+- `scripts/train.py`, `scripts/infer.py`, `scripts/learning.py` — unified
+  4-backend entry points; `scripts/verify_equivalence.py` — 9-scenario
+  parity check (`scripts.check_docs` pins the count).
+- `tests/unit/_cuda/conftest.py` — NVRTC per-file context isolation
+  (CUDA tests run one file per invocation).
+- `CONTEXT.md` — the domain glossary (every term + the shape notation);
+  `docs/architecture/adr/` — the irreversible decisions (residual,
+  shared-expert MoE, drafter sidecars).
 
 ## Runtime/Tooling Preferences
 
@@ -217,21 +201,23 @@ uv run python -m scripts.download_tinystories
   Optional extras: `triton`, `cuda` (`cuda-python`).
 - Ruff: `line-length = 120`, rules `E, W, F, I, UP, B, SIM, C90` (E501
   ignored — the formatter owns line length); `__init__.py` ignores F401.
-- Pyright: config `include = ["shared"]` — strictly checked is `shared/`;
-  keep `impl/` and `scripts/` clean anyway.
+- Pyright: repo-wide clean (`uv run pyright .` — 0 errors, 0 warnings;
+  the `include = ["shared"]` pyproject entry only sets the default IDE
+  scope).
 - Pytest: global `timeout = 300` (pytest-timeout), `gpu` marker (deselect
   with `-m "not gpu"`), `pythonpath = ["shared"]`, `testpaths = ["tests"]`.
 - Target hardware: Jetson (Orin sm_87 / GB10); GPU tests are slow and
   stateful — run them in separate invocations (see below).
 - `resource/` is fully git-ignored: TinyStories data and all checkpoints are
   local artifacts. Recreate: `scripts/train_real_tinystories` (real-data
-  checkpoints), `scripts/train_demo_model` (learning-mode demo),
-  `scripts/download_tinystories` (dataset).
+  checkpoints), `scripts/train_demo_model_v2` (learning-mode pipeline),
+  `scripts/train_demo_model` (legacy demo), `scripts/download_tinystories`
+  (dataset).
 
 ## Testing & QA
 
 ```bash
-# CPU unit tests (NumPy + PyTorch + shared/root)
+# CPU unit tests (NumPy + PyTorch + the shared package + repo-root tests)
 uv run pytest tests/unit/ -q --timeout=120 \
     --ignore=tests/unit/_cuda --ignore=tests/unit/_triton
 
@@ -246,18 +232,23 @@ done
 # Cross-backend parity tests (GPU)
 uv run pytest tests/cross_backend/ -q --timeout=120
 
-# Run only non-GPU tests anywhere
-uv run pytest tests/ -q -m "not gpu"
+# Doc-vs-code alignment (the docs' own test)
+uv run python -m scripts.check_docs
 ```
 
 - Every unit test must have a timeout (the global 300 s default applies;
   GPU suites keep an explicit `--timeout=120`).
 - Parity tests: float64, tiered tolerances (rule 2). `tests/cross_backend/`
-  has 62 tests: dense/GQA/MoE parity, speculative decoding (chunk parity, lossless greedy, sidecar round-trip), GPU/CUDA parity, 3-way equivalence.
+  covers dense/GQA/MoE parity, speculative decoding (chunk parity, lossless
+  greedy, sidecar round-trip), GPU/CUDA parity, 3-way equivalence — run
+  `pytest tests/cross_backend/ --collect-only -q | tail -1` for the live
+  count rather than pinning it here.
 - Gradient correctness: `tests/unit/_np/test_gradient_check.py` — analytic
   backward vs finite differences at ~1e-10 (incl. MoE kink handling).
 - End-to-end equivalence: `uv run python -m scripts.verify_equivalence` —
-  9 scenarios (`dense_np_torch`, `gqa_np_torch`, `moe_np_torch`, `moe_shared_experts_np_torch`, `gqa_torch_triton`,
-  `spec_mtp_np_torch`, `spec_dspark_np_torch`, `cuda_shared_weights`, `all_four_backends`); greedy outputs must match.
+  9 scenarios (`dense_np_torch`, `gqa_np_torch`, `moe_np_torch`,
+  `moe_shared_experts_np_torch`, `gqa_torch_triton`,
+  `spec_mtp_np_torch`, `spec_dspark_np_torch`, `cuda_shared_weights`,
+  `all_four_backends`); greedy outputs must match.
 - Round-trip guarantee to preserve: save from any backend → load into any
   other → identical logits.

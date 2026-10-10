@@ -644,7 +644,9 @@ def _generate_with_spec_records(
 
     # ---- Step 0: the prefill (same capture as the classic record).
     x = torch.tensor([prompt_ids[-ctx:]], dtype=torch.long, device=device)
-    rec: ForwardRecord = cast(ForwardRecord, capture(model, x)[0] if cls_name != "TorchModel" else instrumented_forward(model, x).unwrap())
+    rec: ForwardRecord = cast(
+        ForwardRecord, capture(model, x)[0] if cls_name != "TorchModel" else instrumented_forward(model, x).unwrap()
+    )
     tok0 = out_tokens[0] if out_tokens else int(np.argmax(np.asarray(rec["softmax"], dtype=np.float64)[0][-1]))
     steps.append(
         {
@@ -669,7 +671,10 @@ def _generate_with_spec_records(
         window = (prefix + draft)[-ctx:]
         with torch.no_grad():
             win_t = torch.tensor([window], dtype=torch.long, device=device)
-            rec = cast(ForwardRecord, capture(model, win_t)[0] if cls_name != "TorchModel" else instrumented_forward(model, win_t).unwrap())
+            rec = cast(
+                ForwardRecord,
+                capture(model, win_t)[0] if cls_name != "TorchModel" else instrumented_forward(model, win_t).unwrap(),
+            )
         tok = int(r["committed"][-1]) if r["committed"] else draft[0]
         step_rec: StepRecord = {
             "step": r_idx,

@@ -36,7 +36,7 @@ class MultiHeadAttention:
     token ids. Unstacking the three axes (and note: B is NOT about
     FlashAttention or any kernel — the axis exists at the model level, in
     the NumPy reference too; kernels merely exploit it for GPU
-    parallelism — see docs/theory/transformer-walkthrough.md §4.1.1):
+    parallelism — see docs/math/transformer-walkthrough.md §4.1.1):
 
     - **S** = sequence length = HOW MANY tokens are in THIS forward pass.
       During training it is the full context window (a fixed slice, e.g.
@@ -374,7 +374,9 @@ class MultiHeadAttention:
         k_heads = k_pre.reshape(batch_size, 1, G, hd).transpose(0, 2, 1, 3)  # (B, G, 1, hd)
         v = v_pre.reshape(batch_size, 1, G, hd).transpose(0, 2, 1, 3)  # (B, G, 1, hd)
 
-        q, rope_state = RoPE().forward_state(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).unwrap_with()
+        q, rope_state = (
+            RoPE().forward_state(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).unwrap_with()
+        )
         q = q.transpose(0, 2, 1, 3)  # (B, H, 1, hd)
         k = RoPE().forward_state(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).unwrap()
         k = k.transpose(0, 2, 1, 3)  # (B, G, 1, hd)
@@ -507,7 +509,9 @@ class MultiHeadAttention:
         v = v_pre.reshape(B, c, G, hd).transpose(0, 2, 1, 3)  # (B, G, c, hd)
 
         # RoPE the whole chunk at once (the operator's (B, S, H, hd) view).
-        q, rope_state = RoPE().forward_state(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).unwrap_with()
+        q, rope_state = (
+            RoPE().forward_state(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).unwrap_with()
+        )
         q = q.transpose(0, 2, 1, 3)  # (B, H, c, hd)
         k = RoPE().forward_state(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).unwrap()
         k = k.transpose(0, 2, 1, 3)  # (B, G, c, hd)

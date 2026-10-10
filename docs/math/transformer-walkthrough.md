@@ -72,7 +72,7 @@ LLaMA block.
 
 > This repo originally used a non-standard "gated residual" (a learned scalar
 > multiplying the stream). It was abandoned for the standard form —
-> see [ADR-0001](../adr/0001-gated-residual-abandonment.md). The standard form is
+> see [ADR-0001](../architecture/adr/0001-gated-residual-abandonment.md). The standard form is
 > what every paper and reference implementation documents, so the math here is
 > web-searchable.
 
@@ -217,7 +217,7 @@ $$\mathrm{out} = \frac{1}{N_s}\textstyle\sum_{s} \mathrm{E\_shared}_s(h) \;+\; \
 
 The shared branch captures common features while the routed experts
 specialize (DeepSeek-V2/V3 style) — see
-[ADR-0002](../adr/0002-shared-expert-moe.md).
+[ADR-0002](../architecture/adr/0002-shared-expert-moe.md).
 
 - Code: `impl/_np/moe.py` → `MixtureOfExperts` (router, top-k selection,
   optional shared experts averaged over `N_s`, weighted sum)
@@ -359,11 +359,11 @@ actually runs (verified by a counting-stub test).
 
 ## Design decisions in this repo
 
-- **Standard additive residual** (not gated) — [ADR-0001](../adr/0001-gated-residual-abandonment.md).
+- **Standard additive residual** (not gated) — [ADR-0001](../architecture/adr/0001-gated-residual-abandonment.md).
 - **Four equivalent tracks** (NumPy reference, PyTorch, Triton, CUDA) share one
   `TransformerConfig` and one flat checkpoint key scheme (`shared/registry.py`),
-  so any track can load any checkpoint — see [design.md](../design.md).
+  so any track can load any checkpoint — see [design.md](../architecture/design.md).
 - **Records live in the track.** Learning mode (`impl/_np/learning.py`,
   `impl/_torch/learning.py`) does not re-implement the model: it calls each
-  track's own `_forward_state` hooks and serializes the intermediates those paths
+  track's own `forward_state` hooks and serializes the intermediates those paths
   already compute, so the page's numbers are the track's actual forward pass.

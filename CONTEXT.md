@@ -2,8 +2,11 @@
 
 This project implements a decoder-only transformer in four equivalent tracks
 (NumPy, PyTorch, Triton, CUDA) for educational purposes. The glossary below
-defines the project's vocabulary. Use these terms consistently in code,
-docs, and tests.
+defines the project's vocabulary: **each term is defined once** — the
+derivation of the math lives in
+[docs/math/transformer-walkthrough.md](docs/math/transformer-walkthrough.md),
+the design rationale in [docs/architecture/design.md](docs/architecture/design.md).
+Use these terms consistently in code, docs, and tests.
 
 ## Shape notation
 
@@ -74,12 +77,13 @@ letters. Where each value comes from:
   attend to the cached K/V. This makes generation O(1) per token instead of
   O(T) per token.
 
-- **GQA** (Grouped-Query Attention): the K/V head count G is smaller than the
-  query head count H; each K/V head is shared by H//G query heads. Shrinks
-  the KV cache by a factor of H//G. G == H is ordinary multi-head attention.
+- **GQA** (Grouped-Query Attention): the K/V head count G is smaller than
+  the query head count H; each K/V head is shared by H//G query heads.
+  Shrinks the KV cache by a factor of H//G. G == H is ordinary multi-head
+  attention.
 
-- **RoPE** (Rotary Position Embedding): injects position by rotating pairs of
-  head dimensions by an angle proportional to position. Preserves vector
+- **RoPE** (Rotary Position Embedding): injects position by rotating pairs
+  of head dimensions by an angle proportional to position. Preserves vector
   norms; makes the q·k inner product depend only on relative position.
 
 - **SwiGLU**: the feed-forward activation `SiLU(x @ gate) * (x @ up)`,
@@ -96,7 +100,8 @@ letters. Where each value comes from:
   outputs are *averaged*, per ADR 0002).
   Ungated by the router (DeepSeek-V2/V3 style), so it captures common
   features while routed experts specialize. Enabled with `n_shared_experts`;
-  0 disables it (pure top-k routing). See `docs/adr/0002-shared-expert-moe.md`.
+  0 disables it (pure top-k routing). See
+  `docs/architecture/adr/0002-shared-expert-moe.md`.
 
 - **lm_head**: the final linear layer (D → V) that maps the last hidden state
   to logits over the vocabulary. No weight tying with the embedding in this
@@ -203,8 +208,8 @@ letters. Where each value comes from:
   into two roles — a cheap **drafter** proposes a block of candidate tokens,
   and the **target model** verifies them in a single parallel forward pass.
   Only tokens the target agrees with are kept, so the output matches plain
-  decoding while several tokens are confirmed per target pass. Ships
-  **on by default** (MTP active when the sidecar exists — ADR 0003);
+  decoding while several tokens are confirmed per target pass. Learning
+  mode **starts in MTP mode when the drafter sidecars exist** (ADR 0003);
   `plain` is the opt-out comparison mode.
 
 - **Target model**: the full-quality checkpoint whose agreement defines
@@ -243,8 +248,8 @@ letters. Where each value comes from:
   probability.
 
 - **DFlash**: a parallel drafter using masked block diffusion — the draft
-  block is denoised in a fixed number of parallel steps, conditioned on the
-  target's context features. A planned plug-in drafter, not yet built.
+  block is denoised in a fixed number of parallel steps, conditioned on
+  the target's context features. A planned plug-in drafter, not yet built.
 
 - **TurboQuant**: the 1-bit quantized KV path. On each token write, the new
   K/V vector is stored as int8 sign bits plus **one scale scalar per
@@ -267,8 +272,8 @@ letters. Where each value comes from:
   `impl/_np/learning_server.py`; backend-agnostic — the page runs all four
   backends (NumPy/PyTorch/Triton/CUDA) via its in-page dropdown, while the
   CLI `--backend` (`numpy`|`torch`) only picks the *startup* load. A record
-  is the same JSON shape from every adapter. Off by default; it has no
-  impact on any track.
+  is the same JSON shape from every adapter. Started manually via
+  `scripts/learning.py`; it has no impact on any track.
 
 - **Spec lane** (learning page): the diagram row under the footer that
   appears in spec modes — the drafter and verify nodes with their
@@ -281,8 +286,12 @@ letters. Where each value comes from:
   attention/FFN (or MoE) tensors, final norm, logits, and the sampled token — serialized as JSON for the page and
   for download.
 
-- **Instrumented forward**: the overlay that runs the model's own components and recomputes each component's math
-  from its public parameters to capture intermediates, without modifying the NumPy track.
+- **Instrumented forward** (torch-family display path): the overlay that runs
+  the PyTorch-family track's real forward and *recomputes each component's
+  math from its public parameters* to capture intermediates, because the
+  fused SDPA call exposes none. The NumPy record adapter is different and
+  simpler — it consumes the track's own `forward_state` hooks directly
+  (bit-identical to the forward, no recompute).
 
 - **SFT model** ("post-trained"): the checkpoint after pre-training + code-instruction SFT + tool-call SFT
   (`resource/models/learning_tool/`, default for the visual-decoder tab).
@@ -299,11 +308,12 @@ letters. Where each value comes from:
 
 - **Entry-point contract**: every per-track `cli.py` (e.g.
   `python -m impl._torch.cli`) is a single-track smoke demo on random
-  weights — fast, dependency-minimal, answers "does this track run?".
+  weights — fast, dependency-minimized, answers "does this track run?".
   Everything checkpoint-based or cross-backend lives in `scripts/`
-  (`train.py`, `infer.py`, `learning.py`, `verify_equivalence.py`) with a
-  `--backend` selector. New user-facing entry points go in `scripts/`;
-  `cli.py` files stay thin demos and never learn checkpoint loading.
+  (`train.py`, `infer.py`, `learning.py`) with a `--backend` selector
+  (`verify_equivalence.py` selects its backends per-scenario instead). New
+  user-facing entry points go in `scripts/`; `cli.py` files stay thin demos
+  and never learn checkpoint loading.
 
 - **KV-step interface**: the shared decode contract all four tracks
   satisfy (`make_cache` / `forward_prefill` / `forward_step` on every
@@ -322,8 +332,9 @@ letters. Where each value comes from:
   between "the reference" and "the production path" at generation time.
 
 - **Binding** (registry): the mapping from each registry key to the
-  owning storage object in a track's model (`impl/_np.model.NumPyModel.
-  _param_arrays`, `impl/_torch.layers.TorchModel._param_tensors`, etc.).
+  owning storage object in a track's model — `NumPyModel._param_arrays`
+  (`impl/_np/model.py`), `TorchModel._param_tensors`
+  (`impl/_torch/layers.py`), etc.
   `ParameterRegistry.bind(binding)` materializes it as the full
   key→param dict in entry order and is what every save/load path walks;
   a drifted binding (stale/extra keys on a track) fails there, not at
@@ -342,7 +353,7 @@ letters. Where each value comes from:
 - **Triton track** (`impl/_triton/`): the kernel reference. A PyTorch model
   with the attention core and FFN activation on Triton kernels. Depends on
   the PyTorch track for the model skeleton (see
-  `docs/seam_triton_to_torch.md`).
+  `docs/architecture/seam_triton_to_torch.md`).
 
 - **CUDA track** (`impl/_cuda/`): the bare-metal reference. Custom CUDA
   kernels for RMSNorm, RoPE, attention, and FFN, launched via NVRTC. The
@@ -361,4 +372,5 @@ letters. Where each value comes from:
   verify this at three tolerance tiers (see AGENTS.md rule 2).
 
 - **Shared seam**: the documented one-way dependency from the Triton track
-  to the PyTorch track (RoPE). See `docs/seam_triton_to_torch.md`.
+  to the PyTorch track (RoPE), plus the documented learning-record dispatch
+  exception. See `docs/architecture/seam_triton_to_torch.md`.
