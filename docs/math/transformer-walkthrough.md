@@ -33,7 +33,7 @@ same thing with production ops (`F.scaled_dot_product_attention`, fused kernels)
 flowchart TD
     TOK["tokens (B, S)"] --> EMB["Embedding (B, S, D)"] --> BLK["block × L:<br/>RMSNorm → Attention → +<br/>RMSNorm → FFN/MoE → +"]
     BLK --> FN["final RMSNorm"] --> LM["lm_head → logits (B, S, V)"] --> SM["softmax → next token"]
-    subgraph FFN-OR-MOE ["the FFN slot (§5–§6): dense by default, MoE opt-in"]
+    subgraph FFN-OR-MOE ["the FFN slot inside every block (§5–§6) — exactly one of:"]
         FFN["dense SwiGLU<br/>(n_experts = 1)"]
         MOE["MoE: router → top-k of E experts<br/>+ always-on shared expert<br/>(n_experts > 1, ADR 0002)"]
     end
@@ -41,6 +41,10 @@ flowchart TD
         DR["drafter: MTP (k=4) / DSpark (k=8)<br/>proposes k tokens from the anchor"]
         VF["target verifies: ONE forward_chunk pass<br/>accept longest agreeing prefix, rollback the tail"]
     end
+    BLK -- "each block's<br/>FFN slot" --> FFN
+    BLK -- "each block's<br/>FFN slot" --> MOE
+    FFN -- "block output" --> BLK
+    MOE -- "block output" --> BLK
     SM --> DR
     DR --> VF
     VF -- "committed tokens +<br/>next anchor" --> LM
