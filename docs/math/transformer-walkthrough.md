@@ -147,11 +147,9 @@ Where the axis pays off differently per track:
 Rotary Position Embedding rotates each pair of head dimensions by an angle
 proportional to the token's position `pos` and the pair index `m`:
 
-$$\theta_m = 10000^{-2m / d}, \qquad
-\begin{pmatrix} y_{2m} \\ y_{2m+1} \end{pmatrix}
-=
-\begin{pmatrix} \cos \theta_m \, pos & -\sin \theta_m \, pos \\
-                \sin \theta_m \, pos & \cos \theta_m \, pos \end{pmatrix}
+$$\theta_m = 10000^{-2m/d}, \qquad
+\begin{pmatrix} y_{2m} \\ y_{2m+1} \end{pmatrix} =
+\begin{pmatrix} \cos(\theta_m\, \mathrm{pos}) & -\sin(\theta_m\, \mathrm{pos}) \\ \sin(\theta_m\, \mathrm{pos}) & \cos(\theta_m\, \mathrm{pos}) \end{pmatrix}
 \begin{pmatrix} x_{2m} \\ x_{2m+1} \end{pmatrix}$$
 
 RoPE is applied to `q` and `k` *before* scoring. Because a rotation's angle
