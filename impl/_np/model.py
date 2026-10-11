@@ -334,10 +334,9 @@ class NumPyModel:
     ) -> np.ndarray:
         """Process ONE token per batch row against the cached K/V.
 
-        input_ids: (B, 1) int token IDs — ONE new position per sequence
-            (the KV cache holds the past, so the pass forwards only the
-            newest token; the "context + 1" reading is wrong: the context
-            is IN the cache, never re-fed as tokens).
+        input_ids: (B, 1) int token IDs — ONE new position per sequence.
+            The KV cache holds every past position, so the step forwards
+            only the newest token; the context is never re-fed as tokens.
         position: the absolute token index of the token (0-based).
         cache: the per-layer cache; the token's K/V are *appended* to each
             layer's cache before attention runs.

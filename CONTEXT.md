@@ -14,20 +14,19 @@ Every tensor shape in this repo's docs, docstrings, and comments uses these
 letters. Where each value comes from:
 
 - **B** — *batch size*: how many independent sequences are processed in
-  parallel (one row per sequence). The sequences NEVER interact — the
-  batch axis exists so the hardware processes many sequences in one
-  matmul instead of B separate loops; every score, weight, and residual
-  is computed per sequence. Training uses a large B (e.g. 32 padded
-  context chunks from different stories — one chunk per row); inference
-  on the learning page and in the speculative engine is B = 1 (one
-  generation).
+  parallel (one row per sequence). The sequences never interact — every
+  score, weight, and residual is computed per sequence; the batch axis
+  exists so one matmul processes all B rows instead of B separate loops.
+  Training stacks many sequences per step (e.g. 32 padded context chunks
+  from different stories, one chunk per row, so one weight update
+  averages their gradients); inference on the learning page and in the
+  speculative engine generates one sequence (B = 1).
 - **S** — *sequence length*: the number of token positions in THIS forward
-  pass — i.e. how many rows the model actually reads this time. Training:
-  a full context window (a fixed slice, e.g. 128 positions). Prefill: the
-  whole prompt. Decode step: 1 (only the newest token — the past lives in
-  the KV cache and is never re-fed as tokens; the "context + 1" reading
-  is wrong: the new token REPLACES the end of the window). A
-  verification chunk: S = c, the draft block.
+  pass — how many rows the model reads this time. Training: a full
+  context window (a fixed slice, e.g. 128 positions). Prefill: the
+  whole prompt. Decode step: 1 — only the newest token; the past lives
+  in the KV cache and is never re-fed as tokens. A verification chunk:
+  S = c, the draft block.
 - **D** — *embed_dim* (`config.embed_dim`): the model width — the length of
   the residual-stream vector every token becomes after the embedding lookup.
 - **H** — *n_heads* (`config.n_heads`): the query-head count; the model

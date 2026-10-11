@@ -34,31 +34,26 @@ class MultiHeadAttention:
     The (B, S, D) input — where each axis comes from
     ------------------------------------------------
     A language model never sees one string; it sees a rectangular block of
-    token ids. Unstacking the three axes (and note: B is NOT about
-    FlashAttention or any kernel — the axis exists at the model level, in
-    the NumPy reference too; kernels merely exploit it for GPU
-    parallelism — see docs/math/transformer-walkthrough.md §4.1.1):
+    token ids — B sequences of S token positions, each position a
+    D-wide vector. Where each axis comes from:
 
-    - **S** = sequence length = HOW MANY tokens are in THIS forward pass.
-      During training it is the full context window (a fixed slice, e.g.
-      128 positions of a chunked story); during prefill it is the whole
-      prompt; during a decode step it is just the ONE newest token
-      (S = 1, see ``forward_step``). Not "context + 1": the newest token
-      REPLACES the end of the window — the model re-reads all S positions
-      it is given, and each of the S rows is one position.
+    - **S** = sequence length = HOW MANY tokens are in THIS forward pass:
+      training reads a full context window (a fixed slice, e.g. 128
+      positions of a chunked story); prefill reads the whole prompt;
+      a decode step reads only the ONE newest token (S = 1, see
+      ``forward_step`` — the past lives in the KV cache, so it is not
+      re-read).
     - **B** = batch size = how many INDEPENDENT sequences are stacked and
       processed side by side. They never interact: every attention matrix,
-      every residual value is computed per sequence — the batch axis only
-      exists so the hardware processes many sequences in one matmul
-      instead of B separate loops. During training B is large (e.g. 32
-      padded chunks from ``make_batch`` in scripts/train_demo_model_v2.py,
-      where B rows = 32 different story chunks, each truncated/padded to
-      the same S). During inference on the learning page B = 1: one
-      generation. The whole attention math below runs identically for
-      every B row — nothing crosses the batch axis. (Why a kernel cares:
-      FlashAttention launches one program per (B, H, S-tile) — B×H×tiles
-      programs run in parallel across the GPU's multiprocessors, so B=1
-      leaves the GPU idle; see impl/_triton/flash_attn.py.)
+      every residual value is computed per sequence — the batch axis
+      exists so one matmul processes all B sequences instead of B
+      separate loops. Training stacks many sequences per step (e.g. 32
+      padded story chunks from ``make_batch`` in
+      scripts/train_demo_model_v2.py, each truncated/padded to the same
+      S, so one weight update averages their gradients); inference on
+      the learning page generates one sequence (B = 1). The whole
+      attention math below runs identically for every B row — nothing
+      crosses the batch axis.
     - **D** = embed_dim = the model width: each token position is one
       D-dimensional vector (D = 64 in the learning model). LN1 produced
       the ``x`` this operator receives: one (D,) vector per (B, S) cell.

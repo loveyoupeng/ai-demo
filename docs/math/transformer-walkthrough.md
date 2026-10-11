@@ -124,27 +124,25 @@ Then the width is split into heads: `q` into `H` heads, `k`/`v` into `G` groups.
 
 - Code: `impl/_np/attention.py` → `MultiHeadAttention` (projections + head split)
 
-### 4.1.1 Why the B axis exists — batching and throughput
+### 4.1.1 Why the B axis exists — batching
 
 Attention never mixes information across the batch axis: sequence `b`'s
 scores are `q_b · k_bᵀ` — `q` from sequence `b`, `k` from sequence `b`, no
 other row involved. So stacking B sequences is a pure throughput device:
 one big matmul processes all B in the time the hardware takes for one,
-instead of B separate loops. That is its only purpose — masking, softmax,
-and the residual stream all run identically per row.
+instead of B separate loops. Masking, softmax, and the residual stream
+all run identically per row.
 
-Where the axis pays off differently per track:
-
-- **NumPy (the reference)**: `scores = q @ k^T` over (B, H, S, S) — the
-  batch rides along in the same matrix product; readability is the goal.
-- **FlashAttention (Triton)**: the GPU grid launches one program per
-  `(B, H, S-tile)` — B×H×tiles programs run *in parallel* across the GPU's
-  streaming multiprocessors. The batch axis is parallelism, not just
-  convenience: B=1 leaves the GPU idle. This is also why the
-  speculative-decoding engines assert B=1: per-sequence accepted lengths
-  differ, and the bookkeeping (per-row cache rollback, per-row correction
-  tokens) would desynchronize the batch — production engines solve this
-  with padding, which the teaching reference deliberately avoids.
+The axis earns its keep in training, where one step processes many
+sequences (one weight update averages their gradients) and on GPUs, where
+kernels launch one program per `(B, H, S-tile)` so B sequences utilize
+the hardware in parallel. At single-sequence inference (the learning
+page, the speculative engine) it is simply B = 1 — the shape is kept so
+one code path serves both regimes. The speculative engines do assert
+B=1: per-sequence accepted lengths differ, and the bookkeeping (per-row
+cache rollback, per-row correction tokens) would desynchronize the batch
+— production engines solve this with padding, which the teaching
+reference deliberately avoids.
 
 ### 4.2 RoPE — position by rotation
 
