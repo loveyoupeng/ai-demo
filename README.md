@@ -110,7 +110,7 @@ SwiGLU FFN — everything else in the diagram above is unchanged. The router
 picks the top-k experts per token; a shared expert (ADR 0002) always runs:
 
 ```mermaid
-flowchart LR
+flowchart TD
     IN["ĥ (S, 64)"] --> RTR["router: s = ĥ·W_gate → softmax → all E probs"]
     RTR --> TOPK["top-k mask → renormalize weights w_j"]
     IN --> EXP["expert 1..E — each a SwiGLU FFN"]
@@ -126,7 +126,7 @@ drafter proposes k tokens; the target model above verifies them all in ONE
 parallel pass (`forward_chunk`); the longest agreeing prefix commits:
 
 ```mermaid
-flowchart LR
+flowchart TD
     CTX["KV cache (context so far)"] --> DR["drafter (MTP: sequential k=4 · DSpark: parallel k=8)<br/>shares the target's embedding + lm_head · sidecar checkpoint"]
     DR -- "draft block: k candidate tokens" --> VF["target verification — ONE forward_chunk pass:<br/>k tokens' K/V appended together, every position scored in parallel"]
     VF -- "accept longest agreeing prefix" --> AC["committed tokens join the cache\nfirst disagreement: the target's own token replaces the draft\nrejected tail rolled back"]

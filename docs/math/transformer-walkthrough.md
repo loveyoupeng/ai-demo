@@ -30,7 +30,7 @@ hand-rolled math and analytic backward. The PyTorch/Triton/CUDA tracks compute t
 same thing with production ops (`F.scaled_dot_product_attention`, fused kernels).
 
 ```mermaid
-flowchart LR
+flowchart TD
     TOK["tokens (B, S)"] --> EMB["Embedding (B, S, D)"] --> BLK["block × L:<br/>RMSNorm → Attention → +<br/>RMSNorm → FFN/MoE → +"]
     BLK --> FN["final RMSNorm"] --> LM["lm_head → logits (B, S, V)"] --> SM["softmax → next token"]
     subgraph FFN-OR-MOE ["the FFN slot (§5–§6): dense by default, MoE opt-in"]
@@ -50,7 +50,7 @@ flowchart LR
 The shape chain, at a glance:
 
 ```mermaid
-flowchart LR
+flowchart TD
     T["tokens (B, S)"] --> E["embedding (B, S, D)"] --> L["decoder block × L<br/>(B, S, D) in and out"] --> N["final RMSNorm (B, S, D)"] --> H["lm_head (B, S, V)"]
 ```
 
