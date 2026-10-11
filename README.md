@@ -67,7 +67,9 @@ exists for inspecting MoE internals; below is the **default** model.
 | `n_experts` | 1 | Dense SwiGLU FFN (`expert_dim = 256 = 4·D`). MoE is opt-in (`n_experts > 1` adds a router + top-k); the `learning_demo` checkpoint demonstrates it. |
 | biases / weight tying | none | LLaMA convention: RMSNorm has only γ, all projections are bias-free, `lm_head` is its own matrix (not the tied embedding). |
 
-### Architecture diagram (one forward pass)
+### Architecture diagrams
+
+**The forward pass (the default dense model).**
 
 ```mermaid
 flowchart TD
@@ -102,6 +104,38 @@ generation time each block additionally keeps a K/V cache (prefill writes the
 whole prompt, each decode appends one row), but the math above is unchanged —
 see `NumPyModel.make_cache` / `forward_prefill` / `forward_step` in
 `impl/_np/model.py`.
+
+**The MoE block (opt-in, `n_experts > 1`)** replaces each block's dense
+SwiGLU FFN — everything else in the diagram above is unchanged. The router
+picks the top-k experts per token; a shared expert (ADR 0002) always runs:
+
+```mermaid
+flowchart LR
+    IN["ĥ (S, 64)"] --> RTR["router: s = ĥ·W_gate → softmax → all E probs"]
+    RTR --> TOPK["top-k mask → renormalize weights w_j"]
+    IN --> EXP["expert 1..E — each a SwiGLU FFN"]
+    IN --> SH["shared expert (always-on, ungated; n_shared_experts > 0)"]
+    TOPK -- "w_j per token" --> SUM["Σⱼ w_j·E_j(x̂)  +  mean_s E_shared_s(x̂)"]
+    EXP --> SUM
+    SH --> SUM
+    SUM --> OUT["moe_out (S, 64)"]
+```
+
+**The speculative-decoding round (ADR 0003)** wraps generation: a small
+drafter proposes k tokens; the target model above verifies them all in ONE
+parallel pass (`forward_chunk`); the longest agreeing prefix commits:
+
+```mermaid
+flowchart LR
+    CTX["KV cache (context so far)"] --> DR["drafter (MTP: sequential k=4 · DSpark: parallel k=8)<br/>shares the target's embedding + lm_head · sidecar checkpoint"]
+    DR -- "draft block: k candidate tokens" --> VF["target verification — ONE forward_chunk pass:<br/>k tokens' K/V appended together, every position scored in parallel"]
+    VF -- "accept longest agreeing prefix" --> AC["committed tokens join the cache\nfirst disagreement: the target's own token replaces the draft\nrejected tail rolled back"]
+    AC --> CTX
+    VF -. "greedy: token-identical to plain decoding" .-> AC
+```
+
+A bad drafter only costs speed, never correctness — that is the lossless
+contract, pinned by the verify_equivalence scenarios.
 
 The **per-component math and intuition** (embedding → RMSNorm → attention →
 RoPE → residuals → SwiGLU → MoE → speculative decoding → lm_head, each with
