@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Rotary Position Embedding for the NumPy reference implementation.
 
 RoPE (Su et al., 2021, "RoFormer") with the analytic backward. RoPE has no

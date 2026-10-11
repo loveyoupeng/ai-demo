@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """C13.1: Full pipeline — end-to-end training and save/load for PyTorch.
 
 Tests the complete training workflow of the PyTorch-based decoder-only

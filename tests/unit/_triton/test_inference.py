@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """E11: CLI inference — text_to_tokens, text_from_tokens, generate_text."""
 
 import pytest

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """The NumPy reference model: decoder-only transformer.
 
 Track intent: **how the math works** — every operator is hand-derived

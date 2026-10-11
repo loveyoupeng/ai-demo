@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """TransformerBlock — CUDA assembly of all CUDA primitives.
 
 Assembles:

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """SiLU activation — nvrtc compiled + PyTorch dispatch.
 
 This is the first CUDA kernel in the project. It demonstrates the complete

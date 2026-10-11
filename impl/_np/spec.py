@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """NumPy speculative decoding engine — the math reference (ADR 0003).
 
 **The loop, in plain words.** Ordinary generation repeats: big model

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Checkpoint save/load for saving transformer parameters to disk.
 
 Supports checkpoint format compatible across backends:

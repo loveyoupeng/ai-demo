@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Hyperparameter configuration for the decoder-only transformer.
 
 This is the SINGLE SOURCE OF TRUTH — every backend (numpy, torch, triton, cuda)

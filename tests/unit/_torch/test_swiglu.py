@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Tests for PyTorch SwiGLU FFN (C1.4).
 
 TDD: Write test → all fail → implement → all pass → ruff + pyright → commit

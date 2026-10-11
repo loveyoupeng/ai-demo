@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Test constants.py — the checkpoint key scheme (HF Llama/Mixtral naming).
 
 Covers the name constants, the Keys builders, and all_param_keys().

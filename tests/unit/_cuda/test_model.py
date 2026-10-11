@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """CUDAModel — full decoder-only transformer: embedding → stack → lm_head (F9).
 
 Tests cover model creation, stack wiring/forward, and gradient flow.

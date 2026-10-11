@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Layer normalization kernel — RMSNorm via Triton.
 
 RMSNorm (Root Mean Square Layer Normalization) is used in modern LLMs

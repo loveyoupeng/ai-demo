@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Scaled dot-product attention — stable softmax kernel + weighted sum.
 
 Implements scaled dot-product attention using:

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Distillation seam tests (Slice 6).
 
 The acceptance contract has two separable halves:

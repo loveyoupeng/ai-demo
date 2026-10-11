@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Learning mode — host the interactive transformer visualization page.
 
 Serves the learning page (architecture diagram with the actual numbers at

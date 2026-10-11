@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Autoregressive inference tests for TextGenerator.
 
 Tests greedy decoding, sampled decoding, batch processing, top-k filtering,

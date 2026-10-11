@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Learning mode — instrumented forward pass + inference records.
 
 The **instrumented forward** runs the track's own state paths — the same

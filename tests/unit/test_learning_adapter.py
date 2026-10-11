@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Cross-backend learning-adapter tests (NumPy track vs PyTorch track).
 
 Loads the same demo checkpoint into both tracks and asserts the two record

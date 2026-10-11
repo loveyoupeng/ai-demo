@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Automated equivalence verification across NumPy, PyTorch, Triton, and CUDA backends.
 
 All four tracks share one architecture (shared ``TransformerConfig``) and one

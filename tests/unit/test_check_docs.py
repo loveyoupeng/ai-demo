@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Unit tests for the doc-vs-code alignment check (scripts/check_docs).
 
 The checker is the docs' own test surface: it must catch path drift and

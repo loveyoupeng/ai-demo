@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """C7.1: Tests for PyTorch full model (TorchModel).
 
 TDD: Write test → all fail → implement → all pass → ruff + pyright → commit

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Singleton utility to initialise and configure logging across the project.
 
 Every module gets a logger via ``logging.getLogger(__name__)``.

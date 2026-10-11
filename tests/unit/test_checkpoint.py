@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Tests for shared.checkpoint — save/load .npz checkpoints.
 
 No fixtures or network deps — pure JSON + numpy I/O.

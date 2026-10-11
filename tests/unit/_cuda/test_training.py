@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """F10: CUDA Training — train_step, clip_gradients, gradient norm.
 
 TDD: Write test → see it fail (can't import) → minimal implementation → all pass → ruff + pyright.

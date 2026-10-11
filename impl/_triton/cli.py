@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """CLI for inference with Triton Model — generates text on GPU."""
 
 from __future__ import annotations

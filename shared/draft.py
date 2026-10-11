@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Drafter protocol + sidecar checkpoints for speculative decoding.
 
 A **drafter** is the small, fast model that proposes candidate tokens for

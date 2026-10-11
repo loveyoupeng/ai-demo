@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """E6.1: Tests for Triton Mixture of Experts.
 
 TDD: Write test → all fail → implement → all pass → ruff + pyright → commit.

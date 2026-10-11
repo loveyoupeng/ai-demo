@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Tests for CUDA TransformerBlock — assembly of all CUDA primitives.
 
 Tests cover:

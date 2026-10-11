@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Tests for scripts/infer.py — interactive inference CLI.
 
 Tests follow TDD: write failing test first, then implement to make it pass.

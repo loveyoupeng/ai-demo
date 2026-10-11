@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Gradient checks: analytic backward vs finite differences.
 
 Every NumPy operator's ``backward`` is verified against a central finite

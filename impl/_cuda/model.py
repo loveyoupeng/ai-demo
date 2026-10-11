@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """CUDAModel — full decoder-only transformer.
 
 Track intent: **the bare metal** — NVRTC-compiled kernels with explicit

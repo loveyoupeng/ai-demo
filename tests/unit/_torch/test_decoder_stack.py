@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """C6.1: Tests for PyTorch DecoderStack.
 
 TDD: Write test → all fail → implement → all pass → ruff + pyright → commit

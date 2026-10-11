@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """FlashAttention online-softmax kernel: parity vs the two-pass Triton kernel
 and vs the framework SDPA, plus a memory/throughput note.
 

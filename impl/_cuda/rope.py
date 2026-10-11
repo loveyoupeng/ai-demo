@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Rotary Position Embedding (RoPE) — nvrtc compiled + PyTorch dispatch.
 
 This module implements RoPE kernel using:

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """B3.1: Multi-Head Attention — scaled dot-product self-attention.
 
 All tests fail initially. Implement after verifying failure.

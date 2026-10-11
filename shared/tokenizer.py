@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Tokenization entry point for the decoder-only transformer.
 
 Provides the GPT-2 BPE tokenizer used by the real-data training pipeline

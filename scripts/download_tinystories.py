@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Download TinyStories dataset and save to resource/ directory.
 
 Usage:

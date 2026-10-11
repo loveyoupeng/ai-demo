@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """SFT trainer for the NumPy reference implementation — the teaching baseline.
 
 One small function: masked-loss fine-tuning. Everything beside the mask is

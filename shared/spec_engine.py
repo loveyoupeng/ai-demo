@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Torch-family speculative decoding engine — the production engine (ADR 0003).
 
 The counterpart of ``shared.generator.TextGenerator`` for the speculative

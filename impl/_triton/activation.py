@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """SiLU activation kernel — element-wise x * sigmoid(x).
 
 This is the simplest possible Triton kernel: pure element-wise mapping

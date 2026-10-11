@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Training loop utilities for NumPy-based decoder-only transformer.
 
 Provides TrainingConfig, TrainingState, train_step, and gradient norm

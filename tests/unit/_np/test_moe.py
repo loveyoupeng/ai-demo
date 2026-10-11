@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """B4.1: MoE — Mixture of Experts with top-k routing.
 
 Each expert is a SwiGLU FFN. The router assigns each token to top-k experts.

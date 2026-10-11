@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Tests for shared pipeline — config + checkpoint save/load + roundtrip.
 
 This module exercises the full data flow:

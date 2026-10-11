@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """B1.1: Embedding layer — input token lookup in weight matrix.
 
 The Embedding module owns its (vocab_size, embed_dim) weight table; forward

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Doc-vs-code alignment check: the docs' own test.
 
 Every file path referenced in the repo's markdown docs must exist in the

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """TextGenerator — the shared autoregressive generator for the torch family.
 
 Track intent: **one deep generator behind one interface** — the torch,

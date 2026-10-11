@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """SFT data loader: prompt/response pairs with response-only loss masking.
 
 The single teaching difference between pre-training and SFT is **which

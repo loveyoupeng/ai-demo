@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """E8: DecoderStack — chain n_layers of TritonTransformerBlock."""
 
 import pytest

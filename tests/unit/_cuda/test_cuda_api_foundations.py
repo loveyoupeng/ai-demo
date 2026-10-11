@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Comprehensive test suite for CUDA Python API on Jetson platform.
 
 Validates the bare-metal CUDA driver API through cuda-python:

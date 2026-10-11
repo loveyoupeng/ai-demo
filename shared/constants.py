@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Parameter key scheme for cross-backend checkpoints.
 
 This module is the SINGLE SOURCE OF TRUTH for the flat-dict checkpoint keys

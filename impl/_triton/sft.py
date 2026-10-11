@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """SFT trainer for the Triton track — kernels as the compute backbone.
 
 Same training skeleton as the torch track; the difference is where the

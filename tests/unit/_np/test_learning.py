@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Learning-mode tests: instrumented forward + generate_with_records.
 
 Validates that the learning overlay (impl/_np/learning.py) captures

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Tests for verify_equivalence.py — 6-scenario automated equivalence testing."""
 
 import contextlib

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Multi-head attention for the NumPy reference implementation.
 
 Scaled dot-product attention with GQA and RoPE, with the analytic backward.

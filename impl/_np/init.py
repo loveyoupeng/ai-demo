@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Weight initialization for the NumPy reference implementation.
 
 The NumPy track initializes every weight matrix with Xavier (Glorot) uniform

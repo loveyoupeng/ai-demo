@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """C4.1: Tests for PyTorch Mixture of Experts.
 
 TDD: Write test → all fail → implement → all pass → ruff + pyright → commit

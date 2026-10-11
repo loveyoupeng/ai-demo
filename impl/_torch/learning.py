@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """PyTorch learning-mode adapter — instrumented forward + inference records.
 
 The PyTorch sibling of ``impl._np.learning``: the exact same JSON record

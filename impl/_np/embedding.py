@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Token embedding for the NumPy reference implementation.
 
 The embedding is a learned lookup table from token IDs to dense vectors.

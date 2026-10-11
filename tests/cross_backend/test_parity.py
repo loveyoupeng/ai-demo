@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Cross-backend parity tests.
 
 Tests that the PyTorch and NumPy implementations produce identical forward

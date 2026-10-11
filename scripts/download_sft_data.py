@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Download small SFT datasets (code instruction + tool calling).
 
 Mirrors ``scripts/download_tinystories.py`` — same streaming-download-to-JSON

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """CLI for inference with CUDA Model — runs on GPU only."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Training pipeline entry point: pre → SFT (all guided by config + data).
 
 The single user-facing command. ``--stage`` mirrors the real model-training

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """CUDA bare-metal compiler — compiles .cu source to runtime CUDA modules.
 
 This module handles the full compilation pipeline for CUDA C kernels:

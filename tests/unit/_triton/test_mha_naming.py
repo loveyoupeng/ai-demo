@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """MHA naming consistency tests for Triton.
 
 Verify that Triton MHA uses the same attribute naming as Torch MHA,

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Recreate the four-backend TinyStories checkpoints (numpy/torch/triton/cuda).
 
 The "real-data" checkpoints under ``resource/models/{backend}_real/`` are

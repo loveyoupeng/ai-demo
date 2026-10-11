@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Distill the MTP and DSpark drafters from the frozen learning_tool target.
 
 Speculative decoding needs a drafter whose proposals the target actually

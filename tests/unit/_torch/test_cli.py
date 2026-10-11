@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """C12: Tests for PyTorch CLI.
 
 TDD: Write test -> all fail -> implement -> all pass -> ruff + pyright -> commit

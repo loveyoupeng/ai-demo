@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Rotary Positional Embedding (RoPE) kernel — Triton.
 
 RoPE encodes absolute position information into each token's embedding

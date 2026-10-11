@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Learning-mode HTTP server tests.
 
 Starts the real server (stdlib http.server) on an ephemeral port and drives

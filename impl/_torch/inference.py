@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Torch-track inference — thin adapter over the shared deep generator.
 
 The torch/triton/cuda generators were three shallow copies (identical

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Parameter registry — single owner of the flat-dict checkpoint format.
 
 The registry knows, for one ``TransformerConfig``:

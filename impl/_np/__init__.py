@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """NumPy reference implementation of the decoder-only transformer.
 
 One module per operator (each with forward + analytic backward):

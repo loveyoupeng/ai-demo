@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Cross-backend parity — Triton vs PyTorch vs NumPy.
 
 Three-way comparison: all backends produce matching results (within the

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Torch drafters — the MTP and DSpark draft models for the torch family.
 
 Shape letters (CONTEXT.md → "Shape notation"): B = batch size (the

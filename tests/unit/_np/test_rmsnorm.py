@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """B1.2: RMSNorm — Root Mean Square Layer Normalization.
 
 out = x / sqrt(mean(x^2) + eps) * gamma; gamma (D,) is a module attribute.

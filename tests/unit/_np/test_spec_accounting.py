@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Speculative-decoding engine accounting + endpoint validation tests.
 
 Two contracts pinned here (from the 2026-10-09 architecture review):

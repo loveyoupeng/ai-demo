@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Full pipeline: training, save/load round-trip, and inference.
 
 End-to-end tests that validate the complete training workflow of the

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """B1.4: SwiGLU Feedforward — SiLU(w1 @ x) * (w3 @ x) @ w2.
 
 All tests fail initially. Implement after verifying failure.

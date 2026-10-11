@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """C11: Tests for the shared text generator (torch-family inference).
 
 The torch/triton/cuda generators collapsed into ``shared.generator``; the

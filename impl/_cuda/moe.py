@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """
 MoE (Mixture of Experts) dispatcher — top-k routing + weighted sum.
 

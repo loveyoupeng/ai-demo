@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """F10: CUDA Inference — CudaTextGenerator (greedy, sampled, top-k).
 
 TDD: Write test → see it fail → minimal implementation → all pass → ruff + pyright.

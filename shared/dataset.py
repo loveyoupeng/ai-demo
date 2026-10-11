@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Dataset loading and preprocessing for the decoder-only transformer.
 
 Loads TinyStories from local resource files, tokenizes into sequences,

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Train and export the learning-mode demo model.
 
 The demo model is the default model for the learning-mode web page

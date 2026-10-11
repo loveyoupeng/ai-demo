@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """B6.1: DecoderStack — stack of TransformerBlocks.
 
 Forward: X → block_0 → block_1 → ... → block_{n-1}

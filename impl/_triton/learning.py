@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Triton learning-mode adapter — instrumented forward + inference records.
 
 The Triton sibling of ``impl._torch.learning``: the exact same JSON record

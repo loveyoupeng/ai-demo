@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Triton track: Python wiring around the Triton attention/FFN kernels.
 
 Mirrors the NumPy/PyTorch tracks operator for operator (same block layout,

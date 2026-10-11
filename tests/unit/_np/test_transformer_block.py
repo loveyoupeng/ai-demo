@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """B5.1: TransformerBlock — standard pre-norm decoder block (RMSNorm + MHA + SwiGLU/MoE + residuals).
 
 Forward: h = x + MHA(RMSNorm(x)); out = h + FFN(RMSNorm(h))

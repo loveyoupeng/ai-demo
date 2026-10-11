@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """TurboQuant KV-cache parity-budget test.
 
 The TurboQuant cache (1-bit sign + per-channel scale) is a *lossy* alternative

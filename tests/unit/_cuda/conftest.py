@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Run CUDA tests in batched subprocesses to prevent NVRTC context pollution.
 
 On Jetson (JetPack 6.2.2, CUDA 12.6), NVRTC driver state accumulates within

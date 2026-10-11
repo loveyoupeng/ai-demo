@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """SwiGLU Feed-Forward Network — CUDA SiLU kernel + PyTorch matmul.
 
 SwiGLU ( gated SiLU activation) is the FFN activation used in modern

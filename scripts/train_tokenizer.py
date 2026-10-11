@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Train a small BPE tokenizer on the project's datasets (one operation).
 
 Pipeline::

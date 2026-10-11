@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """E7.1: Tests for Triton TransformerBlock (Python wiring).
 
 The block is the LLaMA-style pre-norm decoder block:

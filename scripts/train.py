@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Unified training script for decoder-only transformer models.
 
 Supports NumPy, PyTorch, Triton, and CUDA backends through a single entry point.

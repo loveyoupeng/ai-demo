@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """GPU PyTorch cross-backend parity tests.
 
 Tests that GPU-accelerated PyTorch produces numerically equivalent

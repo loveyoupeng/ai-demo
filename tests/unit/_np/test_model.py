@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """B6.2: Full NumPyModel — forward + backward gradient computation.
 
 Tests verify output shapes, gradient existence, and gradient shapes.

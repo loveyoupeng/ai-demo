@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """RMSNorm — nvrtc compiled + PyTorch dispatch.
 
 Computes Root Mean Square Layer Normalization:

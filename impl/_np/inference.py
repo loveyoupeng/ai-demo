@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Autoregressive inference engine for a decoder-only transformer.
 
 Implements TextGenerator with greedy decoding, temperature-sampled decoding,

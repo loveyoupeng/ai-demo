@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Mixture of Experts feed-forward for the NumPy reference implementation.
 
 A router + top-k SwiGLU experts, with the analytic backward.

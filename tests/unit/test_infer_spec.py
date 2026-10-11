@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Infer CLI --spec test: threads the flag into the NumPy spec engine.
 
 The lossless oracle per track × family × k is pinned by

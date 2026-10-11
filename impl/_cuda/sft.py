@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """SFT trainer for the CUDA track — NVRTC kernels + torch autograd glue.
 
 The CUDA track has no ``torch.autograd.Function`` wrapper around its kernels —

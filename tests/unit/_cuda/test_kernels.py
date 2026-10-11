@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Elementwise CUDA kernel tests — SiLU, RMSNorm, RoPE, SwiGLU.
 
 These kernels compile independently (no cross-compilation dependencies).

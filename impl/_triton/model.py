@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """TritonModel — complete decoder-only transformer on Triton kernels.
 
 Track intent: **how to write the kernels** — memory-traffic-aware GPU

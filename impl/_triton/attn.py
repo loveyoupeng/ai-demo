@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Scaled dot-product attention kernel — Triton.
 
 Implements the core attention mechanism from "Attention Is All You Need":

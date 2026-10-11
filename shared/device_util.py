@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Device/dtype resolution for the torch-family models (one deep helper).
 
 "Where does this model compute, and in what dtype?" is ONE fact per model —

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """CUDA learning-mode adapter — instrumented forward + inference records.
 
 The CUDA sibling of ``impl._np.learning`` / ``impl._torch.learning``: the

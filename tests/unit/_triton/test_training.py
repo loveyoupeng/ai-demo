@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """E10: Training loop — train_step, clip_gradients, compute_gradient_norm."""
 
 import math

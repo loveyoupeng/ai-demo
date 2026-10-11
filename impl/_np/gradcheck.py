@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Finite-difference gradient checker for the NumPy track.
 
 ``NumPyModel.backward`` is analytic (and O(forward)); this module keeps the

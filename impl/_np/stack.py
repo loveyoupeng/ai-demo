@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Decoder stack for the NumPy reference implementation.
 
 A stack of TransformerBlocks — the "body" of the decoder.

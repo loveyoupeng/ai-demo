@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Result[RetType, CtxType] — the generic result/capture wrapper.
 
 **The problem it solves.** The NumPy track's forward methods return

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """RMSNorm for the NumPy reference implementation.
 
 Root Mean Square Layer Normalization (Zhang & Sennrich, 2019) with the

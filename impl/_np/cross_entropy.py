@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Cross-entropy loss and auxiliary training utilities for NumPy implementation.
 
 All forward passes accept NumPy arrays and return NumPy scalars or arrays.

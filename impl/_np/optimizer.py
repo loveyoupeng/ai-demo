@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """AdamW optimizer with bias correction and decoupled weight decay.
 
 AdamW (Adam with decoupled weight decay) combines the Adam optimizer's

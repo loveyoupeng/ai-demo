@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """CUDA driver API — cuInit, NVRTC, module loading, kernel launch.
 
 Contains all CUDA API tests with proper imports for the cuda-python package.

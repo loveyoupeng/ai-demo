@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Training loop utilities for CUDA-based decoder-only transformer.
 
 Uses PyTorch autograd — CUDA model weights have requires_grad_(True) set,

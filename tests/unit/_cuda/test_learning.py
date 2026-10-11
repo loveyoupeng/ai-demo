@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """CUDA learning-adapter tests: the record contract against a tiny random model.
 
 Extends the torch-adapter contract (tests/unit/test_learning_adapter.py) to

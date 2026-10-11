@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """B2.1: RoPE — Rotary Positional Embedding.
 
 All tests fail initially. Implement after verifying failure.

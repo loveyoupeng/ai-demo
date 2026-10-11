@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Tests for shared.registry — the parameter registry (checkpoint format owner).
 
 Covers:

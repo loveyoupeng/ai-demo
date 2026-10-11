@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """SFT trainer for the PyTorch track — the production idiom.
 
 The NumPy track's `impl/_np/sft.py` is the teaching baseline (same formula,

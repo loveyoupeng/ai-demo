@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """CuDecoderStack — chained transformer blocks (F8).
 
 Assembles n_layers of CuTransformerBlock into a decoder stack.

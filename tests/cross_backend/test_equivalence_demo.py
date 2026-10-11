@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Cross-backend equivalence demonstration.
 
 Shows that all 4 backends (NumPy, PyTorch, Triton, CUDA) produce

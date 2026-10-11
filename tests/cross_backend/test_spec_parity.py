@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Cross-backend speculative-decoding tests (ADR 0003).
 
 The seams (per the spec's Testing Decisions):

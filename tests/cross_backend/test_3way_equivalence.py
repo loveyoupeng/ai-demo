@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """3-way cross-backend training + inference equivalence test.
 
 Acceptance criterion: any backend's trained model can be loaded by

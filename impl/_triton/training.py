@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Training loop utilities for Triton implementation.
 
 Provides train_step, compute_gradient_norm, and clip_gradients for

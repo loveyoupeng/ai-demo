@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """FlashAttention-style online-softmax attention kernel — Triton.
 
 The existing Triton attention kernel (``impl/_triton/attn.py::_attn_fwd_kernel``)

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Transformer block for the NumPy reference implementation.
 
 One LLaMA-style pre-norm decoder block: RMSNorm → attention → residual,

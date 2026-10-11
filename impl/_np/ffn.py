@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """SwiGLU feed-forward network for the NumPy reference implementation.
 
 The dense feed-forward layer with its analytic backward.

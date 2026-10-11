@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Test that the impl._np per-operator module package exists.
 
 The former god module ``impl._np.modules`` was split into one module per

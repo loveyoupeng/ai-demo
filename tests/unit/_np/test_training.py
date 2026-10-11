@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Tests for the Training Loop module.
 
 Verifies that training steps reduce loss, parameters update, and gradient

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Retrain the demo-model pipeline on a small but *realistic* mixed corpus.
 
 Stages (mirrors the documented pre → SFT-code → SFT-tool pipeline):

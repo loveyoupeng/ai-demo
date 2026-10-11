@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Cross-backend key-scheme and weight-interchange tests.
 
 All four tracks (NumPy, PyTorch, Triton, CUDA) save and load parameters under

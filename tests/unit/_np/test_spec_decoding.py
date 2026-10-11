@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Speculative decoding tests — the lossless contract, chunk parity, and
 sidecar round-trips (ADR 0003; docs/architecture/adr/0003-speculative-decoding-drafters.md).
 

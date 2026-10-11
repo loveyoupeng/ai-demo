@@ -1,3 +1,4 @@
+# Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """NumPy drafters — the MTP and DSpark draft models (the math reference).
 
 **The problem, in plain words.** Generating text with a transformer is a
