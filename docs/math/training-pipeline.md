@@ -117,6 +117,19 @@ The user-visible entry: `scripts/sft.py`. Stages: ``pre`` (pre-train),
 with the SFT § masking being the only thing that changes the underlying
 math).
 
+The repo ships **two** concrete training pipelines (architecture is a
+`TransformerConfig` knob — MoE is opt-in via `n_experts > 1`, with the
+always-on shared expert of ADR 0002 via `n_shared_experts > 0`):
+
+- `scripts/train_demo_model_v2.py` — the default learning-mode model
+  (BPE-512, dense SwiGLU): pre-train → code SFT → tool-call SFT, producing
+  `learning_base` / `learning_sft` / `learning_tool` (the stages above).
+- `scripts/train_demo_model.py` — the legacy char-level demo (V=20,
+  D=8): a *dense-or-MoE* model with `E=3` routed experts + 1 shared
+  expert, so the learning page can inspect router scores, top-k
+  selection, and the shared branch's tensors (the `learning_demo`
+  checkpoint).
+
 ## Common Pitfalls This Repository Avoids
 
 Like other small SFT setups, we want to *teach* the difference between:

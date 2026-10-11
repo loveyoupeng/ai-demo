@@ -33,6 +33,18 @@ same thing with production ops (`F.scaled_dot_product_attention`, fused kernels)
 flowchart LR
     TOK["tokens (B, S)"] --> EMB["Embedding (B, S, D)"] --> BLK["block × L:<br/>RMSNorm → Attention → +<br/>RMSNorm → FFN/MoE → +"]
     BLK --> FN["final RMSNorm"] --> LM["lm_head → logits (B, S, V)"] --> SM["softmax → next token"]
+    subgraph FFN-OR-MOE ["the FFN slot (§5–§6): dense by default, MoE opt-in"]
+        FFN["dense SwiGLU<br/>(n_experts = 1)"]
+        MOE["MoE: router → top-k of E experts<br/>+ always-on shared expert<br/>(n_experts > 1, ADR 0002)"]
+    end
+    subgraph SPEC-ROUND ["speculative decoding (§9, ADR 0003) — wraps generation, B=1"]
+        DR["drafter: MTP (k=4) / DSpark (k=8)<br/>proposes k tokens from the anchor"]
+        VF["target verifies: ONE forward_chunk pass<br/>accept longest agreeing prefix, rollback the tail"]
+    end
+    SM --> DR
+    DR --> VF
+    VF -- "committed tokens +<br/>next anchor" --> LM
+    VF -. "greedy ≡ plain greedy" .-> SM
 ```
 
 The shape chain, at a glance:
