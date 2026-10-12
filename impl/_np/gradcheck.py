@@ -122,7 +122,7 @@ def _moe_selections(model: NumPyModel, input_ids: np.ndarray) -> list[np.ndarray
     the check).
     """
     x_in0 = model.embedding.forward(input_ids)
-    positions = np.arange(input_ids.shape[1], dtype=np.int32)
+    position = 0  # the base-point forward reads positions 0..S-1
     selections: list[np.ndarray] = []
     x = x_in0
     for block in model.stack.layers:
@@ -131,7 +131,7 @@ def _moe_selections(model: NumPyModel, input_ids: np.ndarray) -> list[np.ndarray
             continue
         # Recompute the FFN input exactly as the block forward does.
         h = block.input_layernorm.forward(x)
-        h = h + block.self_attn.forward(h, positions)
+        h = h + block.self_attn.forward(h, position)
         h = block.post_attention_layernorm.forward(h)
         scores = h @ mlp.gate  # (B, S, E)
         scores = scores - np.max(scores, axis=-1, keepdims=True)
@@ -143,7 +143,7 @@ def _moe_selections(model: NumPyModel, input_ids: np.ndarray) -> list[np.ndarray
             kth_idx = order[:, :, mlp.top_k - 1 : mlp.top_k]  # (B, S, 1)
             threshold = np.take_along_axis(probs, kth_idx, axis=-1)  # (B, S, 1)
             selections.append(probs >= threshold)  # (B, S, E)
-        x = block.forward(x, positions)
+        x = block.forward(x, position)
     return selections or None
 
 

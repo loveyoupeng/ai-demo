@@ -81,7 +81,7 @@ class TransformerBlock:
         else:
             self.mlp = SwiGLUFFN(embed_dim=D, ff_dim=config.expert_dim, seed=seed + 2)
 
-    def forward(self, x: np.ndarray, positions: np.ndarray | None = None, record: dict | None = None) -> np.ndarray:
+    def forward(self, x: np.ndarray, position: int = 0, record: dict | None = None) -> np.ndarray:
         """Block forward: LN1 → attention → +residual → LN2 → FFN/MoE → +residual.
 
         x: (B, S, D) → out: (B, S, D).
@@ -89,20 +89,18 @@ class TransformerBlock:
         Invariant/contract: the block NEVER normalizes the stream itself —
         only the copies (x̂, ĥ) are normalized; both residuals are plain
         adds, so ∂out/∂x carries the identity path (the gradient highway).
-        positions: (S,) the absolute token indices for RoPE (None →
-        arange(S) — a fresh sequence starting at position 0); a windowed
-        prefill passes its absolute positions so decode steps stay aligned.
+        position: the absolute index of this pass's first token (0-based)
+            — threaded to attention/RoPE; a windowed prefill passes its
+            offset so decode steps stay aligned.
         record: optional dict; when given, it is filled with the block's
             intermediate state (ln1/ln2 outputs, the attention state, the
             FFN/MoE state, h, out) — the same state the analytic backward
             recomputes, captured once by the operators themselves. The
             math (and its bit-level result) is identical either way.
         """
-        if positions is None:
-            positions = np.arange(x.shape[1], dtype=np.int32)
         # Stream 1: attention with pre-norm and residual.
         ln1_out = self.input_layernorm.forward(x)  # (B, S, D)
-        attn_out, attn_state = self.self_attn.forward_state(ln1_out, positions).unwrap_with()  # (B, S, D)
+        attn_out, attn_state = self.self_attn.forward_state(ln1_out, position).unwrap_with()  # (B, S, D)
         h = x + attn_out  # (B, S, D)
 
         # Stream 2: feed-forward (dense or MoE) with pre-norm and residual.
@@ -125,21 +123,18 @@ class TransformerBlock:
             )
         return out
 
-    def backward(self, dout: np.ndarray, x: np.ndarray, positions: np.ndarray | None = None) -> tuple[np.ndarray, dict]:
+    def backward(self, dout: np.ndarray, x: np.ndarray, position: int = 0) -> tuple[np.ndarray, dict]:
         """Analytic backward (derivation in the class docstring).
 
         dout: (B, S, D) upstream gradient.
         x: (B, S, D) the forward input (recomputes the intermediates).
-        positions: the RoPE positions used in forward (None → arange(S)).
+        position: the first-token index used in forward.
 
         Returns: (dx, dparams) with attribute-path keys (see class docstring).
         """
-        if positions is None:
-            positions = np.arange(x.shape[1], dtype=np.int32)
-
         # --- Recompute forward intermediates (same math as forward) ---
         ln1_out = self.input_layernorm.forward(x)  # (B, S, D)
-        attn_out = self.self_attn.forward(ln1_out, positions)  # (B, S, D)
+        attn_out = self.self_attn.forward(ln1_out, position)  # (B, S, D)
         h = x + attn_out  # (B, S, D)
         ln2_out = self.post_attention_layernorm.forward(h)  # (B, S, D)
         _ff_out = self.mlp.forward(ln2_out)  # (B, S, D)
@@ -158,7 +153,7 @@ class TransformerBlock:
         d_h = dout + d_h_ln2  # (B, S, D)
 
         # --- Attention sublayer (ln1_out is its input) ---
-        d_ln1_out, attn_grads = self.self_attn.backward(d_h, ln1_out, positions)  # (B, S, D)
+        d_ln1_out, attn_grads = self.self_attn.backward(d_h, ln1_out, position)  # (B, S, D)
 
         # --- Input RMSNorm (input x, output ln1_out) ---
         dx_ln1, d_gamma1 = self.input_layernorm.backward(d_ln1_out, x)  # (B, S, D), (D,)
@@ -211,7 +206,7 @@ class TransformerBlock:
         """
         ln1_out = self.input_layernorm.forward(x)  # (B, 1, D)
         attn_state: dict | None = {} if record is not None else None
-        attn_out = self.self_attn.forward_step(ln1_out, position, cache, quantize=quantize, state=attn_state)
+        attn_out = self.self_attn.forward_step(ln1_out, position, cache, quantize=quantize, record=attn_state)
         h = x + attn_out  # (B, 1, D)
         ln2_out = self.post_attention_layernorm.forward(h)  # (B, 1, D)
         ff_out, ff_state = self.mlp.forward_state(ln2_out).unwrap_with()  # (B, 1, D)
@@ -261,7 +256,7 @@ class TransformerBlock:
         """
         ln1_out = self.input_layernorm.forward(x)  # (B, c, D)
         attn_state: dict | None = {} if record is not None else None
-        attn_out = self.self_attn.forward_chunk(ln1_out, position, cache, state=attn_state)
+        attn_out = self.self_attn.forward_chunk(ln1_out, position, cache, record=attn_state)
         h = x + attn_out  # (B, c, D)
         ln2_out = self.post_attention_layernorm.forward(h)  # (B, c, D)
         ff_out, ff_state = self.mlp.forward_state(ln2_out).unwrap_with()  # (B, c, D)

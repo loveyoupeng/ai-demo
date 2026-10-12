@@ -216,10 +216,8 @@ class TestRoPECUDA:
         B, S, H, D = 2, 4, 2, 8
         torch.manual_seed(42)
         x = torch.randn(B, S, H, D, dtype=torch.float32, device="cuda")
-        positions = torch.arange(S, dtype=torch.int64, device="cuda")
-
-        y_cuda = apply_rope(x, positions)
-        y_ref = RoPE().forward(x.cpu().numpy(), positions.cpu().numpy(), rope_dim=0)
+        y_cuda = apply_rope(x)  # positions 0..S-1 (position 0)
+        y_ref = RoPE().forward(x.cpu().numpy(), rope_dim=0)
 
         torch.testing.assert_close(
             y_cuda,
@@ -241,10 +239,8 @@ class TestRoPECUDA:
         B, S, H, D = 2, 4, 2, 8
         torch.manual_seed(42)
         x = torch.randn(B, S, H, D, dtype=torch.float64, device="cuda")
-        positions = torch.arange(S, dtype=torch.int64, device="cuda")
-
-        y_cuda = apply_rope(x, positions)
-        y_ref = RoPE().forward(x.cpu().numpy(), positions.cpu().numpy(), rope_dim=0)
+        y_cuda = apply_rope(x)  # positions 0..S-1 (position 0)
+        y_ref = RoPE().forward(x.cpu().numpy(), rope_dim=0)
 
         torch.testing.assert_close(
             y_cuda,
@@ -268,10 +264,8 @@ class TestRoPECUDA:
         rope_dim = 8  # true partial: 8 < head_dim 16
         torch.manual_seed(7)
         x = torch.randn(B, S, H, D, dtype=torch.float64, device="cuda")
-        positions = torch.arange(S, dtype=torch.int64, device="cuda")
-
-        y_cuda = apply_rope(x, positions, rope_dim=rope_dim)
-        y_ref = RoPE().forward(x.cpu().numpy(), positions.cpu().numpy(), rope_dim=rope_dim)
+        y_cuda = apply_rope(x, rope_dim=rope_dim)  # positions 0..S-1
+        y_ref = RoPE().forward(x.cpu().numpy(), rope_dim=rope_dim)
 
         # Suffix dims must pass through untouched (identity, not rotation)
         torch.testing.assert_close(
@@ -301,18 +295,15 @@ class TestRoPECUDA:
         torch.manual_seed(11)
         x_np = np.random.RandomState(11).randn(B, S, H, D)
         dout_np = np.random.RandomState(13).randn(B, S, H, D)
-        pos_np = np.arange(S, dtype=np.int64)
-
-        # CUDA autograd path
+        # CUDA autograd path (positions 0..S-1 — position 0)
         x = torch.tensor(x_np, dtype=torch.float64, device="cuda", requires_grad=True)
-        positions = torch.tensor(pos_np, device="cuda")
-        y = apply_rope(x, positions, rope_dim=rope_dim)
+        y = apply_rope(x, rope_dim=rope_dim)
         y.backward(torch.tensor(dout_np, dtype=torch.float64, device="cuda"))
         dx_cuda = x.grad
         assert dx_cuda is not None  # x requires_grad — the autograd engine filled it
 
         # NumPy analytic backward (verified reference)
-        dx_ref = RoPE().backward(dout_np, x_np, pos_np.astype(np.int32), rope_dim=rope_dim)
+        dx_ref = RoPE().backward(dout_np, x_np, rope_dim=rope_dim)
 
         torch.testing.assert_close(
             dx_cuda,
@@ -341,8 +332,7 @@ class TestRoPECUDA:
 
         for B, S, H, D in shapes:
             x = torch.randn(B, S, H, D, dtype=torch.float64, device="cuda")
-            positions = torch.arange(S, dtype=torch.int64, device="cuda")
-            y = apply_rope(x, positions)
+            y = apply_rope(x)  # positions 0..S-1
             assert y.shape == (B, S, H, D), f"Expected {(B, S, H, D)}, got {y.shape}"
             assert torch.isfinite(y).all(), f"NaN/Inf detected in shape {(B, S, H, D)}"
 
@@ -355,8 +345,7 @@ class TestRoPECUDA:
         B, S, H, D = 2, 4, 4, 16
         torch.manual_seed(42)
         x = torch.randn(B, S, H, D, dtype=torch.float64, device="cuda")
-        positions = torch.arange(S, dtype=torch.int64, device="cuda")
-        y = apply_rope(x, positions)
+        y = apply_rope(x)  # positions 0..S-1
 
         # Norm of each vector should be preserved (RoPE is orthogonal)
         x_norm = x.norm(dim=-1)  # (B, S, H)

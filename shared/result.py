@@ -27,10 +27,9 @@ Contract (every Result-returning method holds):
   the capture is an overlay, never a second code path;
 - ``.ctx`` is a plain immutable view (a dict of dicts); consumers read
   it, never mutate it;
-- tuple unpacking still works (``out, state = result`` returns
-  ``(value, ctx.backward | {} merged with display)`` — the pre-wrapper
-  flat-dict shape) so existing callers/tests keep working during the
-  migration.
+- access is typed only: ``.value`` (or ``.unwrap()``), ``.unwrap_with()``
+  for the flat (value, merged-ctx) shape, ``.ctx.backward`` /
+  ``.ctx.display`` for the sub-grouped views.
 """
 
 from __future__ import annotations
@@ -70,18 +69,11 @@ class Context(Generic[C]):
         out.update(self.backward)
         return out
 
-    def __getitem__(self, key: str):
-        """Flat-dict-style access (merged view) — the migration path."""
-        return self.merged()[key]
-
     def __contains__(self, key: str) -> bool:
         return key in self.backward or key in self.display or key in self.record
 
     def get(self, key: str, default=None):
-        try:
-            return self.merged()[key]
-        except KeyError:
-            return default
+        return self.merged().get(key, default)
 
 
 @dataclass(frozen=True)
@@ -110,35 +102,13 @@ class Result(Generic[R, C]):
         """A captured result: value + the context sub-grouped by consumer."""
         return cls(value, Context(backward, display, record or {}))
 
-    # ── the tuple-unpacking migration path ────────────────────────────────
-    # ── access methods (the typed interface — no dual-mode overloading) ────
+    # ── access methods (the typed interface) ───────────────────────────────
     def unwrap(self) -> R:
         """THE result. The primary access for callers that don't read the
         capture."""
         return self.value
 
     def unwrap_with(self) -> tuple[R, dict]:
-        """The migration form: (value, flat merged ctx) — the pre-wrapper
-        tuple shape, for tests/one-off callers that index the flat dict.
-        New code reads .ctx.backward / .ctx.display directly."""
+        """(value, flat merged ctx) — for callers that pass the capture
+        through as a plain dict (the block/stack state threading)."""
         return self.value, self.ctx.merged()
-
-    def __iter__(self):
-        """Tuple unpacking: ``out, state = result`` yields
-        (value, flat merged ctx) — the pre-wrapper shape, so existing
-        callers/tests keep working. (Legacy __getitem__-based iteration
-        would also work, but an explicit __iter__ is the typed contract.)"""
-        return iter((self.value, self.ctx.merged()))
-
-    def __getitem__(self, key: int | str):
-        """Two access modes, both contract: an int is the tuple position
-        (0 = value, 1 = the flat merged ctx — also the legacy-iteration
-        fallback for unpacking); a str is a capture-key lookup into the
-        flat merged ctx (so result["logits"] works like the pre-wrapper
-        flat dict did)."""
-        if isinstance(key, str):
-            return self.ctx.merged()[key]
-        return (self.value, self.ctx.merged())[key]
-
-    def __len__(self) -> int:
-        return 2

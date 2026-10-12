@@ -82,7 +82,7 @@ class TritonModel(nn.Module):
         ]
 
     def forward_prefill(
-        self, input_ids: torch.Tensor, cache: list[dict[str, torch.Tensor]] | None = None
+        self, input_ids: torch.Tensor, cache: list[dict[str, torch.Tensor]] | None = None, position: int = 0
     ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
         """Run a full-sequence forward and fill the per-layer KV cache.
 
@@ -100,12 +100,12 @@ class TritonModel(nn.Module):
         B, S = input_ids.shape
         if cache is None:
             cache = self.make_cache(B)
-        positions = torch.arange(S, device=input_ids.device, dtype=torch.long)
         states: list[dict[str, torch.Tensor]] = []
         x = self.embedding(input_ids)  # (B, S, D)
         for block in self.stack.blocks:
-            x, block_state = block.forward_state(x, positions)
-            states.append(block_state)
+            block_res = block.forward_state(x, position)
+            x = block_res.value
+            states.append(block_res.ctx.display)
         x_final = self.final_norm(x)  # (B, S, D)
         logits = self.lm_head(x_final)  # (B, S, V)
         for i, attn_state in enumerate(states):

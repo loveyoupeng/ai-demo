@@ -45,12 +45,14 @@ class RoPE:
     Forward
     -------
     x : (B, S, H, D)   (query or key tensor, any leading dims: (..., H, D))
-    positions : (S,) int array (or (B, S)); the token index of each position
+    position : int — the ABSOLUTE index of this pass's FIRST token
+               (0-based); RoPE builds arange(position, position + S)
+               internally. All callers' positions are consecutive.
     Returns: (B, S, H, D), same shape as x.
 
     Step shapes:
         freqs   : (D//2,)                     — one theta per pair
-        angles  : (B, S, D//2)                — pos * theta per pair
+        angles  : (B, S, D//2)                — (position + s) * theta per pair
         cos/sin : (B, S, D//2)
         x_even  : (B, S, H, D//2), x_odd: (B, S, H, D//2)
         output  : re-assembled to (B, S, H, D)
@@ -73,33 +75,39 @@ class RoPE:
     dim-pairs that rotate.
     """
 
-    def forward(self, x: np.ndarray, positions: np.ndarray, rope_dim: int = 0) -> np.ndarray:
-        """Rotate q/k dim-pairs by position-dependent angles. x: (..., H, D), positions: (S,) or (B, S).
+    def forward(self, x: np.ndarray, position: int = 0, rope_dim: int = 0) -> np.ndarray:
+        """Rotate q/k dim-pairs by position-dependent angles. x: (..., H, D).
 
         x: the (pre-permute) head layout (B, S, H, hd) — H heads, each a
             hd-wide vector; ONLY q and k arrive here (v bypasses RoPE).
-        positions: (S,) or (B, S) absolute token indices — the ONLY
-            position signal; angle ∝ position.
+        position: the ABSOLUTE index of this pass's FIRST token (0-based)
+            — the ONLY position signal; RoPE builds arange(position,
+            position + S) internally, so this pass's positions are
+            position, position+1, …, position+S-1 (every caller's
+            positions are consecutive; the per-row (B, S) form does not
+            exist).
         rope_dim: the rotated PREFIX of the head dim (0 = rotate all hd —
             the standard); pairs are (even, odd) dims within that prefix.
 
         Contract: preserves vector norms (a rotation, not a scale); makes
         q·k depend on the RELATIVE position distance. Inverse of backward.
         """
-        return self.forward_state(x, positions, rope_dim).unwrap()
+        return self.forward_state(x, position, rope_dim).unwrap()
 
-    def forward_state(self, x: np.ndarray, positions: np.ndarray, rope_dim: int = 0) -> Result[np.ndarray, dict]:
+    def forward_state(self, x: np.ndarray, position: int = 0, rope_dim: int = 0) -> Result[np.ndarray, dict]:
         """Apply RoPE; return THE result (the rotated q/k) + the captured
         context (the angle state the analytic backward inverts).
 
         Returns a ``Result`` (shared/result.py): ``.value`` = the rotated
         tensor; ``.ctx.backward`` = the angle state (freqs/angles/cos/sin)
-        — the backward's inputs; tuple unpacking still works.
+        — the backward's inputs. Access is typed: ``.unwrap()`` /
+        ``.unwrap_with()``.
 
         x: (B, S, H, hd) the (pre-permute) head layout — H heads, each a
             hd-wide vector; ONLY q and k arrive here (v bypasses RoPE).
-        positions: (S,) or (B, S) absolute token indices — the ONLY
-            position signal; angle ∝ position.
+        position: the ABSOLUTE index of this pass's FIRST token (0-based)
+            — the ONLY position signal; positions are consecutive, so
+            RoPE builds arange(position, position + S) internally.
         rope_dim: the rotated PREFIX of the head dim (0 = rotate all hd —
             the standard); pairs are (even, odd) dims within that prefix.
 
@@ -110,7 +118,7 @@ class RoPE:
         .ctx.backward:
             freqs : (pair_dim,)  — one theta per (even, odd) pair,
                     pair_dim = rope_dim//2 (or hd//2 when rope_dim == 0)
-            angles: (B, S, pair_dim) — pos · theta per pair
+            angles: (B, S, pair_dim) — (position + s) · theta per pair
             cos, sin: (B, S, pair_dim)
         """
         d = x.shape[-1]
@@ -126,9 +134,10 @@ class RoPE:
         pair_dim = d_rot // 2  # number of (even, odd) pairs
 
         batch_size, seq_len = x_rot.shape[0], x_rot.shape[1]
-        pos = np.asarray(positions, dtype=np.int32)
-        if pos.ndim == 1 and pos.shape[0] == seq_len:
-            pos = np.broadcast_to(pos, (batch_size, seq_len))  # (B, S)
+        # The one place the position array is built: consecutive positions
+        # starting at `position` (the caller passes the int, not the array).
+        pos = np.arange(position, position + seq_len, dtype=np.int32)
+        pos = np.broadcast_to(pos, (batch_size, seq_len))  # (B, S)
 
         # theta_k = 10000 ** (-2k / d_rot) for k = 0..pair_dim-1  — (pair_dim,)
         freqs = 1.0 / (10000.0 ** (np.arange(pair_dim, dtype=np.float32) * 2.0 / d_rot))
@@ -160,12 +169,13 @@ class RoPE:
             display={},
         )
 
-    def backward(self, dout: np.ndarray, x: np.ndarray, positions: np.ndarray, rope_dim: int = 0) -> np.ndarray:
+    def backward(self, dout: np.ndarray, x: np.ndarray, position: int = 0, rope_dim: int = 0) -> np.ndarray:
         """Analytic backward (inverse rotations).
 
         dout: (B, S, H, D) upstream gradient (same shape as forward output).
         x: (B, S, H, D) the forward input (needed only for the split sizes).
-        positions, rope_dim: the same arguments forward used.
+        position, rope_dim: the same arguments forward used (the pass's
+            first absolute token index).
 
         Returns: dx (B, S, H, D).
         """
@@ -182,9 +192,8 @@ class RoPE:
         pair_dim = d_rot // 2
 
         batch_size, seq_len = x_rot.shape[0], x_rot.shape[1]
-        pos = np.asarray(positions, dtype=np.int32)
-        if pos.ndim == 1 and pos.shape[0] == seq_len:
-            pos = np.broadcast_to(pos, (batch_size, seq_len))  # (B, S)
+        pos = np.arange(position, position + seq_len, dtype=np.int32)
+        pos = np.broadcast_to(pos, (batch_size, seq_len))  # (B, S)
 
         # Same angles as forward (recomputed — RoPE is stateless).
         freqs = 1.0 / (10000.0 ** (np.arange(pair_dim, dtype=np.float32) * 2.0 / d_rot))

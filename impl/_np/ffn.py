@@ -92,7 +92,7 @@ class SwiGLUFFN:
 
         Returns a ``Result`` (shared/result.py): ``.value`` = the SwiGLU
         output; ``.ctx.backward`` = the intermediates the analytic backward
-        recomputes from; tuple unpacking still works.
+        recomputes from. Access is typed: ``.unwrap()`` / ``.unwrap_with()``.
 
         x: (B, S, D) (or any leading dims) — the post-LN2 stream, D-wide.
 

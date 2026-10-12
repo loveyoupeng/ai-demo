@@ -133,7 +133,7 @@ class MultiHeadAttention:
         # (H*hd, D) output projection (mixes the heads back into one vector)
         self.o_proj = xavier_uniform(rng, n_heads * hd, embed_dim)
 
-    def forward_state(self, x: np.ndarray, positions: np.ndarray, causal: bool = True) -> Result[np.ndarray, dict]:
+    def forward_state(self, x: np.ndarray, position: int, causal: bool = True) -> Result[np.ndarray, dict]:
         """Run the attention forward; return THE result + the captured context.
 
         Returns a ``Result`` (shared/result.py): ``.value`` is THE answer
@@ -141,13 +141,16 @@ class MultiHeadAttention:
         sub-grouped by consumer — ``.ctx.backward`` = what the analytic
         backward recomputes from (the gradient chain's inputs);
         ``.ctx.display`` = what ONLY the learning-mode record shows (never
-        touched by gradients); tuple unpacking (``out, state = ...``)
-        still works and returns the pre-wrapper flat dict.
+        touched by gradients). Access is typed: ``.unwrap()`` for
+        the value, ``.unwrap_with()`` for the flat (value, merged-ctx)
+        shape.
 
         Invariant/contract: ``.value`` is bit-identical whether or not the
         context is captured (the record is an overlay, not a second code
-        path); ``positions[i]`` is the absolute RoPE position of sequence
-        position i (relative distances drive q·k); GQA repeat (when G < H)
+        path); this pass's tokens sit at the CONSECUTIVE absolute
+        positions position, position+1, …, position+S-1 (RoPE builds the
+        array internally — callers pass the int, never the array); GQA
+        repeat (when G < H)
         happens BEFORE the score computation, so the returned ``k`` is
         post-repeat (B, H, S, hd) while ``k_group`` stays per-group
         (B, G, S, hd) — the cache-ready view.
@@ -166,14 +169,15 @@ class MultiHeadAttention:
             x[b, s] is "sequence b, token s" as a (D,) vector; x[b] alone
             is that sequence's (S, D) matrix — the matrix the attention
             math actually runs on (B of them in lockstep).
-        positions : np.ndarray, shape (S,) or (B, S)
-            The absolute token index of each sequence position (0-based) —
-            the ONLY position information in the model; RoPE rotates q and
-            k by angle ∝ positions. (S,) = the same positions for every
-            batch row (the normal case: all sequences start at position 0
-            in training, or share the decode position); (B, S) = per-row
-            positions (a windowed prefill whose rows start at different
-            offsets). None → arange(S).
+        position : int
+            The ABSOLUTE token index of this pass's FIRST position
+            (0-based) — the ONLY position information in the model. RoPE
+            rotates q and k by angle ∝ (position + s). Positions are
+            consecutive by construction: training reads a context window
+            (position 0), prefill reads the prompt (position 0), a decode
+            step reads the newest token (position = the cache depth), a
+            verification chunk reads the draft block (position = the
+            cache depth).
         causal : bool, default True
             Mask the future (True required for autoregressive generation —
             position i attends only to j <= i). False = bidirectional
@@ -212,10 +216,10 @@ class MultiHeadAttention:
 
         # RoPE rotates q and k (position information). RoPE's contract shape
         # is (B, S, H, D), so permute, rotate, permute back.
-        rope_res = RoPE().forward_state(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim)
+        rope_res = RoPE().forward_state(q_heads.transpose(0, 2, 1, 3), position, rope_dim=self.rope_dim)
         q, rope = rope_res.unwrap_with()
         q = q.transpose(0, 2, 1, 3)  # (B, H, S, hd)
-        k = RoPE().forward(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim)
+        k = RoPE().forward(k_heads.transpose(0, 2, 1, 3), position, rope_dim=self.rope_dim)
         k = k.transpose(0, 2, 1, 3)  # (B, G, S, hd)
         k_group, v_group = k, v  # (B, G, S, hd) per-group: RoPE'd K / un-rotated V
 
@@ -282,22 +286,20 @@ class MultiHeadAttention:
             },
         )
 
-    def forward(self, x: np.ndarray, positions: np.ndarray | None = None, causal: bool = True) -> np.ndarray:
+    def forward(self, x: np.ndarray, position: int = 0, causal: bool = True) -> np.ndarray:
         """Multi-head attention forward pass (the plain path — no cache).
 
         x: (B, S, D) → out: (B, S, D). Contract: bit-identical to the
         cached step path over the same tokens (pinned by the parity tests).
-        positions: (S,) token indices for RoPE; default arange(S).
+        position: the absolute index of this pass's first token (0-based).
         causal: mask the future (default True — required for autoregressive
             generation); False = bidirectional within the sequence (used by
             the DSpark drafter's parallel backbone).
         """
-        if positions is None:
-            positions = np.arange(x.shape[1], dtype=np.int32)
-        return self.forward_state(x, positions, causal=causal).unwrap()
+        return self.forward_state(x, position, causal=causal).unwrap()
 
     def forward_step(
-        self, x: np.ndarray, position: int, cache: dict, quantize: bool = False, state: dict | None = None
+        self, x: np.ndarray, position: int, cache: dict, quantize: bool = False, record: dict | None = None
     ) -> np.ndarray:
         """Process ONE new token against the cached K/V (per-token inference path).
 
@@ -329,7 +331,7 @@ class MultiHeadAttention:
             compression experiment; it degrades outputs (see the parity-
             budget test) while shrinking the KV memory by ≈4x (int8 bits
             plus one float scale per (batch, head) per token-write).
-        state: optional dict; when given it is filled with the same
+        record: optional dict; when given it is filled with the same
             intermediate keys as ``forward_state``'s state (the
             learning-mode record) — the math is bit-identical either way.
 
@@ -359,9 +361,17 @@ class MultiHeadAttention:
         """
         batch_size, seq_len, _ = x.shape  # seq_len == 1 for a single step
         assert seq_len == 1, "forward_step expects exactly one token"
+        # Fail fast on a cache/schema mismatch (the schema is the caller's
+        # quantize flag, carried out-of-band): a naive cache handed to a
+        # quantize=True step (or vice versa) would KeyError deep inside
+        # attention — here it gets a named error instead.
+        if quantize:
+            missing = [k for k in ("bits_k", "scales_k", "bits_v", "scales_v") if k not in cache]
+            assert not missing, f"quantize=True step needs a TurboQuant cache (missing keys: {missing})"
+        else:
+            missing = [k for k in ("k", "v") if k not in cache]
+            assert not missing, f"quantize=False step needs a naive {{'k','v'}} cache (missing keys: {missing})"
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
-        positions = np.array([position], dtype=np.int32)
-
         q_pre = x @ self.q_proj  # (B, 1, H*hd)
         k_pre = x @ self.k_proj  # (B, 1, G*hd)
         v_pre = x @ self.v_proj  # (B, 1, G*hd)
@@ -371,10 +381,10 @@ class MultiHeadAttention:
         v = v_pre.reshape(batch_size, 1, G, hd).transpose(0, 2, 1, 3)  # (B, G, 1, hd)
 
         q, rope_state = (
-            RoPE().forward_state(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).unwrap_with()
+            RoPE().forward_state(q_heads.transpose(0, 2, 1, 3), position, rope_dim=self.rope_dim).unwrap_with()
         )
         q = q.transpose(0, 2, 1, 3)  # (B, H, 1, hd)
-        k = RoPE().forward_state(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).unwrap()
+        k = RoPE().forward_state(k_heads.transpose(0, 2, 1, 3), position, rope_dim=self.rope_dim).unwrap()
         k = k.transpose(0, 2, 1, 3)  # (B, G, 1, hd)
 
         if quantize:
@@ -419,10 +429,10 @@ class MultiHeadAttention:
         # taken from THIS step (the cache after the append is what the query
         # attended to). The dense path's state is filled by forward_state;
         # here we fill the parallel keys from the step-local variables.
-        if state is not None:
+        if record is not None:
             k_exp = np.repeat(k, H // G, axis=1) if G != H else k  # (B, H, 1, hd)
             v_exp = np.repeat(v, H // G, axis=1) if G != H else v  # (B, H, 1, hd)
-            state.update(
+            record.update(
                 {
                     "q_pre": q_pre,
                     "k_pre": k_pre,
@@ -447,7 +457,7 @@ class MultiHeadAttention:
             )
         return out
 
-    def forward_chunk(self, x: np.ndarray, position: int, cache: dict, state: dict | None = None) -> np.ndarray:
+    def forward_chunk(self, x: np.ndarray, position: int, cache: dict, record: dict | None = None) -> np.ndarray:
         """Process a CHUNK of c tokens against the cached K/V (verification path).
 
         The speculative-decoding workhorse: one call appends all c tokens'
@@ -465,8 +475,8 @@ class MultiHeadAttention:
             0..position-1).
         cache: per-layer dict {"k": (B, G, t, hd), "v": (B, G, t, hd)};
             mutated in place — the chunk's K/V are appended before attention.
-        state: optional dict; when given it is filled with the same keys as
-            ``forward_step``'s state (the learning-mode record); the math
+        record: optional dict; when given it is filled with the same keys as
+            ``forward_step``'s record (the learning-mode record); the math
             is bit-identical either way.
 
         Returns
@@ -480,7 +490,7 @@ class MultiHeadAttention:
 
         Math (the slice of ``forward`` where positions [position, position+c)
         attend to everything at or before them):
-            q = (x @ Wq) → (B, H, c, hd), RoPE at positions position..position+c-1
+            q = (x @ Wq) → (B, H, c, hd), RoPE at position..position+c-1
             k = (x @ Wk) → (B, G, c, hd), RoPE at the same positions
             v = (x @ Wv) → (B, G, c, hd)
             append k, v to cache → (B, G, t+c, hd)
@@ -494,8 +504,6 @@ class MultiHeadAttention:
         """
         B, c, _ = x.shape
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
-        positions = np.arange(position, position + c, dtype=np.int32)  # (c,)
-
         q_pre = x @ self.q_proj  # (B, c, H*hd)
         k_pre = x @ self.k_proj  # (B, c, G*hd)
         v_pre = x @ self.v_proj  # (B, c, G*hd)
@@ -506,10 +514,10 @@ class MultiHeadAttention:
 
         # RoPE the whole chunk at once (the operator's (B, S, H, hd) view).
         q, rope_state = (
-            RoPE().forward_state(q_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).unwrap_with()
+            RoPE().forward_state(q_heads.transpose(0, 2, 1, 3), position, rope_dim=self.rope_dim).unwrap_with()
         )
         q = q.transpose(0, 2, 1, 3)  # (B, H, c, hd)
-        k = RoPE().forward_state(k_heads.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim).unwrap()
+        k = RoPE().forward_state(k_heads.transpose(0, 2, 1, 3), position, rope_dim=self.rope_dim).unwrap()
         k = k.transpose(0, 2, 1, 3)  # (B, G, c, hd)
 
         # Append the chunk's per-group K/V to the cache.
@@ -541,10 +549,10 @@ class MultiHeadAttention:
         ctx = ctx.transpose(0, 2, 1, 3).reshape(B, c, H * hd)  # (B, c, H*hd)
         out = ctx @ self.o_proj  # (B, c, D)
 
-        if state is not None:
+        if record is not None:
             k_exp = np.repeat(cache["k"], H // G, axis=1) if G != H else cache["k"]  # (B, H, t+c, hd)
             v_exp = np.repeat(cache["v"], H // G, axis=1) if G != H else cache["v"]
-            state.update(
+            record.update(
                 {
                     "q_pre": q_pre,
                     "k_pre": k_pre,
@@ -595,14 +603,12 @@ class MultiHeadAttention:
         """
         return bits.astype(scale.dtype) * scale
 
-    def backward(
-        self, dout: np.ndarray, x: np.ndarray, positions: np.ndarray | None = None
-    ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    def backward(self, dout: np.ndarray, x: np.ndarray, position: int = 0) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """Analytic backward (derivation in the class docstring).
 
         Invariant/contract: the forward intermediates are RECOMPUTED from
         ``x`` (stateless — no cached activations), so ``x`` and
-        ``positions`` must be exactly the forward's inputs; the gradient
+        ``position`` must be exactly the forward's inputs; the gradient
         w.r.t. each weight has the weight's own shape, and ``dx`` carries
         the full upstream (the residual is the caller's concern). Verified
         against finite differences (float64, ~1e-10) by
@@ -616,8 +622,8 @@ class MultiHeadAttention:
         x : np.ndarray, shape (B, S, D)
             The forward input (the post-LN1 stream) — recomputes every
             intermediate from it.
-        positions : np.ndarray, shape (S,) or (B, S), optional
-            The same RoPE positions used in forward; None → arange(S).
+        position : int, optional
+            The same first-token index the forward used.
 
         Returns
         -------
@@ -628,9 +634,7 @@ class MultiHeadAttention:
             {"q_proj": (D, H*hd), "k_proj": (D, G*hd), "v_proj": (D, G*hd),
              "o_proj": (H*hd, D)}.
         """
-        if positions is None:
-            positions = np.arange(x.shape[1], dtype=np.int32)
-        st = self.forward_state(x, positions).ctx.merged()
+        st = self.forward_state(x, position).ctx.merged()
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
         B, S, _D = x.shape
         scale = st["scale"]
@@ -669,10 +673,10 @@ class MultiHeadAttention:
         q_in = st["q_rope_in"]  # (B, H, S, hd)
         k_in = st["k_rope_in"]  # (B, G, S, hd)
         dq = rope.backward(
-            dq.transpose(0, 2, 1, 3), q_in.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim
+            dq.transpose(0, 2, 1, 3), q_in.transpose(0, 2, 1, 3), position, rope_dim=self.rope_dim
         ).transpose(0, 2, 1, 3)  # (B, H, S, hd)
         dk = rope.backward(
-            dk.transpose(0, 2, 1, 3), k_in.transpose(0, 2, 1, 3), positions, rope_dim=self.rope_dim
+            dk.transpose(0, 2, 1, 3), k_in.transpose(0, 2, 1, 3), position, rope_dim=self.rope_dim
         ).transpose(0, 2, 1, 3)  # (B, G, S, hd)
 
         # 7. Projection gradients and input gradient (linear layer rule).

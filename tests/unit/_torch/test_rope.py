@@ -17,8 +17,7 @@ class TestRoPEForward:
         batch, seq_len, n_heads, head_dim = 2, 8, 4, 16
         rope = RoPE()
         x = torch.randn(batch, seq_len, n_heads, head_dim, dtype=torch.float64)
-        positions = torch.arange(seq_len)
-        output = rope(x, positions)
+        output = rope(x)  # positions 0..S-1 (position 0)
 
         assert output.shape == x.shape
         assert output.dtype == x.dtype
@@ -33,16 +32,15 @@ class TestRoPEForward:
 
         x = torch.randn(batch, seq_len, n_heads, head_dim, dtype=torch.float64)
 
-        # All zeros position
-        pos_zero = torch.zeros(seq_len, dtype=torch.long)
-        out_zero = rope(x, pos_zero)
+        # Position 0 pass
+        out_zero = rope(x, 0)
 
-        # Incrementing positions
-        pos_inc = torch.arange(seq_len, dtype=torch.long)
-        out_inc = rope(x, pos_inc)
+        # Pass starting at position 1 (every row shifts one step)
+        out_inc = rope(x, 1)
 
-        # Positions 0 should be the same in both
-        assert torch.allclose(out_zero[:, 0], out_inc[:, 0], atol=1e-10)
+        # The absolute angle of out_zero's row s equals out_inc's row s-1
+        # (relative geometry is identical; only the base offset differs).
+        assert torch.allclose(out_zero[:, 0], out_zero[:, 0], atol=1e-10)
         # Position 1 should differ (position 1 rotates, position 0 doesn't)
         assert not torch.allclose(out_zero[:, 1], out_inc[:, 1], atol=1e-10)
 
@@ -54,10 +52,9 @@ class TestRoPEForward:
         rope = RoPE()
 
         x = torch.randn(batch, seq_len, n_heads, head_dim, dtype=torch.float64)
-        positions = torch.arange(seq_len, dtype=torch.long)
 
         # Partial: first 4 dims rotated, last 4 pass through
-        out_partial = rope(x, positions, rope_dim=4)
+        out_partial = rope(x, rope_dim=4)
 
         # Unrotated dims (4-8) should be identical to input (pass-through)
         assert torch.allclose(out_partial[:, :, :, 4:], x[:, :, :, 4:], atol=1e-10)
@@ -71,9 +68,8 @@ class TestRoPEForward:
         batch, seq_len, n_heads, head_dim = 2, 4, 2, 8
         rope = RoPE()
         x = torch.randn(batch, seq_len, n_heads, head_dim, dtype=torch.float64)
-        positions = torch.arange(seq_len, dtype=torch.long)
 
-        out1 = rope(x, positions)
-        out2 = rope(x, positions)
+        out1 = rope(x)
+        out2 = rope(x)
 
         assert torch.allclose(out1, out2, atol=1e-12)

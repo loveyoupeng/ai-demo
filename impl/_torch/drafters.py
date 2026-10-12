@@ -68,11 +68,11 @@ def _stable_probs(logits: torch.Tensor) -> torch.Tensor:
     return e / torch.sum(e, dim=-1, keepdim=True)
 
 
-def _rope_apply(x: torch.Tensor, positions: torch.Tensor, rope_dim: int = 0) -> torch.Tensor:
+def _rope_apply(x: torch.Tensor, position: int = 0, rope_dim: int = 0) -> torch.Tensor:
     """RoPE over (B, S, heads, D): rotate even/odd pairs by pos·theta_k.
 
     Same math as ``impl._torch.layers.RoPE`` (theta_k = 10000^(-2k/d),
-    positions (S,) → angles (S, pair_dim), broadcast over batch and heads),
+    the pass's positions arange → angles (S, pair_dim), broadcast over batch and heads),
     inlined as a function so importing this module never consumes the
     global RNG. ``rope_dim`` 0 rotates every dimension; 0 < rope_dim < D
     rotates the first rope_dim and passes the rest through (the main
@@ -85,7 +85,8 @@ def _rope_apply(x: torch.Tensor, positions: torch.Tensor, rope_dim: int = 0) -> 
         x_rot, x_pass = x, None
     B, S, H = x_rot.shape[0], x_rot.shape[1], x_rot.shape[2]
     pair_dim = x_rot.shape[-1] // 2
-    positions = positions.to(x.device)
+    # The one place the block-local positions are built: consecutive from `position`.
+    positions = torch.arange(position, position + S, device=x.device, dtype=torch.long)
     # theta_k = 10000^(-2k / d) — (pair_dim,)
     freqs = 1.0 / (10000.0 ** (torch.arange(pair_dim, device=x.device, dtype=torch.float32) * 2.0 / x_rot.shape[-1]))
     angles = positions.unsqueeze(-1) * freqs.unsqueeze(0)  # (S, pair_dim)
@@ -138,10 +139,10 @@ class _DrafterBlock(nn.Module):
         nn.init.kaiming_uniform_(self.mlp_up, a=math.sqrt(5))
         nn.init.kaiming_uniform_(self.mlp_down, a=math.sqrt(5))
 
-    def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Standard pre-norm block forward with the configured mask.
 
-        x: (B, S, D) → out: (B, S, D).
+        x: (B, S, D) → out: (B, S, D). Block-local RoPE positions start at 0.
         """
         B, S, _ = x.shape
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
@@ -149,9 +150,9 @@ class _DrafterBlock(nn.Module):
         q = self.self_attn_q(ln1).view(B, S, H, hd).permute(0, 2, 1, 3)  # (B, H, S, hd)
         k = self.self_attn_k(ln1).view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd)
         v = self.self_attn_v(ln1).view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd)
-        # RoPE contract: (B, S, heads, hd) with positions (S,).
-        q = _rope_apply(q.permute(0, 2, 1, 3), positions, self.rope_dim).permute(0, 2, 1, 3)  # (B, H, S, hd)
-        k = _rope_apply(k.permute(0, 2, 1, 3), positions, self.rope_dim).permute(0, 2, 1, 3)  # (B, G, S, hd)
+        # RoPE contract: (B, S, heads, hd); block-local positions 0..S-1.
+        q = _rope_apply(q.permute(0, 2, 1, 3), rope_dim=self.rope_dim).permute(0, 2, 1, 3)  # (B, H, S, hd)
+        k = _rope_apply(k.permute(0, 2, 1, 3), rope_dim=self.rope_dim).permute(0, 2, 1, 3)  # (B, G, S, hd)
         if G != H:
             k = k.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
             v = v.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
@@ -188,9 +189,8 @@ class _DrafterBlock(nn.Module):
         q = self.self_attn_q(ln1).view(B, 1, H, hd).permute(0, 2, 1, 3)  # (B, H, 1, hd)
         k = self.self_attn_k(ln1).view(B, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
         v = self.self_attn_v(ln1).view(B, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
-        positions = torch.tensor([position], device=x.device, dtype=torch.long)
-        q = _rope_apply(q.permute(0, 2, 1, 3), positions, self.rope_dim).permute(0, 2, 1, 3)  # (B, H, 1, hd)
-        k = _rope_apply(k.permute(0, 2, 1, 3), positions, self.rope_dim).permute(0, 2, 1, 3)  # (B, G, 1, hd)
+        q = _rope_apply(q.permute(0, 2, 1, 3), position, self.rope_dim).permute(0, 2, 1, 3)  # (B, H, 1, hd)
+        k = _rope_apply(k.permute(0, 2, 1, 3), position, self.rope_dim).permute(0, 2, 1, 3)  # (B, G, 1, hd)
         # Append the new K/V to the cache (per-group; K already RoPE'd).
         cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+1, hd)
         cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+1, hd)
@@ -426,9 +426,8 @@ class TorchDSparkDrafter(nn.Module):
         h_rep = h_norm.expand(B, k, D)  # (B, k, D) — no copy
         pos = self.pos_emb[:k].reshape(1, k, D).expand(B, k, D)  # (B, k, D)
         x = self.in_proj(torch.cat([h_rep, pos], dim=-1))  # (B, k, 2D) @ (2D, D) → (B, k, D)
-        positions = torch.arange(k, device=x.device)  # block-local positions (RoPE over the block)
-        p = self.parallel(x, positions)  # (B, k, D) — NON-causal
-        s = self.seq(p, positions)  # (B, k, D) — causal refinement
+        p = self.parallel(x)  # (B, k, D) — NON-causal, block-local positions from 0
+        s = self.seq(p)  # (B, k, D) — causal refinement
         logits = self.out_norm(s) @ self.lm_head_weight  # (B, k, V)
         probs = _stable_probs(logits)  # (B, k, V)
         tokens = torch.argmax(logits, dim=-1)  # (B, k) greedy proposal

@@ -119,7 +119,7 @@ class CUDAModel:
         # (B, S) → (B, S, D)
         x = self.embedding_weights.to(device)[x]
         # (B, S, D) → (B, S, D)
-        x = self.stacking.forward(x)
+        x = self.stacking.forward(x)  # position 0: fresh-sequence forward
         # (B, S, D) → (B, S, D)
         x = _rmsnorm(x, self.final_norm_gamma.to(device), eps=self.config.norm_eps)  # (B, S, D)
         # (B, S, D) @ (D, V) → (B, S, V)
@@ -160,7 +160,7 @@ class CUDAModel:
         ]
 
     def forward_prefill(
-        self, input_ids: torch.Tensor, cache: list[dict[str, torch.Tensor]] | None = None
+        self, input_ids: torch.Tensor, cache: list[dict[str, torch.Tensor]] | None = None, position: int = 0
     ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
         """Run a full-sequence forward and fill the per-layer KV cache.
 
@@ -182,13 +182,13 @@ class CUDAModel:
         # as a device pointer.
         device = self.device
         input_ids = input_ids.to(device)
-        positions = torch.arange(S, device=device, dtype=torch.long)
         states: list[dict[str, torch.Tensor]] = []
         x = self.embedding_weights.to(device)[input_ids]  # (B, S, D)
         # Capture each block's attention state while forwarding (no second pass).
         for block in self.stacking.blocks:
-            x, block_state = block.forward_state(x, positions)
-            states.append(block_state)
+            block_res = block.forward_state(x, position)
+            x = block_res.value
+            states.append(block_res.ctx.display)
         x = _rmsnorm(x, self.final_norm_gamma.to(device), eps=self.config.norm_eps)  # (B, S, D)
         logits = x @ self.lm_head_weight.to(device)  # (B, S, V)
         for i, attn_state in enumerate(states):

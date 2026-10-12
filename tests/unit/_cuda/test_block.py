@@ -158,21 +158,21 @@ class TestBlockForward:
         )
 
     @pytest.fixture()
-    def positions(self) -> torch.Tensor:
-        return torch.arange(8, device="cuda")
+    def position(self) -> int:
+        return 0  # positions 0..7 (S=8)
 
-    def test_forward_shape(self, block_on_cuda: CuTransformerBlock, positions: torch.Tensor) -> None:
+    def test_forward_shape(self, block_on_cuda: CuTransformerBlock, position: int) -> None:
         """Forward must preserve (B, S, D) shape."""
         B, S, D = 2, 8, 64
         x = torch.randn(B, S, D, device="cuda")
-        out = block_on_cuda.forward(x, positions)
+        out = block_on_cuda.forward(x, position)
         assert out.shape == (B, S, D), f"Expected ({B}, {S}, {D}), got {out.shape}"
 
-    def test_forward_fp32(self, block_on_cuda: CuTransformerBlock, positions: torch.Tensor) -> None:
+    def test_forward_fp32(self, block_on_cuda: CuTransformerBlock, position: int) -> None:
         """Forward must work with fp32 input."""
         B, S, D = 1, 4, 64
         x = torch.randn(B, S, D, device="cuda", dtype=torch.float32)
-        out = block_on_cuda.forward(x, torch.arange(S, device="cuda"))
+        out = block_on_cuda.forward(x)  # positions 0..S-1
         assert out.dtype == torch.float32
         assert out.shape == (B, S, D)
 
@@ -183,23 +183,23 @@ class TestBlockForward:
         )
         B, S, D = 2, 4, 64
         x = torch.randn(B, S, D, device="cuda")
-        out = block.forward(x, torch.arange(S, device="cuda"))
+        out = block.forward(x)  # positions 0..S-1
         assert out.shape == (B, S, D)
         assert torch.isfinite(out).all()
 
-    def test_forward_with_positions(self, block_on_cuda: CuTransformerBlock, positions: torch.Tensor) -> None:
+    def test_forward_with_positions(self, block_on_cuda: CuTransformerBlock, position: int) -> None:
         """Forward with explicit positions must work."""
         B, S, D = 1, 8, 64
         x = torch.randn(B, S, D, device="cuda")
-        out = block_on_cuda.forward(x, positions)
+        out = block_on_cuda.forward(x, position)
         assert out.shape == (B, S, D)
         assert torch.isfinite(out).all()
 
-    def test_forward_with_rope(self, block_on_cuda: CuTransformerBlock, positions: torch.Tensor) -> None:
+    def test_forward_with_rope(self, block_on_cuda: CuTransformerBlock, position: int) -> None:
         """Forward with rope_dim > 0 must produce finite output."""
         B, S, D = 1, 8, 64
         x = torch.randn(B, S, D, device="cuda")
-        out = block_on_cuda.forward(x, positions)
+        out = block_on_cuda.forward(x, position)
         assert out.shape == (B, S, D)
         assert torch.isfinite(out).all()
 
@@ -221,17 +221,17 @@ class TestBlockForward:
         x = torch.zeros(1, s, d, device="cuda")
         x[0, 0, :8] = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0], device="cuda")
         x[0, 1, 8:] = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0], device="cuda")
-        out = block.forward(x, torch.zeros(2, device="cuda"))
+        out = block.forward(x)
         assert out.shape == (1, s, d)
         # Zero weights: out = x + 0 + 0 = x
         assert torch.allclose(out, x, atol=1e-4)
 
-    def test_forward_large_batch(self, block_on_cuda: CuTransformerBlock, positions: torch.Tensor) -> None:
+    def test_forward_large_batch(self, block_on_cuda: CuTransformerBlock, position: int) -> None:
         """Forward must handle larger batch sizes."""
         B, S, D = 4, 16, 64
         x = torch.randn(B, S, D, device="cuda")
-        pos = torch.arange(S, device="cuda")
-        out = block_on_cuda.forward(x, pos)
+        # positions 0..S-1 (position 0)
+        out = block_on_cuda.forward(x)
         assert out.shape == (B, S, D)
         assert torch.isfinite(out).all()
 
@@ -249,7 +249,7 @@ class TestBlockMoEIntegration:
         """MoE output must be (B, S, D)."""
         B, S, D = 1, 4, 32
         x = torch.randn(B, S, D, device="cuda")
-        out = block_on_cuda.forward(x, torch.zeros(S, device="cuda"))
+        out = block_on_cuda.forward(x)
         assert out.shape == (B, S, D)
         assert torch.isfinite(out).all()
 
@@ -258,14 +258,14 @@ class TestBlockMoEIntegration:
         B, S, D = 1, 2, 32
         x = torch.randn(B, S, D, device="cuda")
 
-        out1 = block_on_cuda.forward(x, torch.zeros(S, device="cuda"))
+        out1 = block_on_cuda.forward(x)
 
         # Perturb the expert weights
         with torch.no_grad():
             block_on_cuda.expert_gate_proj.add_(torch.randn_like(block_on_cuda.expert_gate_proj) * 0.1)
             block_on_cuda.expert_up_proj.add_(torch.randn_like(block_on_cuda.expert_up_proj) * 0.1)
             block_on_cuda.expert_down_proj.add_(torch.randn_like(block_on_cuda.expert_down_proj) * 0.1)
-        out2 = block_on_cuda.forward(x, torch.zeros(S, device="cuda"))
+        out2 = block_on_cuda.forward(x)
 
         assert not torch.allclose(out1, out2, atol=1e-4)
         assert torch.isfinite(out2).all()

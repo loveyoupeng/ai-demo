@@ -176,7 +176,7 @@ class TestGenerateWithRecords:
         gen = []
         for _ in range(6):
             x = np.array([seq[-model.config.context_length :]], dtype=np.int32)
-            p = np.asarray(instrumented_forward(model, x)["softmax"], dtype=np.float64)[0][-1].copy()
+            p = np.asarray(instrumented_forward(model, x)[0]["softmax"], dtype=np.float64)[0][-1].copy()
             for tid in set(gen):
                 if 0 <= tid < len(p):
                     p[tid] = p[tid] / 1.3 if p[tid] > 0 else p[tid] * 1.3
@@ -257,7 +257,7 @@ class TestGenerateWithRecords:
         naive = []
         for _ in range(6):
             x = np.array([seq[-model.config.context_length :]], dtype=np.int32)
-            f = instrumented_forward(model, x)
+            f = instrumented_forward(model, x)[1]
             p = np.asarray(f["softmax"], dtype=np.float64)[0][-1].copy()
             # guard parity with the record sampler: penalty on emitted + hard block
             emitted = [x for x in naive]

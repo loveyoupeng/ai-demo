@@ -182,7 +182,7 @@ class NumPyModel:
                 mlp.down_proj = params[Keys.ffn(i, Mlp.DOWN_PROJ)].copy()
 
     def forward_with_trace(
-        self, input_ids: np.ndarray, positions: np.ndarray | None = None, record: dict | None = None
+        self, input_ids: np.ndarray, position: int = 0, record: dict | None = None
     ) -> tuple[np.ndarray, dict]:
         """Forward pass plus the intermediates the analytic backward needs.
 
@@ -192,11 +192,11 @@ class NumPyModel:
         Returns (logits, trace) where trace holds:
             x_in0    (B, S, D) embedding output (the stack input)
             stack_out (B, S, D) pre-final-norm activations
-            positions (S,) the RoPE positions used
+            position  int — the pass's first absolute token index
 
         record: optional dict for the learning-mode instrumented forward;
             when given, it is filled with the raw (unserialized)
-            intermediates of this pass: x_in0, stack_out, positions, the
+            intermediates of this pass: x_in0, stack_out, position, the
             per-block state dicts ("blocks"), x_final, and logits — the same
             values the operators kept for the backward, captured once along
             the way. The math (and its bit-level result) is identical either
@@ -204,11 +204,9 @@ class NumPyModel:
 
         ``forward`` is a thin wrapper over this (it drops the trace).
         """
-        if positions is None:
-            positions = np.arange(input_ids.shape[1], dtype=np.int32)
         blocks_rec = [{} for _ in self.stack.layers] if record is not None else None
         x_in0 = self.embedding.forward(input_ids)  # (B, S, D)
-        stack_out = self.stack.forward(x_in0, positions, record=blocks_rec)  # (B, S, D)
+        stack_out = self.stack.forward(x_in0, position, record=blocks_rec)  # (B, S, D)
         x_final = self.final_norm.forward(stack_out)  # (B, S, D)
         logits = x_final @ self.lm_head_weight  # (B, S, V)
         if record is not None:
@@ -216,13 +214,13 @@ class NumPyModel:
                 {
                     "x_in0": x_in0,
                     "stack_out": stack_out,
-                    "positions": positions,
+                    "position": position,
                     "blocks": blocks_rec,
                     "x_final": x_final,
                     "logits": logits,
                 }
             )
-        return logits, {"x_in0": x_in0, "stack_out": stack_out, "positions": positions}
+        return logits, {"x_in0": x_in0, "stack_out": stack_out, "position": position}
 
     def make_cache(self, batch_size: int, quantize: bool = False) -> list[dict]:
         """Create an empty per-layer KV cache for the per-token step path.
@@ -272,7 +270,7 @@ class NumPyModel:
         self,
         input_ids: np.ndarray,
         cache: list[dict] | None = None,
-        position_offset: int = 0,
+        position: int = 0,
         record: dict | None = None,
     ) -> tuple[np.ndarray, list[dict]]:
         """Run a full-sequence forward and fill the per-layer KV cache.
@@ -284,9 +282,10 @@ class NumPyModel:
             prompt (B = 1 on the learning page); training batches: B =
             many padded chunks of the same length.
         cache: optional pre-allocated cache (make_cache); created when None.
-        position_offset: added to the 0-based RoPE positions — so a windowed
-            prompt (longer prompt than the context) prefills at its absolute
-            positions while the decode steps keep using absolute ones.
+        position: the absolute index of the prompt's first token (0-based)
+            — the windowed-prefill offset, so a prompt longer than the
+            context prefills at its absolute positions while the decode
+            steps keep using absolute ones.
         record: optional dict filled with the raw intermediates of this pass
             (same keys as ``forward_with_trace``'s record) — the
             learning-mode prefill step.
@@ -299,10 +298,9 @@ class NumPyModel:
         B, S = input_ids.shape
         if cache is None:
             cache = self.make_cache(B)
-        positions = np.arange(S, dtype=np.int32) + position_offset
         blocks_rec = [{} for _ in self.stack.layers]
         x = self.embedding.forward(input_ids)  # (B, S, D)
-        stack_out = self.stack.forward(x, positions, record=blocks_rec)  # (B, S, D)
+        stack_out = self.stack.forward(x, position, record=blocks_rec)  # (B, S, D)
         x_final = self.final_norm.forward(stack_out)  # (B, S, D)
         logits = x_final @ self.lm_head_weight  # (B, S, V)
         # Backfill each layer's cache from this pass's attention state:
@@ -316,7 +314,7 @@ class NumPyModel:
                 {
                     "x_in0": x,
                     "stack_out": stack_out,
-                    "positions": positions,
+                    "position": position,
                     "blocks": blocks_rec,
                     "x_final": x_final,
                     "logits": logits,
@@ -373,7 +371,7 @@ class NumPyModel:
                 {
                     "x_in0": x,
                     "stack_out": stack_out,
-                    "positions": np.array([position], dtype=np.int32),
+                    "position": position,
                     "blocks": blocks_rec,
                     "x_final": x_final,
                     "logits": logits,
@@ -413,7 +411,6 @@ class NumPyModel:
         sequence — the same guarantee ``forward_step`` carries (pinned by
         the chunk parity tests).
         """
-        c = input_ids.shape[1]
         x = self.embedding.forward(input_ids)  # (B, c, D)
         blocks_rec = [{} for _ in self.stack.layers] if record is not None else None
         stack_out = self.stack.forward_chunk(x, position, cache, record=blocks_rec)  # (B, c, D)
@@ -424,7 +421,7 @@ class NumPyModel:
                 {
                     "x_in0": x,
                     "stack_out": stack_out,
-                    "positions": np.arange(position, position + c, dtype=np.int32),
+                    "position": position,
                     "blocks": blocks_rec,
                     "x_final": x_final,
                     "logits": logits,
@@ -455,7 +452,7 @@ class NumPyModel:
         dlogits = CrossEntropyLoss(shift=False).backward(logits, targets)  # (B, S, V)
 
         stack_out = trace["stack_out"]  # (B, S, D)
-        positions = trace["positions"]  # (S,)
+        position = trace["position"]  # the pass's first token index
         D, V = self.embed_dim, self.vocab_size
 
         # lm_head: logits = h @ W_lm where h = final_norm(stack_out)
@@ -467,7 +464,7 @@ class NumPyModel:
         dh, d_gamma_final = self.final_norm.backward(dh, stack_out)  # (B, S, D), (D,)
 
         # decoder stack (reverse order internally)
-        d_stack_in, per_layer_grads = self.stack.backward(dh, trace["x_in0"], positions)
+        d_stack_in, per_layer_grads = self.stack.backward(dh, trace["x_in0"], position)
 
         # embedding
         dW_emb = self.embedding.backward(d_stack_in, input_ids)  # (V, D)

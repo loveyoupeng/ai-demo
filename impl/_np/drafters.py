@@ -116,18 +116,18 @@ class _DrafterBlock:
 
         self.mlp = SwiGLUFFN(embed_dim=D, ff_dim=ff_dim, seed=seed + 2)
 
-    def forward(self, x: np.ndarray, positions: np.ndarray) -> np.ndarray:
+    def forward(self, x: np.ndarray) -> np.ndarray:
         """Standard pre-norm block forward with the configured mask.
 
         x: (B, S, D) the block's input (DSpark: the whole k-slot block,
-            S = k; MTP: a single step, S = 1).
-        positions: (S,) the block-local RoPE positions.
+            S = k; MTP: a single step, S = 1). Block-local RoPE positions
+            start at 0.
 
         Returns (B, S, D). Contract: causal=True for the seq module (slot
         j sees slots < j); False for the parallel backbone (every slot
         sees every slot — the DSpark architecture's core difference)."""
         ln1_out = self.input_layernorm.forward(x)  # (B, S, D)
-        attn_out = self.self_attn.forward(ln1_out, positions, causal=self.causal)  # (B, S, D)
+        attn_out = self.self_attn.forward(ln1_out, causal=self.causal)  # (B, S, D)
         h = x + attn_out  # (B, S, D)
         ln2_out = self.post_attention_layernorm.forward(h)  # (B, S, D)
         return h + self.mlp.forward(ln2_out)  # (B, S, D)
@@ -409,9 +409,8 @@ class DSparkDrafter:
         h_rep = np.repeat(h_norm, k, axis=1)  # (B, k, D)
         pos = np.broadcast_to(self.pos_emb[:k].reshape(1, k, D), (B, k, D))  # (B, k, D)
         x = np.concatenate([h_rep, pos], axis=-1) @ self.in_proj  # (B, k, 2D) @ (2D, D) → (B, k, D)
-        positions = np.arange(k, dtype=np.int32)  # block-local positions (RoPE over the block)
-        p = self.parallel.forward(x, positions)  # (B, k, D) — NON-causal
-        s = self.seq.forward(p, positions)  # (B, k, D) — causal refinement
+        p = self.parallel.forward(x)  # (B, k, D) — NON-causal, block-local positions from 0
+        s = self.seq.forward(p)  # (B, k, D) — causal refinement
         logits = self.out_norm.forward(s) @ self.lm_head_weight  # (B, k, V)
         probs = _stable_probs(logits)  # (B, k, V)
         tokens = np.argmax(logits, axis=-1)  # (B, k) greedy proposal

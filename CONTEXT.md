@@ -322,6 +322,22 @@ letters. Where each value comes from:
   attends against the cached tensors — O(1) per token instead of O(T).
   The NumPy track's reference implementation is the template the other
   three tracks mirror. The plain `forward` stays as the parity oracle.
+  Return shapes are per-method BY DESIGN (each extra is needed by exactly
+  its callers — the uniform-tuple alternative would wrap 3 signatures to
+  look alike):
+
+  | method | returns | why slot 1 (if any) |
+  | --- | --- | --- |
+  | `make_cache(B)` | the empty per-layer cache | — |
+  | `forward_prefill(ids, cache?, position)` | `(logits, cache)` | the filled cache, ready for steps |
+  | `forward_step(ids, position, cache)` | `logits` | nothing new to hand back — the cache is mutated in place |
+  | `forward_chunk(ids, position, cache)` | `(logits, x_final)` | the drafter's anchor hidden (final-norm output) |
+  | `forward` (parity oracle) | `logits` | — |
+
+  `position` (int, 0-based) is the pass's FIRST absolute token index on
+  every one of these — positions are consecutive by construction, so
+  RoPE builds `arange(position, position+S)` internally; no method takes
+  a position array.
 
 - **Shared generator** (`shared/generator.py`): the single deep
   `TextGenerator` implementation behind the KV-step interface —

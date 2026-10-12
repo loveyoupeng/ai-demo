@@ -303,7 +303,7 @@ def _flatten_positions(
     H: int,
     device: torch.device,
 ) -> torch.Tensor:
-    """Expand a (S,) or (B, S) position tensor to per-token (B*S*H,) int32.
+    """Expand a flat (S,) position tensor to per-token (B*S*H,) int32.
 
     The token flat index is ``((b * S) + s) * H + h`` (head fastest), matching
     the ``(tokens, D)`` layout used by the kernel. Each token therefore needs
@@ -312,7 +312,8 @@ def _flatten_positions(
     Parameters
     ----------
     positions : torch.Tensor
-        Position indices of shape (S,) or (B, S).
+        Flat position indices of shape (S,) — consecutive, built by
+        ``apply_rope`` from the pass's first-token index.
     B, S, H : int
         Batch, sequence length, and number of heads.
     device : torch.device
@@ -368,7 +369,8 @@ class _RoPECudaFunction(torch.autograd.Function):
         x : torch.Tensor
             Input tensor on device, shape (B, S, H, D).
         positions : torch.Tensor
-            Position indices, shape (S,) or (B, S) — flattened to (S).
+            Flat position indices, shape (S,) — consecutive (built by
+            apply_rope from the pass's first-token index).
         rope_dim : int, optional
             Number of head dimensions to rotate (must be even, <= D).
             0 (default) rotates ALL dims (standard RoPE); a value in
@@ -533,7 +535,7 @@ class _RoPECudaFunction(torch.autograd.Function):
 
 def apply_rope(
     x: torch.Tensor,
-    positions: torch.Tensor,
+    position: int = 0,
     *,
     rope_dim: int = 0,
 ) -> torch.Tensor:
@@ -559,7 +561,7 @@ def apply_rope(
     ----------
     x : torch.Tensor, shape (B, S, H, D)
         Q or K tensor. B=batch, S=sequence, H=heads, D=dim_per_head.
-    positions : torch.Tensor, shape (S,)
+    position : int — this pass's FIRST absolute token index;
         Position indices for each sequence element (0 to S-1).
     rope_dim : int, optional
         Number of head dimensions to rotate (must be even, <= D).
@@ -596,4 +598,8 @@ def apply_rope(
     Su et al. "RoFormer: Enhanced Transformer with Rotary Position Embedding"
     https://arxiv.org/abs/2104.09864
     """
+    # The one place the position array is built: consecutive positions
+    # starting at `position` (the caller passes the int).
+    S = x.shape[1]
+    positions = torch.arange(position, position + S, device=x.device, dtype=torch.long)
     return _RoPECudaFunction.apply(x, positions, rope_dim)

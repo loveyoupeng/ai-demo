@@ -48,6 +48,7 @@ from impl._cuda.ffn import swiglu_ffn
 from impl._cuda.layernorm import rmsnorm
 from impl._cuda.rope import apply_rope
 from shared.config import TransformerConfig
+from shared.result import Result
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +167,7 @@ class CuTransformerBlock:
                 p.requires_grad_(True)
 
     # ---------------------------------------------------------------- forward
-    def forward(self, x: torch.Tensor, positions: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, position: int = 0) -> torch.Tensor:
         """Forward pass through the TransformerBlock.
 
         Pre-norm layout (identical math to the NumPy/PyTorch tracks):
@@ -212,10 +213,8 @@ class CuTransformerBlock:
         # RoPE on q and k (rope_dim=0 rotates all hd dims — the standard case).
         # The RoPE kernel expects (B, S, H, D) layout; transpose to the
         # attention kernel's (B, H, S, hd) layout afterwards.
-        if positions is None:
-            positions = torch.arange(S, device=x.device, dtype=torch.long)
-        q = apply_rope(q, positions, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, S, hd)
-        k = apply_rope(k, positions, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, S, hd)
+        q = apply_rope(q, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, S, hd)
+        k = apply_rope(k, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, S, hd)
         # GQA: broadcast each K/V group to its H // G query heads
         if G != H:
             k = k.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
@@ -244,17 +243,16 @@ class CuTransformerBlock:
         out = h + ff_out  # (B, S, D)
         return out
 
-    def forward_state(
-        self, x: torch.Tensor, positions: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def forward_state(self, x: torch.Tensor, position: int = 0) -> Result[torch.Tensor, dict]:
         """Block forward plus the attention K/V state the cache needs.
 
         Mirrors ``impl._torch.layers.TransformerBlock.forward_state`` (which
         mirrors ``impl._np.block.TransformerBlock.forward_state``): the
         prefill path requests the state and backfills the per-layer cache —
-        no second pass.
+        no second pass. Same ``Result`` contract (shared/result.py).
 
-        Returns (out (B, S, D), {"k_group": (B, G, S, hd), "v_group": (B, G, S, hd)}).
+        ``.value`` = out (B, S, D); ``.ctx.display`` = {"k_group":
+        (B, G, S, hd), "v_group": (B, G, S, hd)}.
         """
         B, S, D = x.shape
         device = x.device
@@ -279,10 +277,8 @@ class CuTransformerBlock:
         v = v.view(B, S, G, hd)
         v = v.transpose(1, 2).contiguous()  # (B, G, S, hd)
 
-        if positions is None:
-            positions = torch.arange(S, device=device, dtype=torch.long)
-        q = apply_rope(q, positions, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, S, hd)
-        k = apply_rope(k, positions, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, S, hd)
+        q = apply_rope(q, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, S, hd)
+        k = apply_rope(k, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, S, hd)
 
         k_group, v_group = k, v  # (B, G, S, hd) — the cacheable per-group form
 
@@ -302,9 +298,13 @@ class CuTransformerBlock:
         else:
             ff_out = swiglu_ffn(hn, self.gate_proj.to(device), self.up_proj.to(device), self.down_proj.to(device))
         out = h + ff_out  # (B, S, D)
-        return out, {"k_group": k_group, "v_group": v_group}
+        return Result.capture(out, {}, {"k_group": k_group, "v_group": v_group})
 
     def forward_step(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
+        # Fail fast on a schema mismatch: these tracks build only the naive
+        # {'k','v'} cache (make_cache has no quantize mode).
+        missing = [k for k in ("k", "v") if k not in cache]
+        assert not missing, f"forward_step needs a naive {{'k','v'}} cache (missing keys: {missing})"
         """Process ONE new token against this block's cached K/V (KV-cached path).
 
         Mirrors ``impl._torch.layers.TransformerBlock.forward_step`` (which
@@ -336,9 +336,8 @@ class CuTransformerBlock:
         k = (xn @ Wk).view(B, 1, G, hd)  # (B, 1, G, hd)
         v = (xn @ Wv).view(B, 1, G, hd).transpose(1, 2).contiguous()  # (B, G, 1, hd)
 
-        positions = torch.tensor([position], device=device, dtype=torch.long)
-        q = apply_rope(q, positions, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, 1, hd)
-        k = apply_rope(k, positions, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, 1, hd)
+        q = apply_rope(q, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, 1, hd)
+        k = apply_rope(k, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, 1, hd)
 
         # Append the new K/V to the cache (per-group; K already RoPE'd).
         cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+1, hd)
@@ -399,9 +398,8 @@ class CuTransformerBlock:
         k = k.view(B, c, G, hd)  # (B, c, G, hd)
         v = v.view(B, c, G, hd).transpose(1, 2).contiguous()  # (B, G, c, hd)
 
-        positions = torch.arange(position, position + c, device=device, dtype=torch.long)
-        q = apply_rope(q, positions, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, c, hd)
-        k = apply_rope(k, positions, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, c, hd)
+        q = apply_rope(q, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, c, hd)
+        k = apply_rope(k, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, c, hd)
 
         # Append the chunk's per-group K/V to the cache (K already RoPE'd).
         cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+c, hd)

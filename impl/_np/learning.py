@@ -29,7 +29,6 @@ from impl._np.drafters import DSparkDrafter, MTPDrafter
 from impl._np.model import NumPyModel
 from impl._np.moe import MixtureOfExperts
 from shared.constants import REP_PENALTY
-from shared.result import Result
 
 # ---------------------------------------------------------------------------
 # Tensor → JSON helpers
@@ -282,7 +281,7 @@ def _block_record(block: TransformerBlock, bs: dict) -> BlockRecord:
 def _forward_record(model: NumPyModel, raw: dict, input_ids: np.ndarray) -> ForwardRecord:
     """Serialize one pass' raw state (filled by the model's forward path).
 
-    ``raw`` holds x_in0, stack_out, positions, per-block state dicts
+    ``raw`` holds x_in0, stack_out, position, per-block state dicts
     ("blocks"), x_final, logits — the values the operators captured along
     the way. The softmax + top tokens are display extras derived from the
     logits (one stable softmax, no operator math).
@@ -300,7 +299,7 @@ def _forward_record(model: NumPyModel, raw: dict, input_ids: np.ndarray) -> Forw
     return {
         "input_ids": np.asarray(input_ids).tolist(),
         "embedding": arr(raw["x_in0"]),
-        "positions": raw["positions"].tolist(),
+        "positions": list(range(raw["position"], raw["position"] + raw["x_in0"].shape[1])),
         "blocks": [_block_record(model.stack.layers[i], raw["blocks"][i]) for i in range(len(model.stack.layers))],
         "final_norm": _rmsnorm_record(model.final_norm.gamma, raw["stack_out"], model.final_norm.eps, raw["x_final"]),
         "logits": arr(logits),
@@ -314,28 +313,27 @@ def _forward_record(model: NumPyModel, raw: dict, input_ids: np.ndarray) -> Forw
 # ---------------------------------------------------------------------------
 
 
-def instrumented_forward(model: NumPyModel, input_ids: np.ndarray) -> Result[ForwardRecord, dict]:
-    """One forward pass; return THE result + the captured record (the same
-    ``Result`` contract as the torch adapter — shared/result.py).
+def instrumented_forward(model: NumPyModel, input_ids: np.ndarray) -> tuple[ForwardRecord, dict]:
+    """One forward pass; return (the step record, the result tensors).
 
-    ``.value`` = the ForwardRecord (the step record: logits/softmax/
-    top_tokens and every block intermediate); ``.ctx`` = the real result
-    tensors separated out (logits (B, S, V), softmax (B, S, V) — the
-    tensors the page consumes). The output tensors are identical to
-    ``model.forward(input_ids)`` — the capture rides on the track's own
-    state hooks (the same ``forward_state`` the analytic backward uses),
-    so no intermediate is recomputed here. Same record shape as the torch
-    adapter (all arrays as nested float lists).
+    The record (logits/softmax/top_tokens and every block intermediate)
+    is the page payload; the tensors dict holds the real result arrays
+    (logits (B, S, V), softmax (B, S, V), top_tokens) — plain values,
+    identical to ``model.forward(input_ids)``. The capture rides on the
+    track's own state hooks (the same ``forward_state`` the analytic
+    backward uses), so no intermediate is recomputed here. Same record
+    shape as the torch adapter (all arrays as nested float lists).
     """
     x = np.asarray(input_ids, dtype=np.int32)
     raw: dict = {}
-    model.forward_with_trace(x, None, record=raw)
+    model.forward_with_trace(x, record=raw)
     record: ForwardRecord = _forward_record(model, raw, x)
-    return Result.capture(
-        record,
-        backward={},
-        display={"logits": record["logits"], "softmax": record["softmax"], "top_tokens": record["top_tokens"]},
-    )
+    tensors = {
+        "logits": record["logits"],
+        "softmax": record["softmax"],
+        "top_tokens": record["top_tokens"],
+    }
+    return record, tensors
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +367,7 @@ def generate_with_records(
 
     When the prompt is longer than ``context_length`` it is windowed to the
     last ``ctx`` tokens; the prefill then runs at the window's *absolute*
-    RoPE positions (``position_offset``), so the decode steps — which always
+    RoPE positions (the ``position`` prefill offset), so the decode steps — which always
     use absolute positions — see the same relative geometry as generating
     from the tail directly.
 
@@ -441,7 +439,7 @@ def generate_with_records(
     window = list(seq[-P0:])
     x = np.array([window], dtype=np.int32)  # (1, P0)
     raw: dict = {}
-    _logits, cache = model.forward_prefill(x, None, position_offset=P - P0, record=raw)
+    _logits, cache = model.forward_prefill(x, None, position=P - P0, record=raw)
     rec = _forward_record(model, raw, x)
     tok = _pick(np.asarray(rec["softmax"], dtype=np.float64)[0][-1])
     emitted.append(tok)

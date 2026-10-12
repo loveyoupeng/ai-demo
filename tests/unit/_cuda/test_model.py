@@ -218,8 +218,7 @@ class TestDecoderStackForward:
         stack = CuDecoderStack(cfg)
         B, S, D = 2, 16, 128
         inp = torch.randn(B, S, D, device="cuda")
-        positions = torch.arange(S, device="cuda")
-        out = stack.forward(inp, positions=positions)
+        out = stack.forward(inp)  # positions 0..S-1
         assert not torch.isnan(out).any()
         assert not torch.isinf(out).any()
 

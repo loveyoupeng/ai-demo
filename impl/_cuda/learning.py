@@ -97,28 +97,31 @@ def _rmsnorm_record(gamma: torch.Tensor, x: torch.Tensor, eps: float, out: torch
 
 
 def _rope_tables(
-    d_rot: int, positions: torch.Tensor
+    d_rot: int, position: int, seq_len: int
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
     """RoPE frequencies/angles/cos/sin (same math as kernels/rope.cu).
 
-    positions: 1-D long tensor of S absolute positions. The CUDA kernel
+    position: this pass's FIRST absolute token index; the consecutive
+    positions position..position+seq_len-1 are built here. The CUDA kernel
     rotates adjacent pairs (x_2m, x_2m+1) with θ_m = 10000^(-2m/d_rot).
     """
     pair_dim = d_rot // 2
     freqs = 1.0 / (10000.0 ** (torch.arange(pair_dim, dtype=torch.float64) * 2.0 / d_rot))
-    angles = positions.to(torch.float64).unsqueeze(-1) * freqs.unsqueeze(0)  # (S, pair_dim)
+    pos = torch.arange(position, position + seq_len, dtype=torch.long)
+    angles = pos.to(torch.float64).unsqueeze(-1) * freqs.unsqueeze(0)  # (S, pair_dim)
     return freqs, angles, (torch.cos(angles), torch.sin(angles))
 
 
-def _rope(x: torch.Tensor, positions: torch.Tensor, rope_dim: int) -> torch.Tensor:
-    """Apply RoPE in float64 to x (B, S, H, hd); positions: 1-D (S,).
+def _rope(x: torch.Tensor, position: int, rope_dim: int) -> torch.Tensor:
+    """Apply RoPE in float64 to x (B, S, H, hd); position: the pass's
+    first absolute token index (positions built inside).
 
     rope_dim: 0 → rotate all head dims; 0 < rope_dim < hd → rotate the first
     rope_dim dims only (the rest pass through, un-rotated).
     """
     d = x.shape[-1]
     d_rot = rope_dim if (0 < rope_dim < d) else d
-    _, _, (cos, sin) = _rope_tables(d_rot, positions)
+    _, _, (cos, sin) = _rope_tables(d_rot, position, x.shape[1])
     cos = cos.unsqueeze(1).unsqueeze(0)  # (1, S, 1, pair_dim)
     sin = sin.unsqueeze(1).unsqueeze(0)  # (1, S, 1, pair_dim)
     xr = x[..., :d_rot]
@@ -131,18 +134,18 @@ def _rope(x: torch.Tensor, positions: torch.Tensor, rope_dim: int) -> torch.Tens
     return y
 
 
-def _rope_record(x_rot: torch.Tensor, positions: torch.Tensor, rope_dim: int) -> RopeRecord:
+def _rope_record(x_rot: torch.Tensor, position: int, rope_dim: int) -> RopeRecord:
     """Recompute the RoPE frequencies/angles/cos/sin (same math as the track's RoPE).
 
     x_rot: (B, S, H, d) the tensor that will be rotated.
+    position: the pass's first absolute token index (positions built inside).
     rope_dim: 0 → rotate all head dims; 0 < rope_dim < d → rotate the first
     rope_dim dims only (the rest pass through, un-rotated).
     """
     d = x_rot.shape[-1]
     d_rot = rope_dim if (0 < rope_dim < d) else d
-    pos = torch.as_tensor(positions, dtype=torch.long)
-    if pos.ndim == 1:
-        pos = pos.unsqueeze(0).expand(x_rot.shape[0], x_rot.shape[1])  # (B, S)
+    pos = torch.arange(position, position + x_rot.shape[1], dtype=torch.long)
+    pos = pos.unsqueeze(0).expand(x_rot.shape[0], x_rot.shape[1])  # (B, S)
     pair_dim = d_rot // 2
     freqs = 1.0 / (10000.0 ** (torch.arange(pair_dim, dtype=torch.float64) * 2.0 / d_rot))
     angles = pos.to(torch.float64).unsqueeze(-1) * freqs.unsqueeze(0)  # (B, S, pair_dim)
@@ -158,7 +161,7 @@ def _rope_record(x_rot: torch.Tensor, positions: torch.Tensor, rope_dim: int) ->
 def _attention_forward(
     block: CuTransformerBlock,
     ln1_out: torch.Tensor,
-    positions: torch.Tensor,
+    position: int,
     cache: dict[str, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, AttnRecord]:
     """Run the block's attention math (float64 display path) + record.
@@ -185,8 +188,8 @@ def _attention_forward(
     v = v_pre.view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd)
 
     # RoPE (the track's convention: adjacent pairs, θ_m over d_rot)
-    q = _rope(q_rope_in.permute(0, 2, 1, 3), positions, block.rope_dim).permute(0, 2, 1, 3)  # (B, H, S, hd)
-    k = _rope(k_rope_in.permute(0, 2, 1, 3), positions, block.rope_dim).permute(0, 2, 1, 3)  # (B, G, S, hd)
+    q = _rope(q_rope_in.permute(0, 2, 1, 3), position, block.rope_dim).permute(0, 2, 1, 3)  # (B, H, S, hd)
+    k = _rope(k_rope_in.permute(0, 2, 1, 3), position, block.rope_dim).permute(0, 2, 1, 3)  # (B, G, S, hd)
 
     if cache is not None:
         # Decode: append this token's K/V to the block's cache, then attend
@@ -232,7 +235,7 @@ def _attention_forward(
         "k": arr(k_x),  # (B, H, S, hd) post-RoPE (GQA-expanded), this step's rows
         "v": arr(v_x),  # (B, H, S, hd)
         "scale": float(scale),  # sqrt(hd) — divide scores by this
-        "rope": _rope_record(q_rope_in.permute(0, 2, 1, 3), positions, block.rope_dim),
+        "rope": _rope_record(q_rope_in.permute(0, 2, 1, 3), position, block.rope_dim),
         "scores": arr(scores),  # (B, H, S, t)
         "scores_masked": arr(scores_masked),  # (B, H, S, t)
         "causal_mask": arr(mask.to(torch.float64)),  # (S, t) — all 0 in decode
@@ -246,21 +249,19 @@ def _attention_forward(
     }
 
 
-def _init_kv_cache(
-    block: CuTransformerBlock, k_pre: torch.Tensor, v_pre: torch.Tensor, positions: torch.Tensor
-) -> dict:
+def _init_kv_cache(block: CuTransformerBlock, k_pre: torch.Tensor, v_pre: torch.Tensor, position: int) -> dict:
     """Build a block's KV cache from a prefill pass.
 
     k_pre/v_pre are the pre-RoPE, un-split projections (B, S, G·hd). The
     cache stores K/V *per group* (GQA keeps it small); RoPE is applied to K
-    with the prefill positions so later decode steps only rotate the NEW
+    with the pass's positions so later decode steps only rotate the NEW
     token and can attend to these cached rows unchanged.
     """
     B, S, _ = k_pre.shape
     G, hd = block.n_groups, block.head_dim
     k_heads = k_pre.view(B, S, G, hd)  # (B, S, G, hd) pre-RoPE
     v_heads = v_pre.view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd)
-    k_heads = _rope(k_heads, positions, block.rope_dim).permute(0, 2, 1, 3)  # (B, G, S, hd) post-RoPE
+    k_heads = _rope(k_heads, position, block.rope_dim).permute(0, 2, 1, 3)  # (B, G, S, hd) post-RoPE
     return {"k": k_heads, "v": v_heads}  # each (B, G, S, hd)
 
 
@@ -377,7 +378,7 @@ def _validate_against_real_forward(model: CUDAModel, input_ids: torch.Tensor, lo
 def _instrumented_blocks(
     model: CUDAModel,
     stream: torch.Tensor,
-    positions: torch.Tensor,
+    position: int,
     caches: list[dict] | None = None,
 ) -> tuple[torch.Tensor, list[BlockRecord]]:
     """Run every block of the stack in float64, capturing each block record.
@@ -389,7 +390,7 @@ def _instrumented_blocks(
         eps = model.config.norm_eps
         ln1_out, _ = _rmsnorm(stream, _w(block.input_layernorm_gamma), eps)  # (B, S, D)
         attn_out, attn_rec = _attention_forward(
-            block, ln1_out, positions, cache=None if caches is None else caches[i]
+            block, ln1_out, position, cache=None if caches is None else caches[i]
         )  # (B, S, D)
         h = stream + attn_out  # (B, S, D) residual after attention
         ln2_out, _ = _rmsnorm(h, _w(block.post_attention_layernorm_gamma), eps)  # (B, S, D)
@@ -430,13 +431,12 @@ def instrumented_forward(model: CUDAModel, input_ids: torch.Tensor, *, validate:
     """
     x = input_ids.detach().cpu().to(torch.long)
     S = x.shape[1]
-    positions = torch.arange(S, dtype=torch.long)
 
     # Embedding: (B, S) → (B, S, D)
     emb = _w(model.embedding_weights)[x]
 
     # Blocks: each recomputed with direct torch ops; intermediates captured.
-    stream, blocks = _instrumented_blocks(model, emb, positions)
+    stream, blocks = _instrumented_blocks(model, emb, 0)
 
     # Final norm + lm_head: (B, S, D) → (B, S, D) → (B, S, V)
     normed, _ = _rmsnorm(stream, _w(model.final_norm_gamma), model.config.norm_eps)
@@ -452,7 +452,7 @@ def instrumented_forward(model: CUDAModel, input_ids: torch.Tensor, *, validate:
     return {
         "input_ids": x.tolist(),
         "embedding": arr(emb),
-        "positions": positions.tolist(),
+        "positions": list(range(S)),
         "blocks": blocks,
         "final_norm": _rmsnorm_record(_w(model.final_norm_gamma), stream, model.config.norm_eps, normed),
         "logits": arr(logits),
@@ -562,13 +562,13 @@ def generate_with_records(
     )
     seq.append(tok)
     p0 = list(x[0].tolist())
-    positions0 = torch.arange(len(p0), dtype=torch.long) + (len(seq) - 1 - len(p0))  # absolute
+    pos0 = len(seq) - 1 - len(p0)  # the window's first absolute position
     caches: list[dict] = []
     for i, block in enumerate(model.stacking.blocks):
         r = rec["blocks"][i]["attn"]
         # (as in the NumPy track) the cache is initialized from the recorded
         # pre-RoPE projections, so the display and the state agree exactly.
-        caches.append(_init_kv_cache(block, torch.tensor(r["k_pre"]), torch.tensor(r["v_pre"]), positions0))
+        caches.append(_init_kv_cache(block, torch.tensor(r["k_pre"]), torch.tensor(r["v_pre"]), pos0))
 
     # ---- Steps 1..n: autoregressive decode, one new token per step
     for i in range(1, n_tokens):
@@ -576,7 +576,7 @@ def generate_with_records(
         x1 = torch.tensor([[seq[-1]]], dtype=torch.int64)  # (1, 1)
         emb = _w(model.embedding_weights)[x1]  # (1, 1, D)
 
-        stream, blocks = _instrumented_blocks(model, emb, torch.tensor([t]), caches)
+        stream, blocks = _instrumented_blocks(model, emb, t, caches)
 
         normed, _ = _rmsnorm(stream, _w(model.final_norm_gamma), model.config.norm_eps)  # (1, 1, D)
         logits = normed @ _w(model.lm_head_weight)  # (1, 1, V)

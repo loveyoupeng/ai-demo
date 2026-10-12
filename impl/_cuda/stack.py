@@ -22,6 +22,7 @@ import torch
 
 from impl._cuda.block import CuTransformerBlock
 from shared.config import TransformerConfig
+from shared.result import Result
 
 
 class CuDecoderStack:
@@ -83,7 +84,7 @@ class CuDecoderStack:
     def forward(
         self,
         x: torch.Tensor,
-        positions: torch.Tensor | None = None,
+        position: int = 0,
     ) -> torch.Tensor:
         """Forward pass through all stacked blocks.
 
@@ -102,8 +103,8 @@ class CuDecoderStack:
         ----------
         x : torch.Tensor, shape (B, S, D)
             Input activations on CUDA device.
-        positions : torch.Tensor, shape (S,) or None
-            Position indices for RoPE. If None, each block uses arange(S).
+        position : int
+            This pass's first absolute token index (blocks thread it to RoPE).
 
         Returns
         -------
@@ -113,26 +114,27 @@ class CuDecoderStack:
         """
         out = x
         for block in self.blocks:
-            out = block.forward(out, positions=positions)
+            out = block.forward(out, position=position)
         return out
 
-    def forward_state(
-        self, x: torch.Tensor, positions: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
+    def forward_state(self, x: torch.Tensor, position: int = 0) -> Result[torch.Tensor, list[dict[str, torch.Tensor]]]:
         """Forward through all blocks, capturing each block's attention state.
 
         Mirrors ``impl._torch.layers.DecoderStack.forward_state``: the
         model's prefill requests the state and backfills the per-layer
-        cache — no second pass.
+        cache — no second pass. Same ``Result`` contract
+        (shared/result.py).
 
-        Returns (out (B, S, D), [per-block {"k_group", "v_group"}]).
+        ``.value`` = out (B, S, D); ``.ctx.record`` = {block
+        index: {"k_group", "v_group"}}.
         """
-        states: list[dict[str, torch.Tensor]] = []
+        states: dict[int, dict[str, torch.Tensor]] = {}
         out = x
-        for block in self.blocks:
-            out, block_state = block.forward_state(out, positions)
-            states.append(block_state)
-        return out, states
+        for i, block in enumerate(self.blocks):
+            block_res = block.forward_state(out, position)
+            out = block_res.value
+            states[i] = block_res.ctx.display  # {block index: k_group/v_group}
+        return Result.capture(out, {}, {}, states)
 
     def forward_step(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
         """Process ONE new token through all blocks (KV-cached path).

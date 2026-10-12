@@ -476,7 +476,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
         seq = list(ids)
         if isinstance(model, NumPyModel):
             logits, cache = model.forward_prefill(
-                np.array([seq[-ctx:]], dtype=np.int32), position_offset=max(0, len(seq) - ctx)
+                np.array([seq[-ctx:]], dtype=np.int32), position=max(0, len(seq) - ctx)
             )
             logits = logits[0, -1].astype(np.float64)
             for _ in range(n):

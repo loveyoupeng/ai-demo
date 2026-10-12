@@ -111,7 +111,8 @@ class MixtureOfExperts:
         Returns a ``Result`` (shared/result.py): ``.value`` = the MoE
         output; ``.ctx.backward`` = the router state the analytic backward
         recomputes from; ``.ctx.display`` = the per-expert outputs the
-        learning-mode record shows; tuple unpacking still works.
+        learning-mode record shows. Access is typed: ``.unwrap()`` /
+        ``.unwrap_with()``.
 
         x: (B, S, D) the post-LN2 stream.
 

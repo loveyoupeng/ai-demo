@@ -18,10 +18,8 @@ class TestRoPEForward:
         Q: (batch=2, seq_len=4, n_heads=4, head_dim=8) → output same shape.
         """
         q = np.random.default_rng(42).random((2, 4, 4, 8)).astype(np.float32)
-        pos = np.arange(4)  # positions 0,1,2,3 per sequence step
-
         rope = RoPE()
-        out = rope.forward(q, pos)
+        out = rope.forward(q)  # positions 0..3 (S=4, position 0)
 
         assert out.shape == q.shape, f"Shape mismatch: {out.shape} != {q.shape}"
 
@@ -32,10 +30,10 @@ class TestRoPEForward:
         because RoPE rotates by position-dependent angles.
         """
         q = np.ones((2, 4, 4, 8), dtype=np.float32)
-        pos = np.arange(4)  # [0, 1, 2, 3]
+        # positions [0, 1, 2, 3] = position 0 with S=4
 
         rope = RoPE()
-        out = rope.forward(q, pos)
+        out = rope.forward(q)
 
         # Same input values at different positions → different outputs
         assert not np.allclose(out[0, 0, :, :], out[0, 1, :, :], rtol=1e-3), (
@@ -47,15 +45,15 @@ class TestRoPEForward:
         rope_dim=4 means first 4 dims rotated, last 4 dims unchanged.
         """
         q = np.random.default_rng(7).random((1, 2, 4, 8), dtype=np.float32)
-        pos = np.arange(2)  # positions [0, 1]
+        # positions [0, 1] = position 0 with S=2
 
         rope = RoPE()
 
         # Full RoPE: all head_dim=8 dims rotated
-        out_full = rope.forward(q, pos, rope_dim=0)
+        out_full = rope.forward(q, rope_dim=0)
 
         # Partial RoPE: only first 4 dims rotated
-        out_partial = rope.forward(q, pos, rope_dim=4)
+        out_partial = rope.forward(q, rope_dim=4)
 
         # Partial should have dims 4:8 unchanged from input
         partial_unchanged = np.allclose(out_partial[0, :, :, 4:], q[0, :, :, 4:], rtol=1e-5)
@@ -75,11 +73,11 @@ class TestRoPEForward:
         rng = np.random.default_rng(100)
         q = rng.random((1, 3, 2, 4), dtype=np.float32)
         k = q.copy()
-        pos = np.arange(3)  # positions [0, 1, 2]
+        # positions [0, 1, 2] = position 0 with S=3
 
         rope = RoPE()
-        out_q = rope.forward(q, pos)
-        out_k = rope.forward(k, pos)
+        out_q = rope.forward(q)
+        out_k = rope.forward(k)
 
         # Same input → same output (deterministic function)
         assert np.allclose(out_q, out_k, rtol=1e-5), "Identical Q and K should produce identical RoPE outputs"

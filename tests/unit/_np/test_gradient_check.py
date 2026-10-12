@@ -130,12 +130,11 @@ class TestRoPEGradient:
         op = RoPE()
         x = rng.normal(size=(2, 6, H, D))
         dout = rng.normal(size=(2, 6, H, D))
-        positions = np.arange(6, dtype=np.int32)
 
-        dx_an = op.backward(dout, x, positions, rope_dim)
+        dx_an = op.backward(dout, x, 0, rope_dim)
 
         def val(j: int) -> float:
-            return _fd_param(lambda: x.reshape(-1), j, lambda: float(np.sum(dout * op.forward(x, positions, rope_dim))))
+            return _fd_param(lambda: x.reshape(-1), j, lambda: float(np.sum(dout * op.forward(x, 0, rope_dim))))
 
         assert _worst_rel(dx_an, val, samples=10, seed=1) < 1e-5
 
@@ -152,19 +151,18 @@ class TestMHAGradient:
             setattr(op, name, _cast64(getattr(op, name)))
         x = rng.normal(size=(2, 5, D))
         dout = rng.normal(size=(2, 5, D))
-        positions = np.arange(5, dtype=np.int32)
 
-        dx_an, w_an = op.backward(dout, x, positions)
+        dx_an, w_an = op.backward(dout, x, 0)
 
         def val_x(j: int) -> float:
-            return _fd_param(lambda: x.reshape(-1), j, lambda: float(np.sum(dout * op.forward(x, positions))))
+            return _fd_param(lambda: x.reshape(-1), j, lambda: float(np.sum(dout * op.forward(x, 0))))
 
         assert _worst_rel(dx_an, val_x, samples=8, seed=1) < 1e-5
         for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
             weight = getattr(op, name)  # bind the array per iteration
 
             def val_w(j: int, w: np.ndarray = weight) -> float:
-                return _fd_param(lambda: w.reshape(-1), j, lambda: float(np.sum(dout * op.forward(x, positions))))
+                return _fd_param(lambda: w.reshape(-1), j, lambda: float(np.sum(dout * op.forward(x, 0))))
 
             assert _worst_rel(w_an[name], val_w, samples=6, seed=2) < 1e-5
 
