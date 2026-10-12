@@ -124,10 +124,17 @@
   .sw.node { background: var(--panel2); border: 1.5px solid var(--line); }
   .sw.hilo { background: linear-gradient(90deg, #df1b8e, #176ac8); }
   .nbadge { width: 14px; height: 14px; border-radius: 50%; background: #1c2c42; border: 1px solid #3a4252; color: var(--accent); font-size: .6rem; display: flex; align-items: center; justify-content: center; flex: none; }
-  /* speculative decoding: header control, per-round rows, comparison panel */
-  #spec-ctl { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  /* speculative decoding: per-round rows, comparison panel (the mode
+     selector lives in the run panel's decoding group) */
+  #spec-ctl { display: flex; gap: 8px; align-items: center; }
   #spec-ctl label { margin: 0; }
   #spec-ctl select { width: auto; padding: 4px 8px; }
+  /* control groups: visibly bundle related controls so each row answers
+     one question (what runs / how it samples / how it's verified) */
+  .ctl-group { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px 6px; margin-top: 12px; background: var(--panel2); }
+  .ctl-group > h3 { margin: 0 0 6px; font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 700; }
+  .ctl-group .row { margin-top: 0; }
+  .learn-how { display: block; margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line); color: var(--muted); }
   #spec-k-wrap { display: none; align-items: center; gap: 6px; }
   #spec-k-wrap.on { display: inline-flex; }
   #spec-k { width: 90px; accent-color: var(--accent); }
@@ -151,15 +158,6 @@
 <header>
   <h1>Learning Mode</h1>
   <div class="badges" id="badges"><span class="badge">loading model…</span></div>
-  <div id="spec-ctl" title="speculative decoding mode (ADR 0003)">
-    <label for="spec">decoding</label>
-    <select id="spec"><option value="plain">plain</option></select>
-    <span id="spec-k-wrap">
-      <label for="spec-k">k</label>
-      <input type="range" id="spec-k" min="1" max="4" value="4">
-      <span class="kv" id="spec-k-val">4</span>
-    </span>
-  </div>
 </header>
 <main id="main">
   <div id="tab-row" style="grid-column: 1 / -1; display:flex; gap:6px; margin-bottom:4px">
@@ -169,37 +167,61 @@
 
   <section id="prompt-panel">
     <div class="explain" id="spec-explainer">
-      <div class="ex-what"><b>Speculative decoding</b> (header dropdown, ADR 0003): a small drafter proposes the next <i>k</i> tokens; the target then verifies the whole block in ONE parallel forward and commits only the prefix it agrees with. <b>MTP</b> drafts sequentially — DeepSeek-V3 style: one tiny block fed the target's hidden state plus the next token's embedding, one token at a time. <b>DSpark</b> drafts the whole block in one semi-autoregressive parallel pass, and the engine picks each round's verify length from online prefix-survival statistics (confidence-scheduled verification, survival target 0.8).</div>
+      <div class="ex-what"><b>Speculative decoding</b>: a small <b>drafter</b> model proposes the next <i>k</i> tokens; the <b>target</b> model then verifies the whole block in ONE parallel forward pass and commits only the prefix it agrees with. <b>MTP</b> drafts sequentially — one tiny transformer block fed the target's final hidden state plus the next token's embedding, one token at a time (the DeepSeek-V3 design). <b>DSpark</b> drafts the whole block in one semi-autoregressive parallel pass, and the decoding engine picks each round's verification length from online prefix-survival statistics (confidence-scheduled verification, survival target 0.8). <span class="learn-how"><b>To learn it here:</b> set Decoding mode to MTP or DSpark, run a generation, then read the rounds table under the output — one row per drafting round showing the proposed block, the accepted prefix, and the rolled-back tail — and compare this run's tokens/sec against the same-prompt plain run.</span></div>
       <div class="ex-why">The lossless contract: greedy verification commits a token only when it is exactly what plain greedy decoding would have picked — the output text is token-identical either way. Speculation only changes how many tokens one target pass confirms, never what the model says. The panel below the output measures this run's tokens/sec next to a same-prompt plain run, so the comparison is honest.</div>
     </div>
     <h2>Prompt &amp; run</h2>
     <label>Input text (chars outside the vocab are skipped and marked)</label>
     <input type="text" id="prompt" value="Write a Python function to reverse a list." spellcheck="false">
     <div class="chips" id="prompt-chips"></div>
-    <div class="row" style="margin-top:10px">
-      <div><label>Tokens to generate</label><input type="number" id="ntokens" value="8" min="1" max="32"></div>
-      <div><label>Temperature (greedy = off)</label>
-        <select id="temp">
-          <option value="greedy">greedy</option>
-          <option value="0.5">0.5</option>
-          <option value="0.8" selected>0.8</option>
-          <option value="1.0">1.0</option>
-          <option value="1.5">1.5</option>
-        </select>
+
+    <div class="ctl-group">
+      <h3>Model & run</h3>
+      <div class="row">
+        <div><label>Tokens to generate</label><input type="number" id="ntokens" value="8" min="1" max="32"></div>
+        <div><label>Backend — which implementation computes the forward pass</label>
+          <select id="backend">
+            <option value="numpy" selected>numpy</option>
+            <option value="torch">torch</option>
+            <option value="triton">triton</option>
+            <option value="cuda">cuda</option>
+          </select>
+        </div>
+        <div><button id="btn-gen">Generate</button></div>
+        <div><button id="btn-rec" class="secondary">Generate + record</button></div>
+        <div><button id="btn-dl" class="secondary" disabled>Download record JSON</button></div>
       </div>
-      <div><label>Top-k (0 = off)</label><input type="number" id="topk" value="10" min="0" max="50"></div>
-      <div><label>Seed</label><input type="number" id="seed" value="42" min="0"></div>
-      <div><label>Backend</label>
-        <select id="backend">
-          <option value="numpy" selected>numpy</option>
-          <option value="torch">torch</option>
-          <option value="triton">triton</option>
-          <option value="cuda">cuda</option>
-        </select>
+    </div>
+
+    <div class="ctl-group">
+      <h3>Sampling — how the next token is picked</h3>
+      <div class="row">
+        <div><label>Temperature (greedy = off)</label>
+          <select id="temp">
+            <option value="greedy">greedy</option>
+            <option value="0.5">0.5</option>
+            <option value="0.8" selected>0.8</option>
+            <option value="1.0">1.0</option>
+            <option value="1.5">1.5</option>
+          </select>
+        </div>
+        <div><label>Top-k (0 = off)</label><input type="number" id="topk" value="10" min="0" max="50"></div>
+        <div><label>Seed</label><input type="number" id="seed" value="42" min="0"></div>
       </div>
-      <div><button id="btn-gen">Generate</button></div>
-      <div><button id="btn-rec" class="secondary">Generate + record</button></div>
-      <div><button id="btn-dl" class="secondary" disabled>Download record JSON</button></div>
+    </div>
+
+    <div class="ctl-group">
+      <h3>Decoding mode — how many tokens each pass confirms</h3>
+      <div id="spec-ctl">
+        <label for="spec">Mode</label>
+        <select id="spec"><option value="plain">plain — one token per forward pass</option></select>
+        <span id="spec-k-wrap">
+          <label for="spec-k">draft block k</label>
+          <input type="range" id="spec-k" min="1" max="4" value="4">
+          <span class="kv" id="spec-k-val">4</span>
+        </span>
+      </div>
+      <div class="note" id="spec-mode-note">plain: the target model runs one forward pass per token. Switch to MTP or DSpark to draft-then-verify several tokens per pass.</div>
     </div>
     <div id="status"></div>
     <section style="background:var(--panel2); margin-top:12px; border-color:var(--line)">
@@ -507,7 +529,7 @@ async function init() {
     [`ctx = ${c.context_length}`, "context"],
   ];
   if (MODEL.has_moe) badges.push([`E = ${c.n_experts}`, "MoE experts (top-k " + c.top_k + ")"]);
-  if (c.n_shared_experts > 0) badges.push([`shared = ${c.n_shared_experts}`, "always-on ungated expert(s) — added to the routed sum (ADR 0002)"]);
+  if (c.n_shared_experts > 0) badges.push([`shared = ${c.n_shared_experts}`, "always-on ungated expert(s) — every token passes through them; their averaged output is added on top of the routed experts' sum"]);
   badges.push([`${MODEL.n_params.toLocaleString()}`, "parameters"]);
   $("badges").innerHTML = badges.map(([v, t]) => `<span class="badge" title="${t}"><b>${v}</b> ${t}</span>`).join("");
   if (!MODEL.has_vocab) setStatus("This checkpoint has no vocab.json — text input unavailable.");
@@ -610,16 +632,22 @@ function specCtlInit() {
   const sel = $("spec");
   const avail = MODEL.spec_available || [];
   sel.innerHTML =
-    `<option value="plain">plain</option>` +
-    (avail.includes("mtp") ? `<option value="mtp">MTP</option>` : "") +
-    (avail.includes("dspark") ? `<option value="dspark">DSpark</option>` : "");
+    `<option value="plain">plain — one token per forward pass</option>` +
+    (avail.includes("mtp") ? `<option value="mtp">MTP — sequential drafting (k=4)</option>` : "") +
+    (avail.includes("dspark") ? `<option value="dspark">DSpark — parallel drafting (k=8)</option>` : "");
   const def = MODEL.default_spec || "plain";
   sel.value = [...sel.options].some((o) => o.value === def) ? def : "plain";
   SPEC_MODE = sel.value;
   const cap = (mode) => (MODEL.spec_block_size || {})[mode] || (mode === "dspark" ? 8 : 4);
+  const NOTES = {
+    plain: "plain: the target model runs one forward pass per token — the baseline every other mode is compared against.",
+    mtp: "MTP: a tiny drafter block proposes k tokens one at a time (fed the target's hidden state); the target verifies the block in one pass and commits the agreeing prefix. Output is identical to plain greedy — only faster (when the drafter is good).",
+    dspark: "DSpark: a parallel drafter proposes the whole block in one pass, then a causal refinement fixes the ordering; the engine caps each round's verify length from live prefix-survival stats (target 0.8). Output is identical to plain greedy.",
+  };
   const sync = () => {
     const mode = sel.value;
     const wrap = $("spec-k-wrap");
+    $("spec-mode-note").textContent = NOTES[mode] || NOTES.plain;
     if (mode === "plain") {
       wrap.classList.remove("on");
       return;
@@ -1445,7 +1473,7 @@ function ffnSubView(sub, bIdx, bt) {
     return (body) => {
       body.appendChild(formula(
         "\\text{out} = \\sum_j \\hat{p}_j E_j(x) \\;+\\; \\tfrac{1}{N_s}\\textstyle\\sum_s E^{\\text{sh}}_s(x)",
-        "the shared expert runs UNGATED — every token passes through it, paying its compute at every step; its output (mean if several) is added on top of the routed sum (DeepSeek-V2/V3 idea, ADR 0002): universal patterns live here so routed experts can specialize"
+        "the shared expert runs UNGATED — every token passes through it, paying its compute at every step; its output (mean if several) is added on top of the routed sum (the DeepSeek-V2/V3 design): universal patterns live here so the routed experts can specialize"
       ));
       tensorBlock(body, "in", "input x (LN2 output) — the same input the routed experts see", bt.y2, { cell: 12, names: ["S", "D"] });
       (m.shared_outs || []).forEach((so, s) => {
