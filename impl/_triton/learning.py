@@ -64,19 +64,19 @@ def _rmsnorm_record(gamma: torch.Tensor, x: torch.Tensor, eps: float | None, out
     return {"rms": arr(rms), "gamma": arr(gamma), "out": arr(out)}
 
 
-def _rope_record(x_rot: torch.Tensor, positions: torch.Tensor, rope_dim: int) -> RopeRecord:
+def _rope_record(x_rot: torch.Tensor, position: int, rope_dim: int) -> RopeRecord:
     """Recompute the RoPE frequencies/angles/cos/sin (same math as the track's RoPE).
 
     x_rot: (B, S, H, d) the tensor that will be rotated.
+    position: the pass's first absolute token index (positions built inside).
     rope_dim: 0 → rotate all head dims; 0 < rope_dim < d → rotate the first
     rope_dim dims only (the rest pass through, un-rotated).
     """
     d = x_rot.shape[-1]
     d_rot = rope_dim if (0 < rope_dim < d) else d
     pair_dim = d_rot // 2
-    pos = torch.as_tensor(positions, dtype=torch.long, device=x_rot.device)
-    if pos.ndim == 1:
-        pos = pos.unsqueeze(0).expand(x_rot.shape[0], x_rot.shape[1])
+    pos = torch.arange(position, position + x_rot.shape[1], dtype=torch.long, device=x_rot.device)
+    pos = pos.unsqueeze(0).expand(x_rot.shape[0], x_rot.shape[1])
     freqs = 1.0 / (10000.0 ** (torch.arange(pair_dim, dtype=torch.float64, device=x_rot.device) * 2.0 / d_rot))
     angles = pos.to(torch.float64).unsqueeze(-1) * freqs.unsqueeze(0)  # (B, S, pair_dim)
     return {
@@ -88,7 +88,7 @@ def _rope_record(x_rot: torch.Tensor, positions: torch.Tensor, rope_dim: int) ->
 
 
 def _attn_record(
-    attn: TritonMultiHeadAttention, ln1_out: torch.Tensor, positions: torch.Tensor
+    attn: TritonMultiHeadAttention, ln1_out: torch.Tensor, position: int
 ) -> tuple[torch.Tensor, AttnRecord]:
     """Run the block's attention math and capture every intermediate.
 
@@ -111,8 +111,8 @@ def _attn_record(
     v = v_pre.view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd)
 
     # RoPE (the shared-seam torch module): (B, H, S, hd) → (B, S, H, hd) → back
-    q = attn.rope(q_rope_in.permute(0, 2, 1, 3), positions, rope_dim=attn.rope_dim).permute(0, 2, 1, 3)  # (B, H, S, hd)
-    k = attn.rope(k_rope_in.permute(0, 2, 1, 3), positions, rope_dim=attn.rope_dim).permute(0, 2, 1, 3)  # (B, G, S, hd)
+    q = attn.rope(q_rope_in.permute(0, 2, 1, 3), position, rope_dim=attn.rope_dim).permute(0, 2, 1, 3)  # (B, H, S, hd)
+    k = attn.rope(k_rope_in.permute(0, 2, 1, 3), position, rope_dim=attn.rope_dim).permute(0, 2, 1, 3)  # (B, G, S, hd)
 
     # GQA: broadcast each K/V group to its H // G query heads (display parity
     # with the NumPy record, which stores the GQA-expanded heads).
@@ -143,7 +143,7 @@ def _attn_record(
         "k": arr(k),  # (B, H, S, hd) post-RoPE (GQA-expanded)
         "v": arr(v),  # (B, H, S, hd)
         "scale": float(scale),  # sqrt(hd) — divide scores by this
-        "rope": _rope_record(q_rope_in.permute(0, 2, 1, 3), positions, attn.rope_dim),
+        "rope": _rope_record(q_rope_in.permute(0, 2, 1, 3), position, attn.rope_dim),
         "scores": arr(scores),  # (B, H, S, S)
         "scores_masked": arr(scores_masked),  # (B, H, S, S)
         "causal_mask": arr(mask.to(torch.float64)),  # (S, S)
@@ -157,9 +157,7 @@ def _attn_record(
     }
 
 
-def _init_kv_cache(
-    attn: TritonMultiHeadAttention, k_pre: torch.Tensor, v_pre: torch.Tensor, positions: torch.Tensor
-) -> dict:
+def _init_kv_cache(attn: TritonMultiHeadAttention, k_pre: torch.Tensor, v_pre: torch.Tensor, position: int) -> dict:
     """Build a block's KV cache from a prefill pass.
 
     k_pre/v_pre are the pre-RoPE, un-split projections (B, S, G·hd). The
@@ -171,7 +169,7 @@ def _init_kv_cache(
     G, hd = attn.n_groups, attn.head_dim
     k_heads = k_pre.view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd) pre-RoPE
     v_heads = v_pre.view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd)
-    k_heads = attn.rope(k_heads.permute(0, 2, 1, 3), positions, rope_dim=attn.rope_dim).permute(0, 2, 1, 3)  # post-RoPE
+    k_heads = attn.rope(k_heads.permute(0, 2, 1, 3), position, rope_dim=attn.rope_dim).permute(0, 2, 1, 3)  # post-RoPE
     return {"k": k_heads, "v": v_heads}  # each (B, G, S, hd)
 
 
@@ -191,7 +189,6 @@ def _attn_step_record(
     """
     B = x.shape[0]
     H, G, hd = attn.n_heads, attn.n_groups, attn.head_dim
-    positions = torch.tensor([position], dtype=torch.long, device=x.device)  # (1,)
 
     q_pre = attn.q_proj(x)  # (B, 1, H·hd)
     k_pre = attn.k_proj(x)  # (B, 1, G·hd)
@@ -199,8 +196,8 @@ def _attn_step_record(
     q_rope_in = q_pre.view(B, 1, H, hd).permute(0, 2, 1, 3)  # (B, H, 1, hd) pre-RoPE
     k_rope_in = k_pre.view(B, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd) pre-RoPE
     v = v_pre.view(B, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
-    q = attn.rope(q_rope_in.permute(0, 2, 1, 3), positions, rope_dim=attn.rope_dim).permute(0, 2, 1, 3)  # (B, H, 1, hd)
-    k = attn.rope(k_rope_in.permute(0, 2, 1, 3), positions, rope_dim=attn.rope_dim).permute(0, 2, 1, 3)  # (B, G, 1, hd)
+    q = attn.rope(q_rope_in.permute(0, 2, 1, 3), position, rope_dim=attn.rope_dim).permute(0, 2, 1, 3)  # (B, H, 1, hd)
+    k = attn.rope(k_rope_in.permute(0, 2, 1, 3), position, rope_dim=attn.rope_dim).permute(0, 2, 1, 3)  # (B, G, 1, hd)
 
     # Append the new row to the block's cache (mutated in place, like the
     # NumPy track's forward_step).
@@ -232,7 +229,7 @@ def _attn_step_record(
         "k": arr(k),  # (B, H, 1, hd) post-RoPE (GQA-expanded)
         "v": arr(v),  # (B, H, 1, hd)
         "scale": scale,  # sqrt(hd)
-        "rope": _rope_record(q_rope_in.permute(0, 2, 1, 3), positions, attn.rope_dim),
+        "rope": _rope_record(q_rope_in.permute(0, 2, 1, 3), position, attn.rope_dim),
         "scores": arr(scores),  # (B, H, 1, t)
         "scores_masked": arr(scores),  # (B, H, 1, t) — mask is all zeros
         "causal_mask": arr(mask.to(torch.float64)),  # (1, t) — all 0 in decode
@@ -291,21 +288,23 @@ def _moe_record(mlp: TritonMixtureOfExperts, x: torch.Tensor, out: torch.Tensor)
     }
 
 
-def instrumented_forward(model: TritonModel, input_ids: torch.Tensor) -> ForwardRecord:
+def instrumented_forward(model: TritonModel, input_ids: torch.Tensor) -> tuple[ForwardRecord, dict]:
     """One forward pass with every intermediate captured (the step record).
 
     Same record shape as ``impl._np.learning.instrumented_forward``; the
     attention block's intermediates are the explicit display path (see
     ``_attn_record``) since the production Triton SDPA kernel exposes none.
 
-    Returns a nested dict (all arrays as nested float lists):
+    Returns (record, tensors) — the same tuple contract as the NumPy and
+    torch adapters: the record (all arrays as nested float lists) holds
       input_ids, embedding, positions,
       blocks[i]: {ln1, attn, h, ln2, ffn|moe, out},
       final_norm, logits, softmax, top_tokens
+    and the tensors dict holds the same logits/softmax/top_tokens values
+    for callers that want them without re-indexing the record.
     """
     x = input_ids
     S = x.shape[1]
-    positions = torch.arange(S, dtype=torch.long, device=x.device)
 
     # Embedding: (B, S) → (B, S, D)
     emb = model.embedding(x)
@@ -316,7 +315,7 @@ def instrumented_forward(model: TritonModel, input_ids: torch.Tensor) -> Forward
     for block in model.stack.blocks:
         ln1 = block.input_layernorm
         ln1_out = ln1(stream)  # (B, S, D)
-        attn_out, attn_rec = _attn_record(block.self_attn, ln1_out, positions)  # (B, S, D)
+        attn_out, attn_rec = _attn_record(block.self_attn, ln1_out, 0)  # (B, S, D) — window positions 0..S-1
         h = stream + attn_out  # (B, S, D) residual after attention
         ln2 = block.post_attention_layernorm
         ln2_out = ln2(h)  # (B, S, D)
@@ -351,16 +350,22 @@ def instrumented_forward(model: TritonModel, input_ids: torch.Tensor) -> Forward
     top_idx = torch.argsort(p[0, -1], descending=True)[:top_n]  # top-10 at the last position
     top_tokens = [[int(i), float(p[0, -1, i])] for i in top_idx.tolist()]
 
-    return {
+    record: ForwardRecord = {
         "input_ids": x.tolist(),
         "embedding": arr(emb),
-        "positions": positions.tolist(),
+        "positions": list(range(S)),
         "blocks": blocks,
         "final_norm": _rmsnorm_record(model.final_norm.weight, stream, model.final_norm.eps, normed),
         "logits": arr(logits),
         "softmax": arr(p),
         "top_tokens": top_tokens,
     }
+    tensors = {
+        "logits": record["logits"],
+        "softmax": record["softmax"],
+        "top_tokens": record["top_tokens"],
+    }
+    return record, tensors
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +464,7 @@ def generate_with_records(
 
     # ---- Step 0: prefill the prompt (full forward, initializes the caches)
     x = torch.tensor([seq[-ctx:]], dtype=torch.int64, device=device)
-    rec = instrumented_forward(model, x)
+    rec, _tensors = instrumented_forward(model, x)
     tok = _pick(np.asarray(rec["softmax"], dtype=np.float64)[0][-1])
     emitted.append(tok)
     steps.append(
@@ -476,7 +481,7 @@ def generate_with_records(
     )
     seq.append(tok)
     p0 = list(x[0].tolist())
-    positions0 = (torch.arange(len(p0), dtype=torch.long) + (len(seq) - 1 - len(p0))).to(device)  # absolute
+    pos0 = len(seq) - 1 - len(p0)  # the window's first absolute position
     caches: list[dict] = []
     for i, block in enumerate(model.stack.blocks):
         r = rec["blocks"][i]["attn"]
@@ -487,7 +492,7 @@ def generate_with_records(
                 block.self_attn,
                 torch.tensor(r["k_pre"], device=device),
                 torch.tensor(r["v_pre"], device=device),
-                positions0,
+                pos0,
             )
         )
 

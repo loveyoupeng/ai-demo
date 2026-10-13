@@ -67,7 +67,7 @@ class TestInstrumentedForward:
     @pytest.mark.timeout(120)
     def test_record_shape(self):
         model = _model(DENSE)
-        rec = cuda_learning.instrumented_forward(model, torch.tensor([PROMPT]))
+        rec, _tensors = cuda_learning.instrumented_forward(model, torch.tensor([PROMPT]))
         assert rec["input_ids"] == [PROMPT]
         assert rec["positions"] == list(range(len(PROMPT)))
         assert len(rec["blocks"]) == DENSE.n_layers
@@ -87,7 +87,7 @@ class TestInstrumentedForward:
     @pytest.mark.timeout(120)
     def test_moe_record(self):
         model = _model(MOE)
-        rec = cuda_learning.instrumented_forward(model, torch.tensor([PROMPT]))
+        rec, _tensors = cuda_learning.instrumented_forward(model, torch.tensor([PROMPT]))
         moe = rec["blocks"][0]["moe"]
         assert "ffn" not in rec["blocks"][0]
         assert moe["n_experts"] == MOE.n_experts and moe["top_k"] == MOE.top_k
@@ -104,7 +104,7 @@ class TestInstrumentedForward:
         if not torch.cuda.is_available():
             pytest.skip("CUDA required for the real-forward check")
         model = _model(DENSE)
-        rec = cuda_learning.instrumented_forward(model, torch.tensor([PROMPT]))
+        rec, _tensors = cuda_learning.instrumented_forward(model, torch.tensor([PROMPT]))
         real = model.forward(torch.tensor([PROMPT], device="cuda")).detach().cpu()
         assert np.allclose(rec["logits"], real.numpy().astype(np.float64), rtol=1e-2, atol=1e-2)
         # The record's chosen token is the one the CUDA model would produce.
@@ -141,7 +141,7 @@ class TestGenerateWithRecords:
         rec = cuda_learning.generate_with_records(model, VOCAB, PROMPT, 4, seed=SEED)
         for step in rec["steps"][1:]:
             prefix = PROMPT + rec["generated"]["tokens"][: step["step"]]
-            fresh = cuda_learning.instrumented_forward(model, torch.tensor([prefix]))
+            fresh, _ft = cuda_learning.instrumented_forward(model, torch.tensor([prefix]))
             assert np.allclose(step["forward"]["logits"][0][0], fresh["logits"][0][-1], rtol=1e-6, atol=1e-6)
 
     @pytest.mark.timeout(120)

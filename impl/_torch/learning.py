@@ -22,7 +22,7 @@ autoregressive decode steps that embed ONLY the new token.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -640,7 +640,7 @@ def _generate_with_spec_records(
 
     # ---- Step 0: the prefill (same capture as the classic record).
     x = torch.tensor([prompt_ids[-ctx:]], dtype=torch.long, device=device)
-    rec: ForwardRecord = cast(ForwardRecord, capture(model, x)[0])
+    rec = capture(model, x)[0]  # the step record (ForwardRecord shape)
     tok0 = out_tokens[0] if out_tokens else int(np.argmax(np.asarray(rec["softmax"], dtype=np.float64)[0][-1]))
     steps.append(
         {
@@ -665,17 +665,14 @@ def _generate_with_spec_records(
         window = (prefix + draft)[-ctx:]
         with torch.no_grad():
             win_t = torch.tensor([window], dtype=torch.long, device=device)
-            rec = cast(
-                ForwardRecord,
-                capture(model, win_t)[0],
-            )
+            rec = capture(model, win_t)[0]  # the verify-step record (ForwardRecord shape)
         tok = int(r["committed"][-1]) if r["committed"] else draft[0]
         step_rec: StepRecord = {
             "step": r_idx,
             "kind": "verify",
             "position": len(prefix),
             "input_tokens": draft,
-            "forward": cast(ForwardRecord, rec),
+            "forward": rec,
             "top_tokens": rec["top_tokens"],
             "token": tok,
             "text": vocab[tok],

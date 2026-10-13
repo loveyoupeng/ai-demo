@@ -30,7 +30,7 @@ autoregressive decode steps that embed ONLY the new token.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -394,28 +394,30 @@ def _instrumented_blocks(
         )  # (B, S, D)
         h = stream + attn_out  # (B, S, D) residual after attention
         ln2_out, _ = _rmsnorm(h, _w(block.post_attention_layernorm_gamma), eps)  # (B, S, D)
-        if block.config.has_moe():
-            ff_out, ffn_rec = _moe_record(block, ln2_out)  # (B, S, D)
-        else:
-            ff_out, ffn_rec = _ffn_record(block, ln2_out)  # (B, S, D)
-        out = h + ff_out  # (B, S, D) block output
         block_rec: BlockRecord = {
             "ln1": _rmsnorm_record(_w(block.input_layernorm_gamma), stream, eps, ln1_out),
             "attn": attn_rec,
             "h": arr(h),
             "ln2": _rmsnorm_record(_w(block.post_attention_layernorm_gamma), h, eps, ln2_out),
-            "out": arr(out),
         }
+        # TypedDicts are closed shapes: the MoE field carries the MoE record,
+        # the dense field the FFN record — assigned in the branch that builds it.
         if block.config.has_moe():
-            block_rec["moe"] = cast(MoERecord, ffn_rec)
+            ff_out, moe_rec = _moe_record(block, ln2_out)  # (B, S, D)
+            block_rec["moe"] = moe_rec
         else:
-            block_rec["ffn"] = cast(FFNRecord, ffn_rec)
+            ff_out, ffn_rec = _ffn_record(block, ln2_out)  # (B, S, D)
+            block_rec["ffn"] = ffn_rec
+        out = h + ff_out  # (B, S, D) block output
+        block_rec["out"] = arr(out)
         blocks.append(block_rec)
         stream = out
     return stream, blocks
 
 
-def instrumented_forward(model: CUDAModel, input_ids: torch.Tensor, *, validate: bool = True) -> ForwardRecord:
+def instrumented_forward(
+    model: CUDAModel, input_ids: torch.Tensor, *, validate: bool = True
+) -> tuple[ForwardRecord, dict]:
     """One forward pass with every intermediate captured (the step record).
 
     Same record shape as ``impl._np.learning.instrumented_forward``; every
@@ -449,7 +451,7 @@ def instrumented_forward(model: CUDAModel, input_ids: torch.Tensor, *, validate:
     p = _softmax64(logits)  # (B, S, V)
     top_tokens = _top_tokens(p[0, -1])  # top-10 at the last position
 
-    return {
+    record: ForwardRecord = {
         "input_ids": x.tolist(),
         "embedding": arr(emb),
         "positions": list(range(S)),
@@ -459,6 +461,12 @@ def instrumented_forward(model: CUDAModel, input_ids: torch.Tensor, *, validate:
         "softmax": arr(p),
         "top_tokens": top_tokens,
     }
+    tensors = {
+        "logits": record["logits"],
+        "softmax": record["softmax"],
+        "top_tokens": record["top_tokens"],
+    }
+    return record, tensors
 
 
 # ---------------------------------------------------------------------------
@@ -545,7 +553,7 @@ def generate_with_records(
 
     # ---- Step 0: prefill the prompt (full forward, initializes the caches)
     x = torch.tensor([seq[-ctx:]], dtype=torch.int64)
-    rec = instrumented_forward(model, x)
+    rec, _tensors = instrumented_forward(model, x)
     tok = _pick(np.asarray(rec["softmax"], dtype=np.float64)[0][-1])
     emitted.append(tok)
     steps.append(
