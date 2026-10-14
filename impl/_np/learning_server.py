@@ -186,6 +186,10 @@ class _LearningHandler(BaseHTTPRequestHandler):
     model_dir: str  # the target checkpoint dir (sidecar drafters live under it)
     default_spec: str  # page default: plain | mtp | dspark (CLI decides; requests override)
     _drafter_cache: dict[str, Any]  # backend|family → drafter, lazily loaded
+    variant_models: dict[str, Any]  # variant label ("dense"/"moe") → loaded model
+    variant_dirs: dict[str, str]  # variant label → checkpoint dir (lazily loaded)
+    _variant_state: dict[str, dict[str, Any]]  # variant → {vocab, tokenizer}
+    default_variant: str  # which variant the page starts on
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: D102 — quiet the default stderr noise
         logger.debug(format, *args)
@@ -206,9 +210,10 @@ class _LearningHandler(BaseHTTPRequestHandler):
             return
         if backend not in ("numpy", "torch", "triton", "cuda"):
             raise ValueError(f"unknown backend {backend!r}")
-        if backend not in self.backend_models:
-            self.backend_models[backend] = self._try_load_backend(backend)
-        bm = self.backend_models[backend]
+        bkey = f"{self._current_variant}:{backend}"
+        if bkey not in self.backend_models:
+            self.backend_models[bkey] = self._try_load_backend(backend)
+        bm = self.backend_models[bkey]
         if bm is None:
             raise ValueError(f"backend {backend!r} unavailable on this host (needs a CUDA GPU for triton / cuda)")
         saved = (self.model, self.vocab, self.tokenizer)
@@ -219,10 +224,69 @@ class _LearningHandler(BaseHTTPRequestHandler):
         finally:
             self.model, self.vocab, self.tokenizer = saved
 
-    def _try_load_backend(self, backend: str) -> Any | None:
-        """Load the named track's model for the default checkpoint; None if it can't run here."""
+    @property
+    def _current_variant(self) -> str | None:
+        """The label of the variant whose model is currently bound, or None
+        when the startup model is bound (it belongs to no registry entry
+        until a variant is requested)."""
+        for label, m in getattr(self, "variant_models", {}).items():
+            if m is self.model:
+                return label
+        return None
+
+    @contextmanager
+    def _per_variant(self, variant: str | None):
+        """Swap self.model/vocab/tokenizer for the named VARIANT checkpoint.
+
+        Variants are DIFFERENT CHECKPOINTS of the same demo family served by
+        one page: "dense" (the default learning_tool model) and "moe" (the
+        legacy learning_demo checkpoint — E routed experts + always-on
+        shared experts, so the page can show the router/top-k/shared cells).
+        Lazily loaded per backend so switching stays cheap; an unknown
+        variant raises a 400 the page surfaces.
+        """
+        target = variant or self.default_variant
+        if not self.variant_dirs:
+            # No registry configured (a custom --model serves one checkpoint):
+            # any request runs the startup model — the dropdown is hidden.
+            yield
+            return
+        if target not in self.variant_dirs:
+            raise ValueError(f"unknown model variant {target!r}")
+        # The startup model IS a registry entry when its dir matches: bind
+        # it (record vocab/tokenizer so swapping back is symmetric).
+        if target not in self.variant_models and os.path.abspath(self.model_dir) == os.path.abspath(
+            self.variant_dirs[target]
+        ):
+            self.variant_models[target] = self.model
+            self._variant_state[target] = {"vocab": self.vocab, "tokenizer": self.tokenizer}
+        if target == self._current_variant:
+            yield
+            return
+        if target not in self.variant_models:
+            try:
+                model, vocab, _cfg, tok = load_learning_model(self.variant_dirs[target], backend=self.backend)  # type: ignore[arg-type]
+            except Exception as e:  # noqa: BLE001 — surfaced to the page as a 400
+                raise ValueError(f"model variant {target!r} not loadable: {e}") from e
+            self.variant_models[target] = model
+            self._variant_state[target] = {"vocab": vocab, "tokenizer": tok}
+        saved = (self.model, self.vocab, self.tokenizer, self.model_dir)
         try:
-            ckpt_dir = os.environ.get("AI_DEMO_LEARNING_MODEL", DEFAULT_MODEL_DIR)
+            vs = self._variant_state[target]
+            self.model = self.variant_models[target]
+            self.vocab = vs["vocab"]
+            self.tokenizer = vs["tokenizer"]
+            self.model_dir = self.variant_dirs[target]
+            yield
+        finally:
+            self.model, self.vocab, self.tokenizer, self.model_dir = saved
+
+    def _try_load_backend(self, backend: str) -> Any | None:
+        """Load the named track's model for the CURRENTLY BOUND checkpoint
+        (the default dir, or the variant's dir when a variant is swapped in);
+        None if it can't run here."""
+        try:
+            ckpt_dir = self.model_dir or os.environ.get("AI_DEMO_LEARNING_MODEL", DEFAULT_MODEL_DIR)
             # Same factory the CLI uses; returns (model, vocab, cfg, tokenizer).
             model, _vocab, _cfg, _tok = load_learning_model(ckpt_dir, backend=backend)  # type: ignore
             return model
@@ -239,7 +303,11 @@ class _LearningHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 — http.server API
         path = self.path.split("?", 1)[0]
         if path == "/api/model":
-            self._send_json(self._model_info())
+            from urllib.parse import parse_qs
+
+            qs = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            with self._per_variant(qs.get("variant", [None])[0]):
+                self._send_json(self._model_info())
             return
         if path == "/api/tokenize":
             from urllib.parse import unquote_plus
@@ -306,6 +374,10 @@ class _LearningHandler(BaseHTTPRequestHandler):
             "spec_available": self._spec_available(),
             "default_spec": self.default_spec if self.default_spec in self._spec_available() else "plain",
             "spec_block_size": self._spec_block_sizes(),
+            # model-variant registry: which checkpoints this page can serve
+            "variants": sorted(self.variant_dirs.keys()),
+            "variant": self._current_variant,
+            "default_variant": self.default_variant,
         }
 
     def _spec_block_sizes(self) -> dict[str, int]:
@@ -637,7 +709,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
         return [int(x) for x in seq[0][len(ids) :].tolist()]
 
     def _api_record(self, body: dict) -> dict[str, object]:
-        with self._per_backend(body.get("backend")):
+        with self._per_variant(body.get("variant")), self._per_backend(body.get("backend")):
             return self._run_record(body)
 
     def _run_record(self, body: dict) -> dict[str, object]:
@@ -779,6 +851,8 @@ def make_handler(
     tokenizers: dict[str, Tokenizer | None] | None = None,
     model_dir: str = "",
     default_spec: str = "plain",
+    variant_dirs: dict[str, str] | None = None,
+    default_variant: str = "dense",
 ) -> type[BaseHTTPRequestHandler]:
     """Bind the model + backend + vocab + web dir into a handler class
     (closure over state). The compare tab adds its secondary models via
@@ -796,10 +870,14 @@ def make_handler(
             "models": models if models is not None else {},
             "vocabs": vocabs if vocabs is not None else {},
             "tokenizers": tokenizers if tokenizers is not None else {},
-            "backend_models": {},  # lazy per-backend caches, populated on first request
+            "backend_models": {},  # lazy per-(variant, backend) caches, populated on first request
             "model_dir": model_dir,
             "default_spec": default_spec,
             "_drafter_cache": {},
+            "variant_models": {},  # lazy: variant label → loaded model (default backend)
+            "_variant_state": {},  # variant → {vocab, tokenizer}
+            "variant_dirs": dict(variant_dirs) if variant_dirs else {},
+            "default_variant": default_variant,
         },
     )
 
@@ -816,6 +894,8 @@ def start_server(
     tokenizers: dict[str, Tokenizer | None] | None = None,
     model_dir: str = "",
     default_spec: str = "plain",
+    variant_dirs: dict[str, str] | None = None,
+    default_variant: str = "dense",
 ) -> ThreadingHTTPServer:
     """Create the learning-mode HTTP server (bound and listening, not yet serving).
 
@@ -840,6 +920,8 @@ def start_server(
         tokenizers=tokenizers,
         model_dir=model_dir,
         default_spec=default_spec,
+        variant_dirs=variant_dirs,
+        default_variant=default_variant,
     )
     server = ThreadingHTTPServer((host, port), handler)
     logger.info("learning mode: serving on http://%s:%d", host, port)

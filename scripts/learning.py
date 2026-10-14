@@ -14,6 +14,12 @@ Usage:
     uv run python -m scripts.learning --model resource/models/torch_real --port 9000
     uv run python -m scripts.learning --host 0.0.0.0           # allow LAN access
 
+The page's Model dropdown switches the SERVED CHECKPOINT (not just the
+backend): "moe" (default — the learning_demo checkpoint with routed + always-on
+shared experts, so the diagram shows the router/top-k/shared cells) and
+"dense" (the learning_tool checkpoint, plain SwiGLU FFN). Either checkpoint
+runs on any backend selected in-page.
+
 If the default demo checkpoint is missing it is trained first (a few minutes).
 """
 
@@ -32,6 +38,18 @@ from impl._np import learning_server  # noqa: E402
 from shared.utils.logger_setup import setup_logging  # noqa: E402
 
 DEFAULT_MODEL = "resource/models/learning_tool"
+
+# Model variants the page can switch between (the in-page Model dropdown):
+#   moe   — the char-level learning_demo checkpoint (E routed experts +
+#           always-on shared experts): the diagram shows the router, the
+#           top-k selection, the renormalized weights, and the shared cell.
+#   dense — the default learning_tool checkpoint (plain SwiGLU FFN).
+# MoE is the DEFAULT so the page opens with the richer architecture.
+VARIANTS = {
+    "moe": "resource/models/learning_demo",
+    "dense": "resource/models/learning_tool",
+}
+DEFAULT_VARIANT = "moe"
 
 
 DEFAULT_COMPARE = [
@@ -60,6 +78,15 @@ def _ensure_demo_model(model_dir: str) -> None:
     subprocess.run([sys.executable, "-m", "scripts.train_demo_model_v2"], check=True)
 
 
+def _ensure_moe_demo(model_dir: str) -> None:
+    """Train the MoE demo checkpoint (train_demo_model) if missing — the
+    page's default variant needs it (router + top-k + shared experts)."""
+    if (Path(model_dir) / "model.npz").is_file():
+        return
+    print(f"MoE demo checkpoint not found at {model_dir} — training it first (a few minutes)...")
+    subprocess.run([sys.executable, "-m", "scripts.train_demo_model"], check=True)
+
+
 def _ensure_drafters(model_dir: str) -> None:
     """Bootstrap the speculative-decoding drafter sidecars on first run
     (ADR 0003): the learning page ships with MTP active by default, so the
@@ -82,6 +109,19 @@ def _resolve_spec(model_dir: str, cli_spec: str) -> str:
     from shared.draft import MTP, sidecar_dir
 
     return "mtp" if (sidecar_dir(model_dir, MTP) / "draft.npz").is_file() else "plain"
+
+
+def _variant_registry(model_dir: str) -> dict[str, str]:
+    """The page's switchable checkpoints: moe (router + top-k + shared
+    experts, the DEFAULT so the page opens with the richer architecture) and
+    dense (plain SwiGLU). Registered only when serving the default model
+    family; a custom --model serves a single checkpoint (dropdown hidden)."""
+    if model_dir != DEFAULT_MODEL:
+        return {}
+    for label, vdir in VARIANTS.items():
+        if label == "moe":
+            _ensure_moe_demo(vdir)
+    return dict(VARIANTS)
 
 
 def main() -> int:
@@ -141,6 +181,7 @@ def main() -> int:
 
     if args.model == DEFAULT_MODEL:
         _ensure_demo_model(args.model)
+    variant_dirs = _variant_registry(args.model)
     _ensure_drafters(args.model)
     spec = _resolve_spec(args.model, args.spec)
     if not _port_free(args.host, args.port):
@@ -173,6 +214,8 @@ def main() -> int:
         tokenizers=compare_tokens,
         model_dir=args.model,
         default_spec=spec,
+        variant_dirs=variant_dirs or None,
+        default_variant=DEFAULT_VARIANT if variant_dirs else "dense",
     )
     print(
         f"Learning mode: listening on {args.host}:{args.port}  "

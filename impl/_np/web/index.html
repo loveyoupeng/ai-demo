@@ -179,6 +179,9 @@
       <h3>Model & run</h3>
       <div class="row">
         <div><label>Tokens to generate</label><input type="number" id="ntokens" value="8" min="1" max="32"></div>
+        <div><label>Model — which checkpoint runs (architecture variant)</label>
+          <select id="variant"><option value="moe" selected>moe — router + top-k + shared expert</option></select>
+        </div>
         <div><label>Backend — which implementation computes the forward pass</label>
           <select id="backend">
             <option value="numpy" selected>numpy</option>
@@ -332,6 +335,7 @@ function promptParams() {
     temperature: forceGreedy ? null : t === "greedy" ? null : parseFloat(t),
     top_k: parseInt($("topk").value || "0", 10),
     seed: parseInt($("seed").value || "42", 10),
+    variant: $("variant") ? $("variant").value : undefined,
     backend: $("backend").value,
     spec,
     ...(spec === "plain" ? {} : { k: parseInt($("spec-k").value || "1", 10) }),
@@ -518,8 +522,8 @@ function renderTex(el) {
 // ---------------------------------------------------------------------------
 // Bootstrap
 // ---------------------------------------------------------------------------
-async function init() {
-  MODEL = await api("/api/model");
+async function init(prefetched) {
+  if (!prefetched) MODEL = await api("/api/model");  // startup: the default variant
   const c = MODEL.config;
   const badges = [
     [`V = ${c.vocab_size}`, "vocab size"],
@@ -533,6 +537,22 @@ async function init() {
   badges.push([`${MODEL.n_params.toLocaleString()}`, "parameters"]);
   $("badges").innerHTML = badges.map(([v, t]) => `<span class="badge" title="${t}"><b>${v}</b> ${t}</span>`).join("");
   if (!MODEL.has_vocab) setStatus("This checkpoint has no vocab.json — text input unavailable.");
+  // Model variant dropdown: which checkpoint the page serves (moe = the
+  // router + top-k + shared-expert architecture; dense = plain SwiGLU).
+  const vSel = $("variant");
+  const variants = MODEL.variants || [];
+  if (variants.length > 1) {
+    vSel.innerHTML = variants
+      .map((v) => {
+        const label = v === "moe" ? "moe — router + top-k + shared expert" : v === "dense" ? "dense — plain SwiGLU FFN" : v;
+        return `<option value="${v}">${label}</option>`;
+      })
+      .join("");
+    vSel.value = MODEL.variant || MODEL.default_variant || "moe";
+    vSel.parentElement.style.display = "";
+  } else {
+    vSel.parentElement.style.display = "none"; // single variant: hide the dropdown
+  }
   specCtlInit();
   $("prompt").addEventListener("input", () => tokenizePreview($("prompt").value));
   tokenizePreview($("prompt").value);
@@ -1839,6 +1859,22 @@ $("btn-play").onclick = togglePlay;
 $("backend").onchange = () => {
   if (RECORD) doRecord();
   else if ($("gen-text").textContent) doGenerate();
+};
+
+// model-variant switch: a DIFFERENT CHECKPOINT (different architecture:
+// moe shows the router/top-k/shared cells, dense the plain SwiGLU) —
+// rebind the model card from the variant-scoped response, rebuild the
+// diagram, then re-run whatever is on screen. NOTE: init() refetches the
+// DEFAULT variant's model info, so the card is rebound here instead.
+$("variant").onchange = async () => {
+  RECORD = null;
+  $("btn-dl").disabled = true;
+  MODEL = await api("/api/model?" + new URLSearchParams({ variant: $("variant").value }));
+  const keepPrompt = $("prompt").value;
+  await init(MODEL);  // rebind the card with the VARIANT-scoped model
+  $("prompt").value = keepPrompt;
+  buildDiagram();
+  if ($("gen-text").textContent) doGenerate();
 };
 
 // ---------------------------------------------------------------------------
