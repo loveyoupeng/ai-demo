@@ -36,7 +36,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 from pathlib import Path
@@ -190,17 +189,41 @@ def _train_family_torch(
     return {key: np.asarray(val) for key, val in drafter.get_all_parameters().items()}
 
 
-def _load_corpus_for(cfg: TransformerConfig) -> list[list[int]]:
-    """The mixed corpus as token-id lists (the pipeline's BPE tokenizer)."""
+def _load_corpus_for(cfg: TransformerConfig, model_dir: str) -> list[list[int]]:
+    """Token-id lists the TARGET can actually consume.
+
+    Two token spaces: the BPE-512 pipeline models (V=512) read the mixed
+    corpus through the BPE tokenizer; the char-level MoE demo (V<=64) reads
+    the same stories through its OWN vocab.json (chars outside the vocab are
+    skipped — the same rule its trainer used).
+    """
+    import json as _json
+
+    if cfg.vocab_size <= 64:
+        vocab_path = Path(model_dir) / "vocab.json"
+        if not vocab_path.is_file():
+            raise FileNotFoundError(f"char-level target needs {vocab_path}")
+        vocab = _json.loads(vocab_path.read_text())
+        table = {c: i for i, c in enumerate(vocab)}
+        stories = _json.loads((RESOURCE / "tinystories_train.json").read_text())[:400]
+        seqs: list[list[int]] = []
+        for story in stories:
+            ids = [table[c] for c in story if c in table]
+            if len(ids) > 8:
+                seqs.append(ids[:128])
+        if not seqs:
+            raise FileNotFoundError("no corpus under resource/ (run scripts.download_tinystories first)")
+        return seqs
+
     from tokenizers import Tokenizer
 
     tok = Tokenizer.from_file(str(RESOURCE / "bpe_tokenizer.json"))
-    seqs: list[list[int]] = []
-    stories = json.loads((RESOURCE / "tinystories_train.json").read_text())[:400]
+    seqs = []
+    stories = _json.loads((RESOURCE / "tinystories_train.json").read_text())[:400]
     seqs += [tok.encode(s).ids[:128] for s in stories]
-    code = json.loads((RESOURCE / "code_instructions.json").read_text())
+    code = _json.loads((RESOURCE / "code_instructions.json").read_text())
     seqs += [tok.encode(f"{r['instruction']}\n{r['output']}").ids[:128] for r in code]
-    tool = json.loads((RESOURCE / "tool_calls.json").read_text())
+    tool = _json.loads((RESOURCE / "tool_calls.json").read_text())
     for row in tool:
         for msg in row["messages"]:
             if msg.get("content"):
@@ -270,7 +293,7 @@ def main() -> int:
     # 1. Frozen target + rollouts (NumPy track = the oracle).
     print(f"loading frozen target: {args.model}")
     target_np, cfg = load_frozen_target(args.model)
-    corpus = _load_corpus_for(cfg)
+    corpus = _load_corpus_for(cfg, args.model)
     print(f"rolling out {args.n_rollouts} greedy continuations (max_len={args.max_len})...")
     rolls = rollouts(target_np, corpus, args.n_rollouts, args.max_len, rng)
     if not rolls:

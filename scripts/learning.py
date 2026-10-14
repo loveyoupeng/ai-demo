@@ -100,6 +100,15 @@ def _ensure_drafters(model_dir: str) -> None:
     subprocess.run([sys.executable, "-m", "scripts.train_drafters", "--model", model_dir], check=True)
 
 
+def _ensure_variant_drafters(variant_dirs: dict[str, str]) -> None:
+    """Every switchable checkpoint needs its OWN drafter sidecars: the
+    drafters are distilled from (and verify against) their target, so the
+    moe variant cannot reuse the dense model's sidecars. Ensures each
+    registered variant has draft_mtp/ + draft_dspark/."""
+    for vdir in variant_dirs.values():
+        _ensure_drafters(vdir)
+
+
 def _resolve_spec(model_dir: str, cli_spec: str) -> str:
     """Resolve the startup spec mode: an explicit --spec wins; ``auto``
     picks mtp when the sidecars exist, plain otherwise (the trained demo
@@ -183,6 +192,7 @@ def main() -> int:
         _ensure_demo_model(args.model)
     variant_dirs = _variant_registry(args.model)
     _ensure_drafters(args.model)
+    _ensure_variant_drafters(variant_dirs)
     spec = _resolve_spec(args.model, args.spec)
     if not _port_free(args.host, args.port):
         print(f"error: port {args.port} is already in use (override with --port)", file=sys.stderr)

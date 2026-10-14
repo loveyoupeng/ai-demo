@@ -401,7 +401,8 @@ class _LearningHandler(BaseHTTPRequestHandler):
         NumPy model → the NumPy drafters (``impl/_np/drafters.py``); the
         torch family (torch/triton/cuda tracks) → the torch drafters over
         the shared sidecar scheme (``impl/_torch/drafters.py``). Cached
-        per (backend, family); missing sidecar → ValueError with a
+        per (backend, variant, family) — each checkpoint has its own
+        sidecars; missing sidecar → ValueError with a
         user-facing message (the page falls back to plain).
         """
 
@@ -415,7 +416,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
             p = next(self.model.parameters(), None) if hasattr(self.model, "parameters") else None  # type: ignore
             if p is not None:
                 sub = f":{p.device}:{p.dtype}"
-        key = f"{fam}{sub}:{family}"
+        key = f"{fam}{sub}:{self._current_variant}:{family}"
         if key in self._drafter_cache:
             return self._drafter_cache[key]
         meta, params = load_drafter(sidecar_dir(self.model_dir, family))
