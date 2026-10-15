@@ -190,6 +190,12 @@ class _LearningHandler(BaseHTTPRequestHandler):
     variant_dirs: dict[str, str]  # variant label → checkpoint dir (lazily loaded)
     _variant_state: dict[str, dict[str, Any]]  # variant → {vocab, tokenizer}
     default_variant: str  # which variant the page starts on
+    # The label of the variant bound to self.model. EXPLICIT STATE, not model
+    # identity: _per_backend swaps in a track's materialization of the SAME
+    # checkpoint, and that object is not the one registered in variant_models —
+    # identity probing would return None there and collapse the per-variant
+    # cache keys (the dense drafter served for the moe target).
+    _active_variant: str | None
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: D102 — quiet the default stderr noise
         logger.debug(format, *args)
@@ -210,7 +216,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
             return
         if backend not in ("numpy", "torch", "triton", "cuda"):
             raise ValueError(f"unknown backend {backend!r}")
-        bkey = f"{self._current_variant}:{backend}"
+        bkey = f"{self._active_variant}:{backend}"
         if bkey not in self.backend_models:
             self.backend_models[bkey] = self._try_load_backend(backend)
         bm = self.backend_models[bkey]
@@ -223,16 +229,6 @@ class _LearningHandler(BaseHTTPRequestHandler):
             yield
         finally:
             self.model, self.vocab, self.tokenizer = saved
-
-    @property
-    def _current_variant(self) -> str | None:
-        """The label of the variant whose model is currently bound, or None
-        when the startup model is bound (it belongs to no registry entry
-        until a variant is requested)."""
-        for label, m in getattr(self, "variant_models", {}).items():
-            if m is self.model:
-                return label
-        return None
 
     @contextmanager
     def _per_variant(self, variant: str | None):
@@ -260,7 +256,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
         ):
             self.variant_models[target] = self.model
             self._variant_state[target] = {"vocab": self.vocab, "tokenizer": self.tokenizer}
-        if target == self._current_variant:
+        if self._active_variant == target:
             yield
             return
         if target not in self.variant_models:
@@ -270,16 +266,17 @@ class _LearningHandler(BaseHTTPRequestHandler):
                 raise ValueError(f"model variant {target!r} not loadable: {e}") from e
             self.variant_models[target] = model
             self._variant_state[target] = {"vocab": vocab, "tokenizer": tok}
-        saved = (self.model, self.vocab, self.tokenizer, self.model_dir)
+        saved = (self.model, self.vocab, self.tokenizer, self.model_dir, self._active_variant)
         try:
             vs = self._variant_state[target]
             self.model = self.variant_models[target]
             self.vocab = vs["vocab"]
             self.tokenizer = vs["tokenizer"]
             self.model_dir = self.variant_dirs[target]
+            self._active_variant = target
             yield
         finally:
-            self.model, self.vocab, self.tokenizer, self.model_dir = saved
+            self.model, self.vocab, self.tokenizer, self.model_dir, self._active_variant = saved
 
     def _try_load_backend(self, backend: str) -> Any | None:
         """Load the named track's model for the CURRENTLY BOUND checkpoint
@@ -376,7 +373,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
             "spec_block_size": self._spec_block_sizes(),
             # model-variant registry: which checkpoints this page can serve
             "variants": sorted(self.variant_dirs.keys()),
-            "variant": self._current_variant,
+            "variant": self._active_variant or self.default_variant,
             "default_variant": self.default_variant,
         }
 
@@ -416,7 +413,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
             p = next(self.model.parameters(), None) if hasattr(self.model, "parameters") else None  # type: ignore
             if p is not None:
                 sub = f":{p.device}:{p.dtype}"
-        key = f"{fam}{sub}:{self._current_variant}:{family}"
+        key = f"{fam}{sub}:{self._active_variant}:{family}"
         if key in self._drafter_cache:
             return self._drafter_cache[key]
         meta, params = load_drafter(sidecar_dir(self.model_dir, family))
@@ -876,6 +873,7 @@ def make_handler(
             "default_spec": default_spec,
             "_drafter_cache": {},
             "variant_models": {},  # lazy: variant label → loaded model (default backend)
+            "_active_variant": None,  # set by _per_variant; None = the startup model
             "_variant_state": {},  # variant → {vocab, tokenizer}
             "variant_dirs": dict(variant_dirs) if variant_dirs else {},
             "default_variant": default_variant,
