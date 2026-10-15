@@ -252,7 +252,7 @@ class SpeculativeGenerator:
         draft: np.ndarray,
         k_eff: int,
         emitted: list[int],
-    ) -> tuple[list[bool], int, np.ndarray]:
+    ) -> tuple[list[bool], int, np.ndarray, list[int]]:
         """Greedy acceptance walk over one draft block.
 
         pending_logits: (1, 1, V) the ANCHOR position's target logits
@@ -280,17 +280,23 @@ class SpeculativeGenerator:
         Returns (accept_mask, a = accepted count, corr_logits (V,) — the
         correction position: the target's guarded logits at the first
         disagreement, or the last draft position's when the whole block
-        accepted (the bonus token)).
+        accepted (the bonus token); target_pred — the target's OWN pick at
+        every position the walk examined, the value each draft token was
+        compared against (length min(k_eff, a+1): positions past the first
+        disagreement are never examined — the walk stops there).
         """
         from impl._np.inference import _apply_rep_guard
 
         accept_mask: list[bool] = []
+        target_pred: list[int] = []
         a = 0
         seen = list(emitted)  # the guard grows as the walk accepts
         while a < k_eff:
             pred = pending_logits[0, 0] if a == 0 else logits_v[0, a - 1]  # (V,)
             guarded = _apply_rep_guard(pred.reshape(1, -1).astype(np.float64), [seen])[0]
-            if int(np.argmax(guarded)) == int(draft[a]):
+            pick = int(np.argmax(guarded))
+            target_pred.append(pick)
+            if pick == int(draft[a]):
                 accept_mask.append(True)
                 seen.append(int(draft[a]))
                 a += 1
@@ -300,7 +306,7 @@ class SpeculativeGenerator:
         if a == k_eff:
             corr_source = logits_v[0, k_eff - 1]  # bonus position
         corr = _apply_rep_guard(corr_source.reshape(1, -1).astype(np.float64), [seen])[0]
-        return accept_mask, a, corr
+        return accept_mask, a, corr, target_pred
 
     @staticmethod
     def _sampled_walk(
@@ -313,7 +319,7 @@ class SpeculativeGenerator:
         draft_probs: list[np.ndarray],
         temperature: float,
         rng: np.random.Generator,
-    ) -> tuple[list[bool], int, np.ndarray]:
+    ) -> tuple[list[bool], int, np.ndarray, list[int]]:
         """Rejection-sampling acceptance walk (the theorem; NumPy only).
 
         Same (pending_logits, logits_v, draft, k_eff, emitted) head as
@@ -326,14 +332,19 @@ class SpeculativeGenerator:
         Accept draft[j] with probability min(1, p_t/p_d); at the first
         rejection return the residual distribution norm(max(0, p_t−p_d));
         on a full block return the target's own scaled distribution at the
-        last position (the bonus draw). Returns (accept_mask, a, p_next (V,)).
+        last position (the bonus draw). Returns (accept_mask, a, p_next (V,),
+        target_top1 — the target's most likely token at each examined
+        position, informational here: the theorem compares DISTRIBUTIONS
+        (min(1, p_t/p_d)), not tokens).
         """
         T = temperature
         accept_mask: list[bool] = []
+        target_top1: list[int] = []
         a = 0
         while a < k_eff:
             pt = _scaled(pending_logits[0, 0] if a == 0 else logits_v[0, a - 1], T, is_logits=True)
             pd = _scaled(draft_probs[a][0], T, is_logits=False)
+            target_top1.append(int(np.argmax(pt)))
             x = int(draft[a])
             if float(rng.random()) < min(1.0, float(pt[x]) / float(pd[x])):
                 accept_mask.append(True)
@@ -344,8 +355,8 @@ class SpeculativeGenerator:
             pt = _scaled(pending_logits[0, 0] if a == 0 else logits_v[0, a - 1], T, is_logits=True)
             pd = _scaled(draft_probs[a][0], T, is_logits=False)
             resid = np.clip(pt - pd, 0.0, None)
-            return accept_mask, a, resid / max(float(resid.sum()), 1e-12)
-        return accept_mask, a, _scaled(logits_v[0, k_eff - 1], T, is_logits=True)
+            return accept_mask, a, resid / max(float(resid.sum()), 1e-12), target_top1
+        return accept_mask, a, _scaled(logits_v[0, k_eff - 1], T, is_logits=True), target_top1
 
     @staticmethod
     def _drafter_record(anchor_token: np.ndarray, anchor_hidden: np.ndarray, d_probs: list[np.ndarray]) -> dict:
@@ -436,7 +447,7 @@ class SpeculativeGenerator:
             # 3. ACCEPT (the walk) + the correction/bonus token. Both walks
             #    share the 5-arg head (the sampled extras — draft_probs,
             #    temperature, rng — ride through a partial built per mode).
-            accept_mask, a, nxt = walk(pending_logits, logits_v, d, k_eff, emitted=out_tokens)
+            accept_mask, a, nxt, target_pred = walk(pending_logits, logits_v, d, k_eff, emitted=out_tokens)
             new_token = nxt_pick(nxt)
             committed = [int(x) for x in d[:a]] + [new_token]
             committed = committed[:remaining]
@@ -461,6 +472,10 @@ class SpeculativeGenerator:
                     "round": len(rounds),
                     "draft_tokens": [int(x) for x in d],
                     "accept_mask": accept_mask + [False] * (k_eff - len(accept_mask)),
+                    # the target's OWN pick at each examined position — what
+                    # every ✓/✗ compares against. Length = positions walked
+                    # (min(k_eff, accepted+1)); later positions are unexamined.
+                    "target_pred": target_pred,
                     "accepted": a,
                     "committed": committed,
                     "new_tokens": n_new,

@@ -700,11 +700,16 @@ function roundRow(rd) {
   lab.className = "rlab";
   lab.textContent = `r${rd.round} · ${rd.draft_ms}ms draft · ${rd.verify_ms}ms verify · +${rd.new_tokens}`;
   row.appendChild(lab);
+  const tp = rd.target_pred || [];  // the target's own pick per examined position
   (rd.draft_tokens || []).forEach((t, i) => {
     const ok = rd.accept_mask?.[i];
+    const examined = i < tp.length;
+    const tgt = examined ? tp[i] : null;
     const c = document.createElement("span");
     c.className = "dr " + (ok ? "ok" : "no");
-    c.title = `draft[${i}] = token ${t} — ${ok ? "accepted (target's argmax agrees)" : "rejected (target disagrees here; tail discarded)"}`;
+    c.title = examined
+      ? `draft[${i}] = "${tokChar(t)}" — the target's own pick here is "${tokChar(tgt)}" → ${ok ? "AGREES, accepted" : "DISAGREES, rejected (the tail is discarded and the target's token replaces the draft)"}`
+      : `draft[${i}] = "${tokChar(t)}" — never examined: the walk stops at the first disagreement, so this tail position is discarded unverified`;
     c.innerHTML = `${esc(tokChar(t))}<span class="mk">${ok ? "✓" : "✗"}</span>`;
     row.appendChild(c);
   });
@@ -1743,9 +1748,24 @@ function renderInspector() {
         ));
         if (sp) {
           body.appendChild(matLabel(`this run — mode ${sp.mode}, k=${sp.k ?? "trained"}: ${sp.n_rounds} rounds, ${sp.n_accepted}/${sp.n_draft_tokens} drafted tokens accepted (${(100 * (sp.accept_rate ?? 0)).toFixed(1)}%), mean accepted length ${sp.mean_accepted}`));
-          const rows = [["round", "draft tokens", "accepted"]];
-          (sp.rounds || []).slice(0, 8).forEach((r) => rows.push([`r${r.round}`, r.draft_tokens.map((t) => vocab()[t] ?? t).join(" "), `${r.accepted}/${r.k_eff}`]));
+          const rows = [["round", "draft tokens", "target's picks", "accepted"]];
+          (sp.rounds || []).slice(0, 8).forEach((r) =>
+            rows.push([
+              `r${r.round}`,
+              r.draft_tokens.map((t) => vocab()[t] ?? t).join(" "),
+              (r.target_pred || []).map((t) => vocab()[t] ?? t).join(" ") || "—",
+              `${r.accepted}/${r.k_eff}`,
+            ])
+          );
           body.appendChild(textTable(rows));
+          body.appendChild(
+            matLabel(
+              "draft tokens vs the target's own picks at the SAME positions: the walk accepts while they match and stops at the first mismatch (positions past it are discarded unexamined). " +
+                (isDrafter
+                  ? "The drafter never decides anything — its proposal is only a guess; the ✓/✗ verdicts come from the target."
+                  : "Verification is a REAL forward pass through the whole model — embedding → every block → final norm → lm_head, run over [prefix + draft block] in ONE call (forward_chunk). The Steps panel lists one row per verify pass; click a verify row, then any block in the diagram, to inspect the target's actual per-layer intermediates for that round.")
+            )
+          );
           if (sp.schedule) body.appendChild(matLabel(`DSpark schedule: verify_len ${sp.schedule.verify_len} · survival target ${sp.schedule.target} · survival curve (prefix len 1…): ${(sp.schedule.survival || []).slice(1, 9).join(", ")}`));
         } else {
           body.appendChild(matLabel("run a generation in this mode to populate this panel with the actual draft/accept numbers"));
