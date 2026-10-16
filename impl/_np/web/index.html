@@ -135,6 +135,8 @@
   .ctl-group > h3 { margin: 0 0 6px; font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 700; }
   .ctl-group .row { margin-top: 0; }
   .learn-how { display: block; margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line); color: var(--muted); }
+  .learn-order { margin: 8px 0 4px 18px; display: grid; gap: 4px; }
+  .learn-order li::marker { color: var(--accent); font-weight: 700; }
   #spec-k-wrap { display: none; align-items: center; gap: 6px; }
   #spec-k-wrap.on { display: inline-flex; }
   #spec-k { width: 90px; accent-color: var(--accent); }
@@ -166,9 +168,18 @@
   </div>
 
   <section id="prompt-panel">
-    <div class="explain" id="spec-explainer">
-      <div class="ex-what"><b>Speculative decoding</b>: a small <b>drafter</b> model proposes the next <i>k</i> tokens; the <b>target</b> model then verifies the whole block in ONE parallel forward pass and commits only the prefix it agrees with. <b>MTP</b> drafts sequentially — one tiny transformer block fed the target's final hidden state plus the next token's embedding, one token at a time (the DeepSeek-V3 design). <b>DSpark</b> drafts the whole block in one semi-autoregressive parallel pass, and the decoding engine picks each round's verification length from online prefix-survival statistics (confidence-scheduled verification, survival target 0.8). <span class="learn-how"><b>To learn it here:</b> set Decoding mode to MTP or DSpark, run a generation, then read the rounds table under the output — one row per drafting round showing the proposed block, the accepted prefix, and the rolled-back tail — and compare this run's tokens/sec against the same-prompt plain run.</span></div>
-      <div class="ex-why">The lossless contract: greedy verification commits a token only when it is exactly what plain greedy decoding would have picked — the output text is token-identical either way. Speculation only changes how many tokens one target pass confirms, never what the model says. The panel below the output measures this run's tokens/sec next to a same-prompt plain run, so the comparison is honest.</div>
+    <div class="explain" id="page-intro">
+      <div class="ex-what"><b>What this page shows.</b> A decoder-only transformer generating text — every number you see is the model's real computation, not an illustration. One forward pass reads the prompt (or the newest token) and produces a probability distribution over the vocabulary; the next token is picked from it, appended, and the loop repeats.
+      <b>The four key ideas, in the order worth learning them:</b>
+      <ol class="learn-order">
+        <li><b>Attention</b> — the only place tokens <i>talk to each other</i>. Each token compares its query with every earlier token's key, and mixes their values by that score (the causal mask hides the future so prediction stays honest).</li>
+        <li><b>The residual stream</b> — every block <i>adds</i> its results onto the stream instead of overwriting it: <i>h = x + attn(norm(x))</i>, then <i>out = h + ffn(norm(h))</i>. Depth accumulates corrections; nothing is destroyed.</li>
+        <li><b>The feed-forward (FFN) stage</b> — where each token's content is processed alone: <b>scale up</b> D→FF into a wider space, apply a <b>non-linear gate</b> (SwiGLU: SiLU(gate) ⊙ up — decides which features pass), <b>scale back</b> FF→D. In the MoE variant the FFN is replaced by a <b>router</b> that picks the top-k <b>experts</b> per token (each expert IS this same SwiGLU) plus an always-on <b>shared expert</b> — more capacity without more per-token compute.</li>
+        <li><b>Decoding modes</b> — <i>plain</i> runs one forward pass per token. <i>Speculative decoding</i> (MTP / DSpark) adds a small <b>drafter</b> that proposes the next k tokens cheaply, and the <b>target</b> verifies the whole block in ONE full forward pass — committing only the prefix it agrees with. Same output text, potentially several tokens per pass.</li>
+      </ol>
+      <span class="learn-how"><b>How to explore:</b> run <b>Generate + record</b>, then click any module in the diagram — the inspector shows the math FIRST, then that step's actual input/output tensors. The <b>Model</b> dropdown switches the architecture (moe = router + experts; dense = plain SwiGLU), <b>Backend</b> switches which implementation computes the same math (numpy/torch/triton/cuda), <b>Decoding mode</b> switches plain vs MTP/DSpark.</span></div>
+      <div class="ex-why">Why the output never changes between modes: greedy verification commits a token only when it is exactly what plain greedy decoding would have picked — the output text is token-identical either way. Speculation only changes <i>how many tokens one pass confirms</i>, never <i>what</i> the model says. The rounds table under the output shows each round's draft (✓ = the target agrees, ✗ = first disagreement — the rest is discarded and replaced by the target's own token), and the panel measures this run's tokens/sec against a same-prompt plain run.</div>
+    </div>
     </div>
     <h2>Prompt &amp; run</h2>
     <label>Input text (chars outside the vocab are skipped and marked)</label>
@@ -1136,12 +1147,14 @@ function buildDiagram() {
         ["router", `b${i}.ffn.router`], ["top-k", `b${i}.ffn.topk`, true], ["renorm", `b${i}.ffn.weights`, true],
         [`experts ×${c.n_experts}`, `b${i}.ffn.experts`], ["Σ wⱼ·Eⱼ(x)", `b${i}.ffn.sum`],
       ];
+      // each expert is a full SwiGLU FFN — the same widen → SiLU-gate →
+      // narrow math as the dense module; make that visible in the label.
       let moeArrows = null;
       if (c.n_shared_experts > 0) {
         moeCells.push([`shared ×${c.n_shared_experts}`, `b${i}.ffn.shared`]);
         moeArrows = [[[0, 1], [1, 2], [2, 3], [3, 4]]]; // shared (cell 5) gets no arrows: ungated branch
       }
-      module(`b${i}.ffn`, CX_C, r2, CW_C, ROW_H, "MoE feed-forward", [moeCells], moeArrows);
+      module(`b${i}.ffn`, CX_C, r2, CW_C, ROW_H, "MoE feed-forward — each expert: widen D→FF · SiLU-gate ⊙ · narrow FF→D", [moeCells], moeArrows);
     } else {
       // gate and up are parallel branches that meet at gate⊙up: only mul→down is a chain arrow.
       module(`b${i}.ffn`, CX_C, r2, CW_C, ROW_H, "FFN · SwiGLU", [
@@ -1485,7 +1498,9 @@ function ffnSubView(sub, bIdx, bt) {
   }
   if (sub === "experts") {
     return (body) => {
-      body.appendChild(formula("E_j(x) = (\\text{SiLU}(x W_{g,j}) \\odot x W_{u,j})\\, W_{d,j}", "each expert is a full SwiGLU FFN with its own three matrices; every expert evaluates every token here, but only the top-k selected ones enter the output sum"));
+      body.appendChild(formula(
+        "E_j(x) = \\underbrace{\\Big(\\text{SiLU}(\\overbrace{x W_{g,j}}^{\\text{widen } D \\to FF}) \\odot \\overbrace{x W_{u,j}}^{\\text{widen } D \\to FF}\\Big)}_{\\text{non-linear gate } \\sigma \\odot}\\, W_{d,j} \\quad \\text{(narrow } FF \\to D\\text{)}",
+        "each expert is a full SwiGLU FFN — the SAME three steps as the dense module: (1) SCALE UP, two parallel projections D→FF widen the token into a bigger space; (2) the NON-LINEAR step, SiLU(gate) ⊙ up decides which of the FF features pass through; (3) SCALE BACK, Wd narrows FF→D. Every expert evaluates every token here, but only the top-k selected ones enter the output sum"));
       tensorBlock(body, "in", "input x (LN2 output) — every expert evaluates it", bt.y2, { cell: 12, names: ["S", "D"] });
       m.expert_outs.forEach((eo, j) => {
         body.appendChild(matLabel(`expert ${j} output (S, D)`));
@@ -1715,12 +1730,23 @@ function renderInspector() {
           "\\mathrm{keep}\\ d_j \\iff \\arg\\max\\ \\ell_{j-1}^{guard} = d_j",
           "the accept-mask tree: position j's verdict is the target's REPETITION-GUARDED argmax at the position before it (j=0 uses the anchor's pending logits) — the same rule plain greedy uses, which is why the committed stream is token-identical to plain greedy (the lossless contract)"));
         if (round) {
-          const rows = [["j", "draft d_j", "verdict"]];
+          // the target's own pick per examined position (recorded by the engine);
+          // positions past the first disagreement are never examined.
+          const tp = round.target_pred || [];
+          const rows = [["j", "draft d_j", "target's pick at j", "verdict — and why"]];
           round.draft_tokens.forEach((t, j) => {
-            rows.push([String(j), `${vocab()[t] ?? t} (${t})`, round.accept_mask[j] ? "✓ accepted" : "✗ rejected — tail discarded"]);
+            const examined = j < tp.length;
+            const tgt = examined ? `${vocab()[tp[j]] ?? tp[j]} (${tp[j]})` : "—";
+            const verdict = examined
+              ? (round.accept_mask[j]
+                  ? "✓ agree — appended"
+                  : "✗ disagree — the target's token is appended instead, and every later draft is DISCARDED (the walk stops here)")
+              : "unexamined — past the first disagreement, discarded with the tail";
+            rows.push([String(j), `${vocab()[t] ?? t} (${t})`, tgt, verdict]);
           });
           body.appendChild(textTable(rows));
-          body.appendChild(matLabel(`accepted prefix: ${round.accepted}/${round.k_eff}; committed this round: ${round.committed.length} tokens`));
+          body.appendChild(matLabel("how tokens are APPENDED: the agreeing prefix (✓ rows, in order) is appended as-is; at the first ✗ the TARGET's own token is appended in place of the wrong draft; positions after it are thrown away. So one round always appends accepted+1 tokens (the +1 is the target's correction — or a bonus token when the whole block agreed)."));
+          body.appendChild(matLabel(`this round: accepted prefix ${round.accepted}/${round.k_eff}, appended ${round.new_tokens} tokens (${round.accepted} drafts + the target's ${round.committed.length - round.accepted} correction/bonus).`));
         } else {
           body.appendChild(matLabel("run a spec record — the per-position ✓/✗ walk appears here"));
         }
