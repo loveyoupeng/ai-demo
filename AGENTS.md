@@ -206,13 +206,16 @@ the dev loop.
   scope).
 - Pytest: global `timeout = 300` (pytest-timeout), `gpu` marker (deselect
   with `-m "not gpu"`), `pythonpath = ["shared"]`, `testpaths = ["tests"]`.
-- Target hardware: Jetson (Orin sm_87 / GB10); GPU tests are slow and
-  stateful — run them in separate invocations (see below).
+- Target hardware: fully tested on Jetson AGX Orin 64GB (JetPack 7.2.2,
+  CUDA 13.2). The CUDA track compiles to per-device PTX (native arch, CC 8.0
+  baseline fallback) and runs on any NVIDIA GPU with CC >= 8.0 (Ampere or
+  newer) under a CUDA 13.x driver — see docs/architecture/design.md →
+  "Platform Target". GPU tests are slow and stateful — run them in separate
+  invocations (see below).
 - `resource/` is fully git-ignored: TinyStories data and all checkpoints are
   local artifacts. Recreate: `scripts/train_real_tinystories` (real-data
-  checkpoints), `scripts/train_demo_model_v2` (learning-mode pipeline),
-  `scripts/train_demo_model` (legacy demo), `scripts/download_tinystories`
-  (dataset).
+  checkpoints), `scripts/train_demo_model_v2` (learning-mode pipeline +
+  `--variant moe`), `scripts/download_tinystories` (dataset).
 
 ## Testing & QA
 

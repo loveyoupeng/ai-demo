@@ -11,6 +11,13 @@ The cache lives in impl/_cuda/.cache/ directory.
 
 This is the foundation for all CUDA kernels in this project — every
 kernel goes through the same compile -> load -> launch pipeline.
+
+Portability: NVRTC emits PTX (virtual-architecture bytecode), and the
+driver JIT-compiles it to the actual GPU at module load — so the same
+source runs on any NVIDIA GPU with CC >= 8.0 (Ampere and newer) under a
+CUDA 13.x driver, including Blackwell (RTX 50xx, GB10/DGX Spark). The
+-arch flag is resolved per device at compile time (native arch when
+newer than the CC 8.0 baseline; see _arch_flag).
 """
 
 from __future__ import annotations
@@ -31,11 +38,56 @@ from cuda.bindings import nvrtc as _nvrtc_lib  # pyright: ignore[reportAttribute
 _CACHE_DIR = Path(__file__).parent / ".cache"
 _CACHE_DIR.mkdir(exist_ok=True)
 
-# Compile option for compute capability 8.0 (Orin GPUs)
-_ARCH_FLAG = b"-arch=compute_80"
+# Compile target: PTX (virtual architecture), NOT a fixed-machine SASS
+# binary. NVRTC emits forward-compatible bytecode; the CUDA driver JIT-
+# compiles it to the ACTUAL device at load time (cuModuleLoadDataEx), so one
+# build runs on every GPU of CC >= the PTX level. The virtual arch is chosen
+# PER DEVICE at compile time:
+#   - the DETECTED device's own compute capability when it is newer than the
+#     baseline (native-arch PTX: Blackwell RTX 50xx sm_120, DGX Spark GB10
+#     sm_121, Ada sm_89 ... compile for their own level), or
+#   - the baseline compute_80 (Ampere) fallback: PTX from CC 8.0 JITs to
+#     every newer architecture, and CC < 8.0 (Turing and older) is not
+#     supported.
+_MIN_CC = (8, 0)  # the floor: pre-Ampere devices are out of scope
+_ARCH_FLAG = b"-arch=compute_80"  # resolved per device by _arch_flag()
 
-# Compile options shared across all kernels
-_COMPILE_OPTIONS = [_ARCH_FLAG]
+
+def _arch_flag() -> bytes:
+    """The NVRTC -arch flag for the CURRENT device (cached at first call).
+
+    Queries device 0's compute capability through the driver and compiles
+    for it when newer than the CC 8.0 baseline; otherwise the baseline. The
+    PTX stays forward-JIT-able either way — this only lets newer GPUs use
+    their native instruction set instead of Ampere-era code.
+    """
+    global _ARCH_FLAG, _COMPILE_OPTIONS
+    if _ARCH_FLAG != b"-arch=compute_80":
+        return _ARCH_FLAG  # already resolved
+    try:
+        # Runtime API for the CC query (the driver-API attribute path
+        # returns CUDA_ERROR_INVALID_DEVICE on some driver stacks, e.g.
+        # this repo's reference Orin/JetPack combo).
+        from cuda.bindings import runtime as _runtime  # type: ignore[reportAttributeAccessIssue]
+
+        result = _runtime.cudaGetDeviceProperties(0)
+        props = result[1] if isinstance(result, tuple) else result
+        major, minor = int(props.major), int(props.minor)
+        cc = (major, minor)
+        if cc >= _MIN_CC:
+            _ARCH_FLAG = f"-arch=compute_{major}{minor}".encode()
+        else:
+            raise RuntimeError(f"device CC {cc[0]}.{cc[1]} < 8.0 — this track needs an Ampere-or-newer GPU")
+    except Exception:  # noqa: BLE001 — no driver/GPU: fall back to the baseline
+        pass
+    _COMPILE_OPTIONS = [_ARCH_FLAG]
+    return _ARCH_FLAG
+
+
+# Compile options shared across all kernels (the arch entry is resolved
+# per device by _arch_flag(); the cache key folds it in, so each GPU's PTX
+# is cached separately).
+_COMPILE_OPTIONS: list[bytes] = [_ARCH_FLAG]
 
 
 # ---------------------------------------------------------------------------

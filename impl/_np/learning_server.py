@@ -235,11 +235,13 @@ class _LearningHandler(BaseHTTPRequestHandler):
         """Swap self.model/vocab/tokenizer for the named VARIANT checkpoint.
 
         Variants are DIFFERENT CHECKPOINTS of the same demo family served by
-        one page: "dense" (the default learning_tool model) and "moe" (the
-        legacy learning_demo checkpoint — E routed experts + always-on
-        shared experts, so the page can show the router/top-k/shared cells).
-        Lazily loaded per backend so switching stays cheap; an unknown
-        variant raises a 400 the page surfaces.
+        one page: "dense" (the learning_tool model, plain SwiGLU FFN) and
+        "moe" (the learning_moe model — the dense pipeline's twin with the
+        FFN swapped for a MoE: E routed experts + an always-on shared
+        expert, ADR 0002; same BPE tokenizer and training data, so the
+        comparison is controlled and the page shows the router/top-k/shared
+        cells). Lazily loaded per backend so switching stays cheap; an
+        unknown variant raises a 400 the page surfaces.
         """
         target = variant or self.default_variant
         if not self.variant_dirs:

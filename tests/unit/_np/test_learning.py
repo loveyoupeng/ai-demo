@@ -17,7 +17,7 @@ from impl._np.learning import generate_with_records, instrumented_forward
 from impl._np.model import NumPyModel
 from shared.config import TransformerConfig
 
-DEMO_MODEL = Path(__file__).resolve().parents[3] / "resource" / "models" / "learning_demo"
+DEMO_MODEL = Path(__file__).resolve().parents[3] / "resource" / "models" / "learning_moe"
 
 
 def tiny_model() -> NumPyModel:
@@ -283,17 +283,18 @@ class TestDemoModelCheckpoint:
 
     @pytest.mark.timeout(30)
     def test_demo_model_loads_and_generates(self):
-        """learning_demo checkpoint loads with its vocab sidecar and generates text."""
+        """learning_moe checkpoint loads with its vocab sidecar and generates text."""
         import json
 
         from impl._np.learning_server import load_learning_model
 
-        assert DEMO_MODEL.is_dir(), "demo checkpoint missing — run scripts/train_demo_model.py"
+        assert DEMO_MODEL.is_dir(), "moe checkpoint missing — run scripts/train_demo_model_v2 --variant moe"
         model, vocab, cfg, _tok = load_learning_model(str(DEMO_MODEL))
         assert vocab is not None and len(vocab) == cfg.vocab_size
-        assert " " in vocab  # space is part of the char vocab
         assert isinstance(model, NumPyModel)  # default backend is numpy
-        rec = generate_with_records(model, vocab, [vocab.index("t"), vocab.index("h"), vocab.index("e")], 5, seed=42)
+        assert model.config.has_moe()  # the moe variant: router + shared expert
+        # BPE sub-word vocab: "Once upon" tokenizes to multiple sub-words
+        rec = generate_with_records(model, vocab, [vocab.index("O"), vocab.index("n")], 5, seed=42)
         assert len(rec["generated"]["tokens"]) == 5
         text = rec["generated"]["text"]
         assert all(ch in vocab for ch in text)

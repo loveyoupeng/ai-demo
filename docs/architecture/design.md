@@ -97,13 +97,31 @@ flowchart TD
 
 ## Platform Target
 
+**Fully tested on:** NVIDIA Jetson AGX Orin 64GB, JetPack 7.2.2 (CUDA 13.2,
+PyTorch 2.13.0+cu132 via the pinned `pytorch-cu132` uv index; 2048 CUDA
+cores, ~20 TFLOPS).
+
+**Compatibility (the CUDA track):** the kernels compile to PTX (virtual
+architecture) via NVRTC, and the driver JIT-compiles that PTX to the
+actual GPU at module load — so no fixed-machine binary is ever built. The
+`-arch` flag is resolved per device at compile time
+(`impl/_cuda/compiler.py` → `_arch_flag`): the native compute capability
+when it is newer than the CC 8.0 baseline (e.g. Orin sm_87, Ada sm_89,
+RTX 50xx sm_120, DGX Spark GB10 sm_121), or the CC 8.0 baseline fallback.
+The result: any NVIDIA GPU with **compute capability >= 8.0 (Ampere and
+newer)** and a **CUDA 13.x driver** runs this track — including Blackwell
+(RTX 50xx, GB10/DGX Spark). Pre-Ampere devices (Turing and older) are out
+of scope. The Triton track compiles on-device by construction and needs no
+arch flag; the NumPy/Torch tracks are GPU-agnostic.
+
 | Component | Value |
 | ----------- | ------- |
-| **Device** | NVIDIA Jetson AGX Orin 64GB |
-| **OS** | JetPack 7.2.1 |
+| **Tested device** | NVIDIA Jetson AGX Orin 64GB |
+| **Tested OS** | JetPack 7.2.2 |
 | **CUDA** | CUDA 13.2 |
 | **PyTorch** | PyTorch 2.13.0+cu132 (pinned `pytorch-cu132` uv index) |
 | **GPU** | 2048 CUDA cores, 64-bit memory, ~20 TFLOPS |
+| **CUDA-track scope** | any NVIDIA GPU, CC >= 8.0 (Ampere+), CUDA 13.x driver |
 
 ## Key Design Decisions
 

@@ -52,9 +52,12 @@ Finished task specs are deleted — the git history is the record.
 stages — pre-train on TinyStories (`learning_base`), fine-tune on code
 instructions (`learning_sft`), fine-tune on tool-call JSON (`learning_tool`).
 The web page's compare tab loads all three, so you can watch identical
-architecture + initialization diverge purely from fine-tuning data. A smaller
-char-level MoE demo (`learning_demo`, D=8, V=20 — the legacy pre-SFT demo)
-exists for inspecting MoE internals; below is the **default** model.
+architecture + initialization diverge purely from fine-tuning data. The
+page's **MoE variant** (`learning_moe`) is the same pipeline's twin with one
+config knob changed — the FFN swapped for a router + top-k experts + an
+always-on shared expert (E=3+1 shared) — same BPE-512 tokenizer, same corpus,
+same seed, so dense-vs-MoE is a controlled experiment. Below is the **dense**
+model.
 
 | Hyperparameter | Value | Choice & why |
 | --- | --- | --- |
@@ -262,11 +265,9 @@ uv run python -m scripts.learning --port 9000 --model resource/models/torch_real
 # "The learning-mode example model" above)
 uv run python -m scripts.train_demo_model_v2
 
-# Or build the legacy char-level MoE demo (D=8, H=4, L=3, E=3 routed +
-# n_shared_experts=1, V=20) and serve it explicitly via --model
-uv run python -m scripts.train_demo_model
-uv run python -m scripts.train_demo_model --backend cuda   # GPU backends too
-uv run python -m scripts.learning --model resource/models/learning_demo
+# Build the MoE twin of the pipeline (learning_moe: same tokenizer/corpus/
+# stages, E=3 routed + 1 shared expert) — the page's default variant
+uv run python -m scripts.train_demo_model_v2 --variant moe
 ```
 
 ### Training
@@ -378,7 +379,7 @@ scripts/
 ├── train_tokenizer.py     # BPE tokenizer trainer
 ├── download_sft_data.py   # SFT dataset fetcher
 ├── train_real_tinystories.py
-├── train_demo_model.py    # legacy char-level MoE demo model
+├── train_demo_model.py    # legacy char-level trainer (superseded by --variant moe)
 ├── train_demo_model_v2.py # learning_base/_sft/_tool pipeline
 ├── download_tinystories.py
 └── check_docs.py          # doc-vs-code alignment check (paths + counts)

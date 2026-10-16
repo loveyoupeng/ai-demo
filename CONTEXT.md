@@ -302,8 +302,11 @@ letters. Where each value comes from:
 - **First-divergence step**: the first decode step where the models' chosen tokens differ. The straight answer to
   "what changed when we fine-tuned".
 
-- **Demo model**: the old pretrained toy model — char-level vocabulary (V=20) — was the original learning-mode
-  default. The current default is the SFT pipeline's final checkpoint (`learning_tool`).
+- **Demo model**: the learning-mode checkpoint family. The page's default
+  is the MoE twin (`learning_moe` — the dense pipeline retrained with
+  `n_experts=3` + one always-on shared expert, a real BPE-512 tokenizer);
+  the dense original (`learning_tool`) is the other dropdown entry, and
+  `learning_base` / `learning_sft` feed the compare tab.
 
 - **Entry-point contract**: every per-track `cli.py` (e.g.
   `python -m impl._torch.cli`) is a single-track smoke demo on random

@@ -15,10 +15,12 @@ Usage:
     uv run python -m scripts.learning --host 0.0.0.0           # allow LAN access
 
 The page's Model dropdown switches the SERVED CHECKPOINT (not just the
-backend): "moe" (default — the learning_demo checkpoint with routed + always-on
-shared experts, so the diagram shows the router/top-k/shared cells) and
-"dense" (the learning_tool checkpoint, plain SwiGLU FFN). Either checkpoint
-runs on any backend selected in-page.
+backend): "moe" (default — the learning_moe checkpoint: the SAME BPE
+tokenizer, corpus, and 3-stage training as the dense model, with the FFN
+swapped for a MoE — E=3 routed experts + 1 always-on shared expert — so the
+diagram shows the router/top-k/shared cells and the dense-vs-moe comparison
+is a controlled experiment) and "dense" (the learning_tool checkpoint, plain
+SwiGLU FFN). Either checkpoint runs on any backend selected in-page.
 
 If the default demo checkpoint is missing it is trained first (a few minutes).
 """
@@ -40,13 +42,16 @@ from shared.utils.logger_setup import setup_logging  # noqa: E402
 DEFAULT_MODEL = "resource/models/learning_tool"
 
 # Model variants the page can switch between (the in-page Model dropdown):
-#   moe   — the char-level learning_demo checkpoint (E routed experts +
-#           always-on shared experts): the diagram shows the router, the
-#           top-k selection, the renormalized weights, and the shared cell.
-#   dense — the default learning_tool checkpoint (plain SwiGLU FFN).
+#   moe   — the learning_moe checkpoint: the dense pipeline's twin with the
+#           FFN swapped for a MoE (E=3 routed + 1 always-on shared expert,
+#           ADR 0002) — same BPE-512 tokenizer, same pre→SFT→tool training,
+#           so dense-vs-moe is a controlled experiment. The diagram shows
+#           the router, the top-k selection, the renormalized weights, and
+#           the shared cell.
+#   dense — the learning_tool checkpoint (plain SwiGLU FFN).
 # MoE is the DEFAULT so the page opens with the richer architecture.
 VARIANTS = {
-    "moe": "resource/models/learning_demo",
+    "moe": "resource/models/learning_moe",
     "dense": "resource/models/learning_tool",
 }
 DEFAULT_VARIANT = "moe"
@@ -79,12 +84,14 @@ def _ensure_demo_model(model_dir: str) -> None:
 
 
 def _ensure_moe_demo(model_dir: str) -> None:
-    """Train the MoE demo checkpoint (train_demo_model) if missing — the
-    page's default variant needs it (router + top-k + shared experts)."""
+    """Train the MoE checkpoint (train_demo_model_v2 --variant moe) if
+    missing — the page's default variant needs it (router + top-k + shared
+    experts). Same tokenizer/corpus/stages as the dense pipeline, so the
+    comparison is controlled."""
     if (Path(model_dir) / "model.npz").is_file():
         return
-    print(f"MoE demo checkpoint not found at {model_dir} — training it first (a few minutes)...")
-    subprocess.run([sys.executable, "-m", "scripts.train_demo_model"], check=True)
+    print(f"MoE checkpoint not found at {model_dir} — training it first (a few minutes)...")
+    subprocess.run([sys.executable, "-m", "scripts.train_demo_model_v2", "--variant", "moe"], check=True)
 
 
 def _ensure_drafters(model_dir: str) -> None:

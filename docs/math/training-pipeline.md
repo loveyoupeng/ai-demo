@@ -124,11 +124,14 @@ always-on shared expert of ADR 0002 via `n_shared_experts > 0`):
 - `scripts/train_demo_model_v2.py` — the default learning-mode model
   (BPE-512, dense SwiGLU): pre-train → code SFT → tool-call SFT, producing
   `learning_base` / `learning_sft` / `learning_tool` (the stages above).
-- `scripts/train_demo_model.py` — the legacy char-level demo (V=20,
-  D=8): a *dense-or-MoE* model with `E=3` routed experts + 1 shared
-  expert, so the learning page can inspect router scores, top-k
-  selection, and the shared branch's tensors (the `learning_demo`
-  checkpoint).
+- `scripts/train_demo_model_v2.py --variant moe` — the MoE twin of the
+  pipeline above: the same BPE tokenizer, corpus, and 3 stages with the
+  FFN swapped for a router + top-k experts + an always-on shared expert
+  (`n_experts=3`, `n_shared_experts=1`, ADR 0002), producing the
+  `learning_moe` checkpoint — the learning page's default variant, so the
+  page can inspect router scores, top-k selection, and the shared branch's
+  tensors on a REAL tokenizer while dense-vs-moe stays a controlled
+  experiment (same data, same seed, one config knob).
 
 ## Common Pitfalls This Repository Avoids
 

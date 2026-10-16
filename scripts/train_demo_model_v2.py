@@ -16,8 +16,17 @@ sequences — minutes on the Jetson. Output: resource/models/{learning_base,
 learning_sft,learning_tool} each with model.npz + config.json + vocab.json +
 tokenizer.json.
 
+``--variant moe`` trains the SAME pipeline (same BPE tokenizer, same three
+stages, same D=64/L=3 scale) with one config knob changed: the FFN is a
+MoE (E=3 routed experts + 1 always-on shared expert, top-k=1 — ADR 0002).
+Output: resource/models/learning_moe. Identical in every other respect, so
+the learning page's dense-vs-moe dropdown is a CONTROLLED experiment: same
+tokenizer, same data, same seed — only the FFN differs. The router scores
+(S, 3) and every expert output (S, D) stay small enough to inspect.
+
 Usage:
-    uv run python -m scripts.train_demo_model_v2
+    uv run python -m scripts.train_demo_model_v2                 # dense pipeline
+    uv run python -m scripts.train_demo_model_v2 --variant moe    # the MoE twin
 """
 
 from __future__ import annotations
@@ -174,35 +183,69 @@ def sample(model: torch.nn.Module, prompt: str, n: int = 14) -> str:
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train the learning-mode demo pipeline (dense or MoE twin).")
+    parser.add_argument(
+        "--variant",
+        choices=["dense", "moe"],
+        default="dense",
+        help="dense: plain SwiGLU FFN (learning_tool); moe: E=3 routed + 1 shared expert (learning_moe)",
+    )
+    parser.add_argument("--epochs", type=int, default=0, help="Override the per-stage epoch counts (quick smoke)")
+    args = parser.parse_args()
+
+    moe = args.variant == "moe"
+    names = {
+        "base": "learning_moe_base" if moe else "learning_base",
+        "sft": "learning_moe_sft" if moe else "learning_sft",
+        "tool": "learning_moe" if moe else "learning_tool",
+    }
+
     tok = train_tokenizer()
     stories, code, tool = load_corpus()
 
     cfg = TransformerConfig.from_dict(
-        {"vocab_size": VOCAB, "embed_dim": 64, "n_layers": 3, "n_heads": 4, "context_length": 128, "seed": 42}
+        {
+            "vocab_size": VOCAB,
+            "embed_dim": 64,
+            "n_layers": 3,
+            "n_heads": 4,
+            "context_length": 128,
+            "seed": 42,
+            # the ONE knob that differs between the variants (ADR 0002):
+            "n_experts": 3 if moe else 1,
+            "n_shared_experts": 1 if moe else 0,
+            "top_k": 1,
+        }
     )
+
+    ep_base = args.epochs or 4
+    ep_sft = args.epochs or 4
+    ep_tool = args.epochs or 3
 
     # ── stage 1: base (English fluency) ─────────────────────────────────
     base = TorchModel(cfg).cuda().train()
-    print("stage 1: pre-train on stories")
-    train(base, stories, epochs=4, lr=1e-3, tag="base")
+    print(f"stage 1 ({args.variant}): pre-train on stories")
+    train(base, stories, epochs=ep_base, lr=1e-3, tag="base")
     base.eval()
-    save_checkpoint(base, "learning_base", tok)
+    save_checkpoint(base, names["base"], tok)
 
     # ── stage 2: SFT on code instructions ───────────────────────────────
     sft = TorchModel(cfg).cuda().train()
-    sft.load_from_numpy_dict(dict(np.load(RESOURCE / "models" / "learning_base" / "model.npz")))
-    print("stage 2: SFT on code instructions")
-    train(sft, code, epochs=4, lr=5e-4, tag="sft")
+    sft.load_from_numpy_dict(dict(np.load(RESOURCE / "models" / names["base"] / "model.npz")))
+    print(f"stage 2 ({args.variant}): SFT on code instructions")
+    train(sft, code, epochs=ep_sft, lr=5e-4, tag="sft")
     sft.eval()
-    save_checkpoint(sft, "learning_sft", tok)
+    save_checkpoint(sft, names["sft"], tok)
 
     # ── stage 3: SFT on tool calls ───────────────────────────────────────
     tool_m = TorchModel(cfg).cuda().train()
-    tool_m.load_from_numpy_dict(dict(np.load(RESOURCE / "models" / "learning_sft" / "model.npz")))
-    print("stage 3: SFT on tool calls")
-    train(tool_m, tool, epochs=3, lr=5e-4, tag="tool")
+    tool_m.load_from_numpy_dict(dict(np.load(RESOURCE / "models" / names["sft"] / "model.npz")))
+    print(f"stage 3 ({args.variant}): SFT on tool calls")
+    train(tool_m, tool, epochs=ep_tool, lr=5e-4, tag="tool")
     tool_m.eval()
-    save_checkpoint(tool_m, "learning_tool", tok)
+    save_checkpoint(tool_m, names["tool"], tok)
 
     # ── generation probes (sampled, not argmax) ─────────────────────────
     for name, m in (("base", base), ("sft", sft), ("tool", tool_m)):

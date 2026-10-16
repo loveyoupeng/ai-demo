@@ -148,7 +148,7 @@ class TestLearningServer:
         assert code == 404
 
     def test_path_traversal_blocked(self, server):
-        code, _ = get_json(f"{server}/../models/learning_demo/vocab.json")
+        code, _ = get_json(f"{server}/../models/learning_tool/vocab.json")
         assert code == 404
 
 
@@ -160,7 +160,7 @@ class TestLoadLearningModel:
     def test_demo_checkpoint_loads_with_vocab(self):
         from pathlib import Path
 
-        demo = Path(__file__).resolve().parents[3] / "resource" / "models" / "learning_demo"
+        demo = Path(__file__).resolve().parents[3] / "resource" / "models" / "learning_moe"
         if not demo.is_dir():
             pytest.skip("demo checkpoint not trained yet")
         model, vocab, cfg, _tok = load_learning_model(str(demo))

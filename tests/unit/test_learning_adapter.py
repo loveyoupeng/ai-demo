@@ -28,7 +28,7 @@ from impl._np.model import NumPyModel
 from impl._torch import learning as torch_learning
 from impl._torch.layers import TorchModel
 
-DEMO = Path(__file__).resolve().parents[2] / "resource" / "models" / "learning_demo"
+DEMO = Path(__file__).resolve().parents[2] / "resource" / "models" / "learning_moe"
 PROMPT = [3, 7, 11]
 N_TOKENS = 6
 SEED = 42
