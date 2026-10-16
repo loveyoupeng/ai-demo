@@ -60,9 +60,7 @@ on tool-call JSON. The two variants differ by ONE config knob:
   `--variant moe`).
 
 Same tokenizer, same corpus, same seed — so the page's dense-vs-MoE
-dropdown is a controlled experiment, and the compare tab (which loads the
-dense pipeline's `learning_base` and `learning_sft`) shows fine-tuning
-divergence on identical architecture. Below is the shared **tokenizer +
+dropdown is a controlled experiment. Below is the shared **tokenizer +
 architecture** card (the `n_experts` row is what the variant dropdown
 switches).
 

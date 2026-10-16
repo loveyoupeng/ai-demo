@@ -164,7 +164,6 @@
 <main id="main">
   <div id="tab-row" style="grid-column: 1 / -1; display:flex; gap:6px; margin-bottom:4px">
     <button id="tab-main" class="secondary" style="font-weight:700">Visual Decoder</button>
-    <button id="tab-compare" class="secondary" style="opacity:.65">Compare models</button>
   </div>
 
   <section id="prompt-panel">
@@ -279,24 +278,7 @@
       <span class="lg"><span class="sw hilo"></span><b>heat color</b> red = low, blue = high (per-tensor min/max)</span>
     </div>
   </section>
-        <section id="compare-panel" style="background:var(--panel2); border-color:var(--line); display:none; grid-column: 1 / -1;">
-    <h2>Compare — same prompt, different model weights</h2>
-    <div class="kv">Same prompt into every registered model. Each model column shows its chosen token (bold) per step + top candidates with probabilities. Rows highlighted amber on the first divergent step.</div>
-    <div class="row" style="margin-top:10px">
-      <div>
-        <label style="margin:0">prompt</label>
-        <input id="compare-prompt" type="text" value="Write a Python function to reverse a list." style="width:340px">
-      </div>
-      <div><label>Tokens</label><input type="number" id="compare-ntokens" value="8" min="1" max="32" style="width:90px"></div>
-      <div><label>Top-k</label><input type="number" id="compare-topk" value="10" min="0" style="width:70px"></div>
-      <div><button id="btn-compare" class="secondary">Compare</button></div>
-    </div>
-    <div id="compare-grid" style="overflow-x:auto;margin-top:12px"></div>
-  </section>
-
-
-
-<section id="inspector">
+        <section id="inspector">
     <h2 id="ins-title">Inspector</h2>
     <div id="ins-body"><p class="note">Pick a module in the diagram (or a step) to see its explanation, math, and tensors.</p></div>
   </section>
@@ -1942,132 +1924,6 @@ $("variant").onchange = async () => {
   buildDiagram();
   if ($("gen-text").textContent) doGenerate();
 };
-
-// ---------------------------------------------------------------------------
-// Compare tab — one decode per model at a time (synchronized), then a shared
-// step table with per-row divergence highlight + a token-click detail panel
-// that shows one step's logits as horizontal bars (same style as the visual
-// decoder's record view).
-// ---------------------------------------------------------------------------
-
-function _tok(t, ids, vocab) {
-  if (t === null || t === undefined || t === "unk") return "?";
-  const id = typeof t === "number" ? t : Number(t);
-  if (!Number.isInteger(id) || id < 0 || id >= vocab.length) return "?";
-  return vocab[id];
-}
-
-function compareStatus(msg, tag) {
-  const el = $("compare-status");
-  el.textContent = msg;
-  el.style.color = tag === "warn" ? "var(--warn)" : (tag === "ok" ? "var(--accent2)" : "var(--dim)");
-}
-
-async function doCompare() {
-  setStatus("comparing…");
-  compareStatus("running…", "dim");
-  const grid = $("compare-grid");
-  grid.innerHTML = "";
-
-  try {
-    const out = await api("/api/compare", {
-      text: $("compare-prompt").value || "Write a function that reverses a list.",
-      n_tokens: parseInt($("compare-ntokens").value || "8", 10),
-      temperature: parseFloat($("compare-temp").value || "0.8"),
-      top_k: parseInt($("compare-topk").value || "10", 10),
-      seed: parseInt($("compare-seed").value || "42", 10),
-    });
-
-    const labels = Object.keys(out);
-    const vocab = out[labels[0]]?.vocab || MODEL.vocab || [];
-    const per = labels.map((label) => {
-      const steps = out[label].steps || [];
-      return {
-        label,
-        steps: steps.map((s) => ({
-          kind: s.kind || "decode",
-          token: vocab[s.token] ?? `id${s.token}`,
-          tokenId: s.token,
-          tops: (s.top_tokens || []).map((p) => ({
-            id: Number(p[0]),
-            tok: vocab[p[0]] ?? `id${p[0]}`,
-            prob: Number(p[1]),
-          })),
-        })),
-      };
-    });
-
-    // find first diverging step
-    let firstDiv = -1;
-    for (let s = 0; s < per[0].steps.length; s++) {
-      if (!per.every((p) => p.steps[s] && p.steps[s].tokenId === per[0].steps[s]?.tokenId)) { firstDiv = s; break; }
-    }
-
-    // table: rows = models, cols = steps
-    const table = document.createElement("table");
-    table.style.width = "100%";
-    table.style.borderCollapse = "collapse";
-    table.style.font = "13px/1.4 system-ui, sans-serif";
-    const head = document.createElement("tr");
-    head.innerHTML = "<th style='padding:8px 6px;border-bottom:1px solid var(--line);text-align:left'>model</th>" +
-      per[0].steps.map((_, i) => `<th style='padding:8px 6px;border-bottom:1px solid var(--line)'>${i + 1}</th>`).join("");
-    table.appendChild(head);
-
-    per.forEach((p) => {
-      const tr = document.createElement("tr");
-      tr.style.borderTop = "1px solid var(--line)";
-      const td = document.createElement("td");
-      td.innerHTML = `<b>${esc(p.label)}</b>`;
-      td.style.padding = "8px 6px";
-      tr.appendChild(td);
-      p.steps.forEach((tlv, s) => {
-        const td = document.createElement("td");
-        td.style.padding = "8px 6px";
-        if (s === firstDiv) td.style.background = "rgba(224,163,94,.10)";
-        const chipStr = tlv.tops.map((t) =>
-          `<span class="chip" style="background:var(--panel2);margin:2px" title="${tlv.kind}">${esc(t.tok)} ${t.prob.toFixed(3)}</span>`
-        ).join(" ");
-        td.innerHTML = `<b>${esc(tlv.token)}</b><div>${chipStr}</div>`;
-        td.onclick = () => showCmpDetails(tlv, s, p.label);
-        td.style.cursor = "pointer";
-        td.dataset.step = String(s);
-        td.dataset.model = String(p.label);
-        tr.appendChild(td);
-      });
-      table.appendChild(tr);
-    });
-    grid.appendChild(table);
-    grid.style.display = "block";
-
-    compareStatus(
-      `${per.length} models${firstDiv >= 0 ? ` — divergence at step ${firstDiv + 1}` : " — same tokens"}`,
-      firstDiv >= 0 || per.length ? "warn" : "ok",
-    );
-    setStatus(`${per.length} models compared.`);
-  } catch (e) {
-    setStatus("compare error: " + (e.message || String(e)));
-    compareStatus(String(e).slice(0, 120), "warn");
-  }
-}
-
-if ($("btn-compare")) $("btn-compare").onclick = doCompare;
-
-// -----------------------------------------------------------------------
-// Tab management — which view is active?
-// -----------------------------------------------------------------------
-let compareMode = false;  // false = main tab (visual decoder), true = compare tab
-
-function setTab(which) {
-  compareMode = which === "compare";
-  $("tab-main").style.opacity = compareMode ? ".6" : "1";
-  $("tab-compare").style.opacity = compareMode ? "1" : ".6";
-  $("prompt-panel").style.display = compareMode ? "none" : "";
-  $("compare-panel").style.display = compareMode ? "" : "none";
-}
-
-$("btn-compare").onclick = doCompare;
-$("tab-main").onclick = () => setTab("main");
-$("tab-compare").onclick = () => setTab("compare");
 
 init().catch((e) => setStatus("model load error: " + e.message));
 </script>

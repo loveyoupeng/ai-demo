@@ -297,18 +297,12 @@ letters. Where each value comes from:
 - **SFT model** ("post-trained"): the checkpoint after pre-training + code-instruction SFT + tool-call SFT
   (`resource/models/learning_tool/`, default for the visual-decoder tab).
 
-- **Compare tab**: the second tab in the learning page — runs the same prompt through the base+SFT+tool-call models
-  (via `--compare label=path`), shows a per-step token table side-by-side, and highlights the first row where the
-  models' chosen tokens diverge.
-
-- **First-divergence step**: the first decode step where the models' chosen tokens differ. The straight answer to
-  "what changed when we fine-tuned".
-
 - **Demo model**: the learning-mode checkpoint family. The page's default
   is the MoE twin (`learning_moe` — the dense pipeline retrained with
   `n_experts=3` + one always-on shared expert, a real BPE-512 tokenizer);
-  the dense original (`learning_tool`) is the other dropdown entry, and
-  `learning_base` / `learning_sft` feed the compare tab.
+  the dense original (`learning_tool`) is the other dropdown entry.
+  (`learning_base` / `learning_sft` remain the pipeline's intermediate
+  stages, inspectable via their own checkpoints with `--model`.)
 
 - **Entry-point contract**: every per-track `cli.py` (e.g.
   `python -m impl._torch.cli`) is a single-track smoke demo on random

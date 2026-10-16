@@ -11,9 +11,8 @@ records interchangeably because the record shapes are identical):
 - ``GET  /api/tokenize`` → tokenize-or-detokenize via the model's tokenizer
 - ``POST /api/inference`` → run generation with per-layer activation records
 - ``POST /api/record``    → a single recorded forward/step
-- ``POST /api/compare``   → run two backends on the same prompt for diffing
 
-Request body for the POST inference/record/compare endpoints:
+Request body for the POST inference/record endpoints:
     {"text": "the she", "n_tokens": 20, "temperature": 0.8|null,
      "top_k": 10|null, "seed": 42}
 
@@ -179,9 +178,6 @@ class _LearningHandler(BaseHTTPRequestHandler):
     vocab: list[str] | None
     tokenizer: Tokenizer | None  # main model's BPE (None on old char-only demos)
     web_dir: Path
-    models: dict[str, NumPyModel | TorchModel]  # label → model (compare tab)
-    vocabs: dict[str, list[str] | None]  # label → vocab (compare tab)
-    tokenizers: dict[str, Tokenizer | None]  # label → BPE (compare tab)
     backend_models: dict[str, Any]  # backend → model of the default checkpoint
     model_dir: str  # the target checkpoint dir (sidecar drafters live under it)
     default_spec: str  # page default: plain | mtp | dspark (CLI decides; requests override)
@@ -350,8 +346,6 @@ class _LearningHandler(BaseHTTPRequestHandler):
                 self._send_json(self._api_inference(body))
             elif self.path == "/api/record":
                 self._send_json(self._api_record(body))
-            elif self.path == "/api/compare":
-                self._send_json(self._api_compare(body))
             else:
                 self._send_error(404, "unknown endpoint")
         except ValueError as e:  # user-facing validation errors from the endpoint body
@@ -800,26 +794,6 @@ class _LearningHandler(BaseHTTPRequestHandler):
         record_out["skipped_chars"] = skipped
         return record_out
 
-    def _api_compare(self, body: dict[str, object]) -> dict[str, object]:
-        """Run the same prompt over every loaded model and return their records.
-
-        The compare tab is where the model's weight update *means* something:
-        same input, different records (per-step logits, decoded tokens, and
-        the same for every model in ``self.models`` (the default model is
-        excluded; it lives at position 0 in the tab skeleton)).
-        """
-        saved_model, saved_vocab, saved_tok = self.model, self.vocab, self.tokenizer
-        results: dict[str, object] = {}
-        try:
-            for label, model in self.models.items():
-                self.model = model
-                self.vocab = self.vocabs.get(label)
-                self.tokenizer = self.tokenizers.get(label)
-                results[label] = self._api_record(body)  # includes skipped_chars + per-model record
-        finally:
-            self.model, self.vocab, self.tokenizer = saved_model, saved_vocab, saved_tok
-        return results
-
     # --- response helpers ----------------------------------------------------
 
     def _send_json(self, obj: object) -> None:
@@ -847,18 +821,14 @@ def make_handler(
     vocab: list[str] | None,
     backend: str = "numpy",
     web_dir: Path = WEB_DIR,
-    models: dict[str, NumPyModel | TorchModel] | None = None,
-    vocabs: dict[str, list[str] | None] | None = None,
     tokenizer: Tokenizer | None = None,
-    tokenizers: dict[str, Tokenizer | None] | None = None,
     model_dir: str = "",
     default_spec: str = "plain",
     variant_dirs: dict[str, str] | None = None,
     default_variant: str = "dense",
 ) -> type[BaseHTTPRequestHandler]:
     """Bind the model + backend + vocab + web dir into a handler class
-    (closure over state). The compare tab adds its secondary models via
-    ``models``; model/vocab stay as defaults for the ""-keyed endpoints.
+    (closure over state).
     """
     return type(
         "LearningHandler",
@@ -869,9 +839,6 @@ def make_handler(
             "vocab": vocab,
             "web_dir": web_dir,
             "tokenizer": tokenizer,
-            "models": models if models is not None else {},
-            "vocabs": vocabs if vocabs is not None else {},
-            "tokenizers": tokenizers if tokenizers is not None else {},
             "backend_models": {},  # lazy per-(variant, backend) caches, populated on first request
             "model_dir": model_dir,
             "default_spec": default_spec,
@@ -891,10 +858,7 @@ def start_server(
     host: str = "0.0.0.0",
     port: int = 8080,
     backend: str = "numpy",
-    models: dict[str, NumPyModel | TorchModel] | None = None,
-    vocabs: dict[str, list[str] | None] | None = None,
     tokenizer: Tokenizer | None = None,
-    tokenizers: dict[str, Tokenizer | None] | None = None,
     model_dir: str = "",
     default_spec: str = "plain",
     variant_dirs: dict[str, str] | None = None,
@@ -903,9 +867,7 @@ def start_server(
     """Create the learning-mode HTTP server (bound and listening, not yet serving).
 
     The caller owns the serving loop: ``server.serve_forever()`` (CLI) or a
-    daemon thread (tests). The ``models``/``vocabs``/``tokenizers`` sets are
-    the named compare-tab models; the main model is the default ""-keyed
-    endpoints.
+    daemon thread (tests).
 
     ``model_dir`` is the target checkpoint directory — the root the
     speculative-decoding sidecar drafters (``draft_mtp/``, ``draft_dspark/``)
@@ -917,10 +879,7 @@ def start_server(
         model,
         vocab,
         backend=backend,
-        models=models,
-        vocabs=vocabs,
         tokenizer=tokenizer,
-        tokenizers=tokenizers,
         model_dir=model_dir,
         default_spec=default_spec,
         variant_dirs=variant_dirs,

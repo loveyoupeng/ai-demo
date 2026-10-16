@@ -94,7 +94,7 @@ default; the CLI `--backend` (`numpy`|`torch`) only picks which track the
 *startup* load materializes. The default served checkpoint is `learning_tool`
 (BPE-512 vocab, `D=64, L=3, H=4`, dense SwiGLU — built by
 `scripts/train_demo_model_v2.py` in a 3-stage pretrain→SFT→tool pipeline;
-compare tab: `learning_base`, `learning_sft`). The page's default variant is
+). The page's default variant is
 the MoE twin (`learning_moe`, `E=3+1 shared` — the same pipeline run with
 `scripts/train_demo_model_v2 --variant moe`: same BPE-512 tokenizer, same
 corpus, same seed, only the FFN differs, so dense-vs-moe is a controlled

@@ -57,12 +57,6 @@ VARIANTS = {
 DEFAULT_VARIANT = "moe"
 
 
-DEFAULT_COMPARE = [
-    ("base", "resource/models/learning_base"),
-    ("sft", "resource/models/learning_sft"),
-]
-
-
 def _port_free(host: str, port: int) -> bool:
     """Return True if (host, port) can be bound right now."""
     with socket.socket() as s:
@@ -174,26 +168,7 @@ def main() -> int:
         choices=["auto", "plain", "mtp", "dspark"],
         help="Decoding mode the page starts in (auto: mtp when drafter sidecars exist, else plain)",
     )
-    parser.add_argument(
-        "--compare",
-        action="append",
-        metavar="label=path",
-        default=[],
-        help="Register a named secondary model for the compare tab (default: the two-stage SFT demo models)",
-    )
     args = parser.parse_args()
-
-    default_compare = list(DEFAULT_COMPARE)
-    if args.compare:
-        specs = []
-        for arg in args.compare:
-            if "=" in arg:
-                label, path = arg.split("=", 1)
-                specs.append((label, path))
-            else:
-                specs.append((f"m{len(specs)}", arg))
-        default_compare.extend(specs)
-    args.compare = default_compare
 
     if args.model == DEFAULT_MODEL:
         _ensure_demo_model(args.model)
@@ -206,29 +181,13 @@ def main() -> int:
         return 1
 
     model, vocab, _cfg, _tok = learning_server.load_learning_model(args.model, backend=args.backend)
-    # compare tab: register additional named (pre-trained + fine-trained) models
-    compare_models = {}
-    compare_vocabs = {}
-    compare_tokens = {}
-    for label, mpath in args.compare:
-        try:
-            m, v, _, tok = learning_server.load_learning_model(mpath, backend=args.backend)
-        except (OSError, ValueError) as e:
-            print(f"compare model {label}={mpath} skipped: {e}")
-            continue
-        compare_models[label] = m
-        compare_vocabs[label] = v
-        compare_tokens[label] = tok
     server = learning_server.start_server(
         model,
         vocab,
         host=args.host,
         port=args.port,
         backend=args.backend,
-        models=compare_models,
-        vocabs=compare_vocabs,
         tokenizer=_tok,
-        tokenizers=compare_tokens,
         model_dir=args.model,
         default_spec=spec,
         variant_dirs=variant_dirs or None,
