@@ -1,21 +1,22 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
+
+# 4-backend TinyStories checkpoints (~150 MB total) — NOT committed.
+.agents/
 build/
 dist/
-wheels/
 *.egg-info
-
-# Test/lint caches
-.pytest_cache/
-.ruff_cache/
 impl/_cuda/.cache/
-tests/unit/_cuda/.cache/
-
-# Virtual environments
-.venv
-resource/
-# 4-backend TinyStories checkpoints (~150 MB total) — NOT committed.
+__pycache__/
+*.py[oc]
+.pytest_cache/
+# Python-generated files
 # Recreate with:  uv run python -m scripts.train_real_tinystories
+resource/
 resource/models/*_real/
+.ruff_cache/
+skills-lock.json
+# Test/lint caches
+tests/unit/_cuda/.cache/
 tmp/
+.venv
+# Virtual environments
+wheels/
