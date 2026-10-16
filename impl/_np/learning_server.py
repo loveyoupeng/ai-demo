@@ -309,12 +309,14 @@ class _LearningHandler(BaseHTTPRequestHandler):
                 self._send_json(self._model_info())
             return
         if path == "/api/tokenize":
-            from urllib.parse import unquote_plus
+            from urllib.parse import parse_qs, unquote_plus
 
-            text = self.path.split("?", 1)[1].split("=", 1)[1] if "?" in self.path else ""
-            text = unquote_plus(text)
-            tokens = self.tokenizer.encode(text).ids if self.tokenizer else []
-            self._send_json({"tokens": tokens, "text": text})
+            qs = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            with self._per_variant(qs.get("variant", [None])[0]):
+                text = self.path.split("?", 1)[1].split("=", 1)[1] if "?" in self.path else ""
+                text = unquote_plus(text)
+                tokens = self.tokenizer.encode(text).ids if self.tokenizer else []
+                self._send_json({"tokens": tokens, "text": text})
             return
         # static: serve from the web dir, '/' → index.html
         rel = "index.html" if path in ("/", "/index.html") else path.lstrip("/")

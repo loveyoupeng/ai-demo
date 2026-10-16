@@ -192,10 +192,11 @@ def _train_family_torch(
 def _load_corpus_for(cfg: TransformerConfig, model_dir: str) -> list[list[int]]:
     """Token-id lists the TARGET can actually consume.
 
-    Two token spaces: the BPE-512 pipeline models (V=512) read the mixed
-    corpus through the BPE tokenizer; the char-level MoE demo (V<=64) reads
-    the same stories through its OWN vocab.json (chars outside the vocab are
-    skipped — the same rule its trainer used).
+    Two token spaces: the BPE-512 pipeline models (V=512 — the dense AND the
+    MoE learning variants) read the mixed corpus through the BPE tokenizer;
+    a small custom checkpoint (V<=64) reads the stories through its OWN
+    vocab.json with out-of-vocab chars skipped (the rule the legacy
+    char-level trainer used — kept for compatibility with such checkpoints).
     """
     import json as _json
 

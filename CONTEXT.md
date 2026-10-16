@@ -184,9 +184,11 @@ letters. Where each value comes from:
 
 - **BPE tokenizer**: byte-pair-encoding tokenizer — builds a vocabulary
   of sub-word tokens by merging the most frequent byte pairs until the
-  target vocab size. The script trains one on the SFT dataset itself so
-  the tokenizer merges common code patterns (e.g. ``"def"``, ``"tool_calls"``)
-  into single tokens.
+  target vocab size. The learning-mode pipeline trains one (V=512,
+  ``resource/bpe_tokenizer.json``) on the mixed TinyStories + code + tool
+  corpus itself so common patterns (``"def"``, ``" the"``, tool-call JSON)
+  become single tokens; every served demo checkpoint — dense AND MoE —
+  encodes text through it (``tokenizer.json`` sidecar).
 
 ## Inference
 

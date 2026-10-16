@@ -182,7 +182,7 @@
     </div>
     </div>
     <h2>Prompt &amp; run</h2>
-    <label>Input text (chars outside the vocab are skipped and marked)</label>
+    <label>Input text — the tokenizer splits it into sub-word tokens (shown below; ids are what the model sees)</label>
     <input type="text" id="prompt" value="Write a Python function to reverse a list." spellcheck="false">
     <div class="chips" id="prompt-chips"></div>
 
@@ -353,20 +353,34 @@ function promptParams() {
   };
 }
 
-function tokenizePreview(text) {
-  if (!MODEL || !MODEL.vocab) return;
-  const idx = Object.fromEntries(MODEL.vocab.map((c, i) => [c, i]));
-  const chips = [];
-  let skipped = 0;
-  for (const ch of text.toLowerCase()) {
-    if (ch in idx) {
-      chips.push(`<span class="chip" title="token ${idx[ch]}">${esc(ch)} <small>${idx[ch]}</small></span>`);
-    } else if (ch.trim() !== "") {
-      skipped++;
-      chips.push(`<span class="chip" style="opacity:.4;text-decoration:line-through" title="not in vocab">${esc(ch)}</span>`);
+// Token preview via the model's REAL tokenizer (the server encodes with the
+// bound checkpoint's tokenizer.json — BPE merges, not per-character). The
+// BPE vocabulary is multi-character, so a local char-scan would show the
+// WRONG split; the endpoint returns exactly the ids the generation will use.
+let _tokTimer = null;
+async function tokenizePreview(text) {
+  if (!MODEL) return;
+  if (_tokTimer) clearTimeout(_tokTimer);
+  _tokTimer = setTimeout(async () => {
+    try {
+      const variant = $("variant") && $("variant").value ? $("variant").value : undefined;
+      const qs = new URLSearchParams({ text, ...(variant ? { variant } : {}) });
+      const r = await api(`/api/tokenize?${qs}`);
+      const idx = Object.fromEntries((MODEL.vocab || []).map((t, i) => [t, i]));
+      const chips = (r.tokens || []).map((tid) => {
+        const tstr = MODEL.vocab ? MODEL.vocab[tid] : String(tid);
+        return `<span class="chip" title="token id ${tid}">${esc(tstr)} <small>${tid}</small></span>`;
+      });
+      $("prompt-chips").innerHTML =
+        chips.join("") +
+        (r.tokens && r.tokens.length === 0 && text.trim()
+          ? `<span class="note">no tokens — the tokenizer produced nothing for this input</span>`
+          : "");
+    } catch (e) {
+      /* the tokenizer endpoint needs a tokenizer.json; fall back to nothing */
+      $("prompt-chips").innerHTML = `<span class="note">token preview unavailable (${e.message})</span>`;
     }
-  }
-  $("prompt-chips").innerHTML = chips.join("") + (skipped ? `<span class="note">${skipped} char(s) skipped (not in vocab)</span>` : "");
+  }, 150); // debounce: one request per pause in typing, not per keystroke
 }
 
 // ---------------------------------------------------------------------------
@@ -650,7 +664,7 @@ async function doGenerate() {
     if (!r.last_step) $("gen-top").innerHTML = "";
     renderSpec(r);
     const extra = r.spec ? ` — ${r.spec.mode}, k=${r.spec.k ?? "trained"}, ${r.spec.tokens_per_sec} tok/s vs plain ${r.plain_baseline?.tokens_per_sec ?? "?"} tok/s` : "";
-    setStatus(`done on ${$("backend").value} (${r.skipped_chars} skipped chars)${extra}`);
+    setStatus(`done on ${$("backend").value}${extra}`);
   } catch (e) {
     setStatus("error: " + e.message);
   }
@@ -701,7 +715,13 @@ function specCtlInit() {
   sync();
 }
 
-function tokChar(t) { return MODEL.vocab?.[t] ?? String(t); }
+// display form of token t: the vocab string with the ByteLevel space marker
+// (Ġ = the leading space the tokenizer folded into the token) rendered as a
+// visible space, so "Ġthe" shows as " the" — what the text actually contains.
+function tokChar(t) {
+  const s0 = MODEL.vocab?.[t] ?? String(t);
+  return s0.replace(/\u0120/g, " ").replace(/\u0121/g, "\n"); // Ġ→space, ġ→newline (ByteLevel)
+}
 
 // one verification round: draft chips with per-position ✓/✗, then the committed tokens
 function roundRow(rd) {

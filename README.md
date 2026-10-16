@@ -46,18 +46,25 @@ Finished task specs are deleted — the git history is the record.
 
 ## The learning-mode example model
 
-`scripts/learning.py` serves `resource/models/learning_tool/` by default: a
-**262,592-parameter** decoder-only transformer, trained by
+`scripts/learning.py` serves the **`learning_moe` checkpoint by default** —
+and both page variants are REAL end-to-end language models: a **BPE-512
+tokenizer** trained on the actual mixed corpus (so text splits into sub-word
+tokens like `Ġonce`, ` the`, `fu`, not single ASCII letters), trained by
 [`scripts/train_demo_model_v2.py`](scripts/train_demo_model_v2.py) in three
-stages — pre-train on TinyStories (`learning_base`), fine-tune on code
-instructions (`learning_sft`), fine-tune on tool-call JSON (`learning_tool`).
-The web page's compare tab loads all three, so you can watch identical
-architecture + initialization diverge purely from fine-tuning data. The
-page's **MoE variant** (`learning_moe`) is the same pipeline's twin with one
-config knob changed — the FFN swapped for a router + top-k experts + an
-always-on shared expert (E=3+1 shared) — same BPE-512 tokenizer, same corpus,
-same seed, so dense-vs-MoE is a controlled experiment. Below is the **dense**
-model.
+stages — pre-train on TinyStories, fine-tune on code instructions, fine-tune
+on tool-call JSON. The two variants differ by ONE config knob:
+
+- **dense** (`learning_tool`, 262,592 params) — plain SwiGLU FFN.
+- **moe** (`learning_moe`, 705,536 params, the default) — the FFN swapped
+  for a router + top-k experts + an always-on shared expert (E=3+1 shared,
+  `--variant moe`).
+
+Same tokenizer, same corpus, same seed — so the page's dense-vs-MoE
+dropdown is a controlled experiment, and the compare tab (which loads the
+dense pipeline's `learning_base` and `learning_sft`) shows fine-tuning
+divergence on identical architecture. Below is the shared **tokenizer +
+architecture** card (the `n_experts` row is what the variant dropdown
+switches).
 
 | Hyperparameter | Value | Choice & why |
 | --- | --- | --- |
@@ -67,7 +74,7 @@ model.
 | `n_layers` L | 3 | Three repeated decoder blocks — deep enough to show how the residual stream accumulates, shallow enough to follow end to end. |
 | `n_heads` H | 4 (`n_groups=4`) | Head dim = 16. `n_groups == n_heads` → every head has its own K/V (plain MHA); set `n_groups < n_heads` in config and the same code runs GQA. |
 | `rope_dim` | 0 | 0 rotates the full head dim (standard RoPE); no learned position embedding anywhere. |
-| `n_experts` | 1 | Dense SwiGLU FFN (`expert_dim = 256 = 4·D`). MoE is opt-in (`n_experts > 1` adds a router + top-k); the `learning_demo` checkpoint demonstrates it. |
+| `n_experts` | 1 (dense) / 3+1 shared (moe) | The FFN slot: 1 → dense SwiGLU (`expert_dim = 256 = 4·D`); the MoE variant trains `n_experts=3` routed + `n_shared_experts=1` always-on shared (`--variant moe`). |
 | biases / weight tying | none | LLaMA convention: RMSNorm has only γ, all projections are bias-free, `lm_head` is its own matrix (not the tied embedding). |
 
 ### Architecture diagrams
