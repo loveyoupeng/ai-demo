@@ -11,6 +11,8 @@ records interchangeably because the record shapes are identical):
 - ``GET  /api/tokenize`` → tokenize-or-detokenize via the model's tokenizer
 - ``POST /api/inference`` → run generation with per-layer activation records
 - ``POST /api/record``    → a single recorded forward/step
+- ``GET  /api/params``   → the trained parameters (shape list, or one
+  tensor's values with ?key=<registry key>)
 
 Request body for the POST inference/record endpoints:
     {"text": "the she", "n_tokens": 20, "temperature": 0.8|null,
@@ -304,6 +306,16 @@ class _LearningHandler(BaseHTTPRequestHandler):
             with self._per_variant(qs.get("variant", [None])[0]):
                 self._send_json(self._model_info())
             return
+        if path == "/api/params":
+            from urllib.parse import parse_qs
+
+            qs = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            try:
+                with self._per_variant(qs.get("variant", [None])[0]), self._per_backend(qs.get("backend", [None])[0]):
+                    self._send_json(self._api_params(qs.get("key", [None])[0]))
+            except (ValueError, KeyError) as e:
+                self._send_error(404, str(e))
+            return
         if path == "/api/tokenize":
             from urllib.parse import parse_qs
 
@@ -378,6 +390,27 @@ class _LearningHandler(BaseHTTPRequestHandler):
             "variant": self._active_variant or self.default_variant,
             "default_variant": self.default_variant,
         }
+
+    def _api_params(self, key: str | None) -> dict[str, object]:
+        """The trained parameters (the checkpoint's weights), serialized.
+
+        GET /api/params            → {key: shape} for every registry entry
+        GET /api/params?key=<key>  → {key: {shape, values}} — one tensor
+
+        Same registry key scheme as the checkpoint (shared/registry.py —
+        the HF-Llama names: model.layers.0.self_attn.q_proj.weight, ...),
+        read through the track's get_all_parameters() (one storage binding
+        per track). Values are the LIVE bound weights — variant- and
+        backend-scoped by the request's contexts — rounded to 6 decimals
+        like every record.
+        """
+        import numpy as _np
+
+        params = self.model.get_all_parameters()
+        if key is not None:
+            arr = _np.asarray(params[key])  # KeyError → the 404 handler
+            return {key: {"shape": list(arr.shape), "values": _np.round(arr.astype(_np.float64), 6).tolist()}}
+        return {k: list(_np.asarray(v).shape) for k, v in params.items()}
 
     def _spec_block_sizes(self) -> dict[str, int]:
         """Trained block size per available family (the k slider's cap)."""

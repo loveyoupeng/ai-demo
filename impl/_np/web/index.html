@@ -110,6 +110,7 @@
   .tag { font-size: .62rem; font-weight: 700; padding: 1px 6px; border-radius: 4px; letter-spacing: .06em; }
   .tag.in { color: var(--accent); border: 1px solid var(--accent); background: #14202e; }
   .tag.out { color: var(--accent2); border: 1px solid var(--accent2); background: #15231a; }
+  .tag.w { color: #d8a24a; border: 1px solid #d8a24a; background: #241d10; }
   .shape { color: var(--warn); font-family: ui-monospace, monospace; font-size: .78rem; }
   .nums { font-family: ui-monospace, monospace; font-size: .7rem; color: var(--fg); background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; overflow-x: auto; margin: 4px 0; white-space: pre; line-height: 1.4; }
   .nums .nh { color: var(--dim); }
@@ -481,6 +482,79 @@ function tensorBlock(parent, tag, title, a, { cell = 14, rowLabels = null, names
   div.appendChild(numsTable(a, { dec: 3 }));
   parent.appendChild(div);
   return div;
+}
+
+// ---------------------------------------------------------------------------
+// TRAINED PARAMETERS — the learned weight matrices, fetched per key from
+// /api/params (the registry key scheme: model.layers.N.self_attn.q_proj.weight…).
+// Rendered in the inspector after the INPUT block, because the question at
+// every projection node is "which matrix turned that input into this output?"
+// ---------------------------------------------------------------------------
+const PARAM_KEYS = {
+  // embedding + lm_head
+  "emb": ["model.embed_tokens"],
+  "lmhead": ["model.lm_head.weight"],
+  // final norm
+  "fnorm": ["model.norm.weight"],
+};
+function blockParamKeys(nodeId) {
+  // nodeId like "b0.attn.q" / "b0.ffn.gate" / "b0.ln1" / "drafter.inproj"
+  const m = nodeId.match(/^b(\d+)\.(.+)$/);
+  if (!m) return PARAM_KEYS[nodeId] || null;
+  const [_, n, sub] = m;
+  const L = `model.layers.${n}`;
+  const t = sub.replace(/^attn\./, "self_attn.").replace(/^ffn\./, "mlp.");
+  const map = {
+    "ln1": [`${L}.input_layernorm.weight`],
+    "ln2": [`${L}.post_attention_layernorm.weight`],
+    "self_attn.q": [`${L}.self_attn.q_proj.weight`],
+    "self_attn.k": [`${L}.self_attn.k_proj.weight`],
+    "self_attn.v": [`${L}.self_attn.v_proj.weight`],
+    "self_attn.o": [`${L}.self_attn.o_proj.weight`],
+    "self_attn.router": [`${L}.mlp.gate.weight`],
+    "self_attn.experts": [`${L}.mlp.experts.0.gate_proj.weight`, `${L}.mlp.experts.0.up_proj.weight`, `${L}.mlp.experts.0.down_proj.weight`],
+    "mlp.gate": [`${L}.mlp.gate_proj.weight`],
+    "mlp.up": [`${L}.mlp.up_proj.weight`],
+    "mlp.mul": [`${L}.mlp.gate_proj.weight`, `${L}.mlp.up_proj.weight`],
+    "mlp.down": [`${L}.mlp.down_proj.weight`],
+    "mlp.router": [`${L}.mlp.gate.weight`],
+    "mlp.topk": [`${L}.mlp.gate.weight`],
+    "mlp.weights": [`${L}.mlp.gate.weight`],
+    "mlp.sum": [],  // the sum mixes; matrices live on the experts node
+    "mlp.shared": (() => { const ks = []; for (let i = 0; i < (MODEL.config.n_shared_experts || 0); i++) for (const pr of ["gate", "up", "down"]) ks.push(`${L}.mlp.shared_experts.${i}.${pr}_proj.weight`); return ks; })(),
+    "mlp.experts": (() => { const ks = []; for (let e = 0; e < (MODEL.config.n_experts || 0); e++) for (const pr of ["gate", "up", "down"]) ks.push(`${L}.mlp.experts.${e}.${pr}_proj.weight`); return ks; })(),
+  };
+  return map[t] !== undefined ? map[t] : (map[sub] !== undefined ? map[sub] : null);
+}
+
+async function weightsBlock(parent, nodeId) {
+  const keys = blockParamKeys(nodeId);
+  if (!keys || keys.length === 0) return;
+  const variant = $("variant") && $("variant").value ? $("variant").value : undefined;
+  const backend = $("backend").value;
+  for (const key of keys) {
+    try {
+      const qs = new URLSearchParams({ key, ...(variant ? { variant } : {}), backend });
+      const r = await api(`/api/params?${qs}`);
+      const entry = r[key];
+      if (!entry) continue;
+      const vals = Array.isArray(entry.values[0]) ? entry.values : [entry.values]; // 1-D γ → one row
+      const div = document.createElement("div");
+      div.className = "tblock";
+      const head = document.createElement("div");
+      head.className = "thead";
+      head.innerHTML = `<span class="tag w">WEIGHT</span> <b>${key.replace("model.", "")}</b> <span class="shape">(${entry.shape.join(" × ")})</span>`;
+      div.appendChild(head);
+      div.appendChild(heatGrid(vals, { cell: 12, title: key }));
+      div.appendChild(numsTable(vals, { dec: 3 }));
+      parent.appendChild(div);
+    } catch (e) {
+      const note = document.createElement("div");
+      note.className = "note";
+      note.textContent = `weights unavailable for ${key}: ${e.message}`;
+      parent.appendChild(note);
+    }
+  }
 }
 
 function barChart(values, labels, { maxW = 200 } = {}) {
@@ -1893,6 +1967,10 @@ function renderInspector() {
     body.appendChild(ex);
   }
   view(body);
+  // The trained parameters last-but-one: after the node's math + tensors,
+  // the LEARNED matrices that produced them (async fetch — painted after).
+  const wNode = id;
+  weightsBlock(body, wNode).then(() => body.querySelectorAll(".formula").forEach(renderTex));
   body.querySelectorAll(".formula").forEach(renderTex);
 }
 
