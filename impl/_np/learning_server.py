@@ -305,12 +305,16 @@ class _LearningHandler(BaseHTTPRequestHandler):
                 self._send_json(self._model_info())
             return
         if path == "/api/tokenize":
-            from urllib.parse import parse_qs, unquote_plus
+            from urllib.parse import parse_qs
 
             qs = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             with self._per_variant(qs.get("variant", [None])[0]):
-                text = self.path.split("?", 1)[1].split("=", 1)[1] if "?" in self.path else ""
-                text = unquote_plus(text)
+                # parse_qs handles the percent-encoding AND the parameter
+                # separation; the old naive split("=", 1) glued every later
+                # query param onto the text (e.g. text=intentional&variant=moe
+                # tokenized "intentional&variant=moe" — the &|v|ar|i|an|t|=|m|o|e
+                # chips the page showed).
+                text = qs.get("text", [""])[0]
                 tokens = self.tokenizer.encode(text).ids if self.tokenizer else []
                 self._send_json({"tokens": tokens, "text": text})
             return
