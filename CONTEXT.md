@@ -346,13 +346,16 @@ letters. Where each value comes from:
   between "the reference" and "the production path" at generation time.
 
 - **Binding** (registry): the mapping from each registry key to the
-  owning storage object in a track's model — `NumPyModel._param_arrays`
+  owning storage object in a track's model — `NumPyModel._param_slots`
   (`impl/_np/model.py`), `TorchModel._param_tensors`
   (`impl/_torch/layers.py`), etc.
   `ParameterRegistry.bind(binding)` materializes it as the full
   key→param dict in entry order and is what every save/load path walks;
   a drifted binding (stale/extra keys on a track) fails there, not at
-  save-load time.
+  save-load time. Load copies **in place** into the storage created at
+  construction (the `load_state_dict` convention) — storage identity
+  never changes; `NumPyModel.to(dtype)` is the one deliberate
+  re-binding path (a dtype cast cannot be done in place in NumPy).
 
 ## Tracks
 

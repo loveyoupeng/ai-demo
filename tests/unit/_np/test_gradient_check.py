@@ -4,7 +4,8 @@
 Every NumPy operator's ``backward`` is verified against a central finite
 difference of a linear functional ``sum(dout * forward(x))`` (per operator)
 or of the full CE loss (full model). All arithmetic runs in float64
-(param arrays are cast in-place) so the finite-difference noise stays far
+(model arrays via ``NumPyModel.to(np.float64)``, operator arrays via
+``_cast64``) so the finite-difference noise stays far
 below the 1e-5 tolerance.
 
 Kink handling: the MoE top-k selection is discrete, so the loss is

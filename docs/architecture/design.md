@@ -61,7 +61,7 @@ flowchart TD
 
 - All 4 backends accept the same JSON config + env vars → same model topology
 - **Save**: NumPy `get_all_parameters()` / PyTorch `save_as_numpy()` / Triton `save_as_numpy()` / CUDA flat → `model.npz` (flat dict, via the shared `ParameterRegistry`)
-- **Load**: NumPy `load_from_*` / PyTorch `load_from_*` / Triton `load_from_*` / CUDA flat assign
+- **Load**: NumPy `load_from_*` / PyTorch `load_from_*` / Triton `load_from_*` / CUDA flat assign — all copy **in place** into the storage created at construction (the `load_state_dict` convention)
 - **PyTorch↔Triton**: direct load via compatible `save_as_numpy()` / `load_from_numpy_dict()`
 - **NumPy↔NumPy**: direct load (identical API)
 - **NumPy↔CUDA**: direct load via shared flat format (no conversion needed)
