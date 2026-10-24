@@ -170,17 +170,20 @@ class _DrafterBlock:
         """Copy sidecar arrays into the operators (no aliasing — mutating
         the caller's dict must not touch the model).
 
-        prefix: the family key path; params: the validated sidecar dict
-        (shared/draft.py load_drafter's output)."""
-        self.input_layernorm.gamma = np.array(params[f"{prefix}.input_layernorm.weight"], copy=True)
-        self.self_attn.q_proj = np.array(params[f"{prefix}.self_attn.q_proj.weight"], copy=True)
-        self.self_attn.k_proj = np.array(params[f"{prefix}.self_attn.k_proj.weight"], copy=True)
-        self.self_attn.v_proj = np.array(params[f"{prefix}.self_attn.v_proj.weight"], copy=True)
-        self.self_attn.o_proj = np.array(params[f"{prefix}.self_attn.o_proj.weight"], copy=True)
-        self.post_attention_layernorm.gamma = np.array(params[f"{prefix}.post_attention_layernorm.weight"], copy=True)
-        self.mlp.gate_proj = np.array(params[f"{prefix}.mlp.gate_proj.weight"], copy=True)
-        self.mlp.up_proj = np.array(params[f"{prefix}.mlp.up_proj.weight"], copy=True)
-        self.mlp.down_proj = np.array(params[f"{prefix}.mlp.down_proj.weight"], copy=True)
+        params: validated sidecar arrays
+        (shared/draft.py load_drafter's output). Copies are **in place**
+        into the arrays created at construction, so storage identity never
+        changes (the ``load_state_dict`` convention).
+        """
+        self.input_layernorm.gamma[...] = params[f"{prefix}.input_layernorm.weight"]
+        self.self_attn.q_proj[...] = params[f"{prefix}.self_attn.q_proj.weight"]
+        self.self_attn.k_proj[...] = params[f"{prefix}.self_attn.k_proj.weight"]
+        self.self_attn.v_proj[...] = params[f"{prefix}.self_attn.v_proj.weight"]
+        self.self_attn.o_proj[...] = params[f"{prefix}.self_attn.o_proj.weight"]
+        self.post_attention_layernorm.gamma[...] = params[f"{prefix}.post_attention_layernorm.weight"]
+        self.mlp.gate_proj[...] = params[f"{prefix}.mlp.gate_proj.weight"]
+        self.mlp.up_proj[...] = params[f"{prefix}.mlp.up_proj.weight"]
+        self.mlp.down_proj[...] = params[f"{prefix}.mlp.down_proj.weight"]
 
 
 class MTPDrafter:
@@ -334,9 +337,9 @@ class MTPDrafter:
         """Copy the validated sidecar arrays into the operators (no aliasing);
         params: shared/draft.py load_drafter's output (key-set + shapes
         checked against the family's scheme)."""
-        self.norm.gamma = np.array(params["mtp.norm.weight"], copy=True)
-        self.in_proj = np.array(params["mtp.in_proj.weight"], copy=True)
-        self.out_norm.gamma = np.array(params["mtp.out_norm.weight"], copy=True)
+        self.norm.gamma[...] = params["mtp.norm.weight"]
+        self.in_proj[...] = params["mtp.in_proj.weight"]
+        self.out_norm.gamma[...] = params["mtp.out_norm.weight"]
         self.block.load("mtp.block", params)
 
 
@@ -439,10 +442,10 @@ class DSparkDrafter:
         """Copy the validated sidecar arrays into the operators (no aliasing);
         params: shared/draft.py load_drafter's output (key-set + shapes
         checked against the family's scheme)."""
-        self.norm.gamma = np.array(params["dspark.norm.weight"], copy=True)
-        self.in_proj = np.array(params["dspark.in_proj.weight"], copy=True)
-        self.pos_emb = np.array(params["dspark.pos_emb.weight"], copy=True)
-        self.out_norm.gamma = np.array(params["dspark.out_norm.weight"], copy=True)
+        self.norm.gamma[...] = params["dspark.norm.weight"]
+        self.in_proj[...] = params["dspark.in_proj.weight"]
+        self.pos_emb[...] = params["dspark.pos_emb.weight"]
+        self.out_norm.gamma[...] = params["dspark.out_norm.weight"]
         self.parallel.load("dspark.parallel", params)
         self.seq.load("dspark.seq", params)
 

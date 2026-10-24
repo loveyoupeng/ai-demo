@@ -363,11 +363,8 @@ class TestCrossEntropyGradient:
 
 
 def _model64(cfg: TransformerConfig) -> NumPyModel:
-    """Build a model whose parameter arrays are all float64 (via reload)."""
-    m = NumPyModel(cfg)
-    params = {key: _cast64(arr) for key, arr in m._param_arrays().items()}
-    m.load_from_numpy_dict(params)
-    return m
+    """Build a model whose parameter arrays are all float64 (via ``to``)."""
+    return NumPyModel(cfg).to(np.float64)
 
 
 _X = np.array([[3, 7, 1, 9, 2, 5, 8, 4]], dtype=np.int32)

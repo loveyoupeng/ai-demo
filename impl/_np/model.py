@@ -23,13 +23,14 @@ Parameter keys follow the flat-dict scheme in ``shared.constants``
 (HuggingFace Llama naming), which is the cross-backend checkpoint contract.
 """
 
+from __future__ import annotations
+
 import logging
 
 import numpy as np
 
 from impl._np.cross_entropy import CrossEntropyLoss
 from impl._np.embedding import Embedding
-from impl._np.ffn import SwiGLUFFN
 from impl._np.layernorm import RMSNorm
 from impl._np.moe import MixtureOfExperts
 from impl._np.stack import DecoderStack
@@ -94,37 +95,59 @@ class NumPyModel:
         logits, _trace = self.forward_with_trace(input_ids)
         return logits
 
-    def _param_arrays(self) -> dict[str, np.ndarray]:
-        """Storage binding: registry key → owning array (the track's only traversal)."""
-        p: dict[str, np.ndarray] = {
-            Keys.embed(): self.embedding.weight,
-            Keys.final_norm(): self.final_norm.gamma,
-            Keys.lm_head(): self.lm_head_weight,
-        }
+    def _param_slots(self) -> list[tuple[str, object, str]]:
+        """Storage binding: registry key → (owner, attribute) of the live array.
+
+        The track's only traversal: ``_param_arrays`` (key → array),
+        ``load_from_numpy_dict`` (in-place copy), and ``to`` (dtype cast)
+        all derive from this list, so a binding drift surfaces in all
+        three at once instead of only at save time.
+        """
+        slots: list[tuple[str, object, str]] = [
+            (Keys.embed(), self.embedding, "weight"),
+            (Keys.final_norm(), self.final_norm, "gamma"),
+            (Keys.lm_head(), self, "lm_head_weight"),
+        ]
         for i, block in enumerate(self.stack.layers):
-            p[Keys.ln(i, LayerNorm.INPUT)] = block.input_layernorm.gamma
-            p[Keys.ln(i, LayerNorm.POST_ATTENTION)] = block.post_attention_layernorm.gamma
+            slots.append((Keys.ln(i, LayerNorm.INPUT), block.input_layernorm, "gamma"))
+            slots.append((Keys.ln(i, LayerNorm.POST_ATTENTION), block.post_attention_layernorm, "gamma"))
             attn = block.self_attn
-            p[Keys.attn(i, Attn.Q_PROJ)] = attn.q_proj
-            p[Keys.attn(i, Attn.K_PROJ)] = attn.k_proj
-            p[Keys.attn(i, Attn.V_PROJ)] = attn.v_proj
-            p[Keys.attn(i, Attn.O_PROJ)] = attn.o_proj
+            for proj, attr in (
+                (Attn.Q_PROJ, "q_proj"),
+                (Attn.K_PROJ, "k_proj"),
+                (Attn.V_PROJ, "v_proj"),
+                (Attn.O_PROJ, "o_proj"),
+            ):
+                slots.append((Keys.attn(i, proj), attn, attr))
             mlp = block.mlp
             if isinstance(mlp, MixtureOfExperts):
-                p[Keys.moe_gate(i)] = mlp.gate
+                slots.append((Keys.moe_gate(i), mlp, "gate"))
                 for j, expert in enumerate(mlp.experts):
-                    p[Keys.moe_expert(i, j, Mlp.GATE_PROJ)] = expert.gate_proj
-                    p[Keys.moe_expert(i, j, Mlp.UP_PROJ)] = expert.up_proj
-                    p[Keys.moe_expert(i, j, Mlp.DOWN_PROJ)] = expert.down_proj
+                    for proj, attr in (
+                        (Mlp.GATE_PROJ, "gate_proj"),
+                        (Mlp.UP_PROJ, "up_proj"),
+                        (Mlp.DOWN_PROJ, "down_proj"),
+                    ):
+                        slots.append((Keys.moe_expert(i, j, proj), expert, attr))
                 for s, shared in enumerate(mlp.shared_experts):
-                    p[Keys.moe_shared_expert(i, s, Mlp.GATE_PROJ)] = shared.gate_proj
-                    p[Keys.moe_shared_expert(i, s, Mlp.UP_PROJ)] = shared.up_proj
-                    p[Keys.moe_shared_expert(i, s, Mlp.DOWN_PROJ)] = shared.down_proj
+                    for proj, attr in (
+                        (Mlp.GATE_PROJ, "gate_proj"),
+                        (Mlp.UP_PROJ, "up_proj"),
+                        (Mlp.DOWN_PROJ, "down_proj"),
+                    ):
+                        slots.append((Keys.moe_shared_expert(i, s, proj), shared, attr))
             else:
-                p[Keys.ffn(i, Mlp.GATE_PROJ)] = mlp.gate_proj
-                p[Keys.ffn(i, Mlp.UP_PROJ)] = mlp.up_proj
-                p[Keys.ffn(i, Mlp.DOWN_PROJ)] = mlp.down_proj
-        return p
+                for proj, attr in (
+                    (Mlp.GATE_PROJ, "gate_proj"),
+                    (Mlp.UP_PROJ, "up_proj"),
+                    (Mlp.DOWN_PROJ, "down_proj"),
+                ):
+                    slots.append((Keys.ffn(i, proj), mlp, attr))
+        return slots
+
+    def _param_arrays(self) -> dict[str, np.ndarray]:
+        """Storage binding: registry key → owning array (derived from ``_param_slots``)."""
+        return {key: getattr(owner, attr) for key, owner, attr in self._param_slots()}
 
     def get_all_parameters(self) -> dict[str, np.ndarray]:
         """Flat dict of all parameters, keyed by ``shared.constants.Keys``.
@@ -140,46 +163,36 @@ class NumPyModel:
         """Load parameters from a flat dict (inverse of ``get_all_parameters``).
 
         params: the registry-keyed arrays (checkpoint format) — validated
-        against the registry (key-set + shapes); arrays are copied, never
-        aliased (in-place training must not mutate the caller's dict).
+        against the registry (key-set + shapes); copied **in place** into the
+        arrays created at construction (the ``load_state_dict`` convention:
+        storage identity never changes, so every live reference — optimizer
+        state, cache-binding walks, drafter holds — keeps pointing at the
+        freshly loaded values). Arrays are copied, never aliased.
 
         Validates against the registry first, so stale or mismatched
-        checkpoints fail fast instead of half-loading. The assignment walk
-        mirrors the track's binding map (``_param_arrays``) exactly — both
-        address the same objects, so a binding drift fails at one of the
-        two, never silently.
+        checkpoints fail fast instead of half-loading. The copy walk uses
+        the track's binding map (``_param_arrays``) — the same traversal
+        ``get_all_parameters`` uses, so a binding drift fails at the
+        ``bind()`` KeyError, never silently.
         """
         registry = ParameterRegistry(self.config)
         registry.validate(params)
-        # Copy each array: the caller keeps ownership of ``params`` (e.g. a
-        # shared checkpoint dict) — aliasing would let in-place training
-        # mutate it.
-        self.embedding.weight = params[Keys.embed()].copy()
-        self.final_norm.gamma = params[Keys.final_norm()].copy()
-        self.lm_head_weight = params[Keys.lm_head()].copy()
-        for i, block in enumerate(self.stack.layers):
-            block.input_layernorm.gamma = params[Keys.ln(i, LayerNorm.INPUT)].copy()
-            block.post_attention_layernorm.gamma = params[Keys.ln(i, LayerNorm.POST_ATTENTION)].copy()
-            attn = block.self_attn
-            attn.q_proj = params[Keys.attn(i, Attn.Q_PROJ)].copy()
-            attn.k_proj = params[Keys.attn(i, Attn.K_PROJ)].copy()
-            attn.v_proj = params[Keys.attn(i, Attn.V_PROJ)].copy()
-            attn.o_proj = params[Keys.attn(i, Attn.O_PROJ)].copy()
-            mlp = block.mlp
-            if isinstance(mlp, MixtureOfExperts):
-                mlp.gate = params[Keys.moe_gate(i)].copy()
-                for j, expert in enumerate(mlp.experts):
-                    expert.gate_proj = params[Keys.moe_expert(i, j, Mlp.GATE_PROJ)].copy()
-                    expert.up_proj = params[Keys.moe_expert(i, j, Mlp.UP_PROJ)].copy()
-                    expert.down_proj = params[Keys.moe_expert(i, j, Mlp.DOWN_PROJ)].copy()
-                for s, shared in enumerate(mlp.shared_experts):
-                    shared.gate_proj = params[Keys.moe_shared_expert(i, s, Mlp.GATE_PROJ)].copy()
-                    shared.up_proj = params[Keys.moe_shared_expert(i, s, Mlp.UP_PROJ)].copy()
-                    shared.down_proj = params[Keys.moe_shared_expert(i, s, Mlp.DOWN_PROJ)].copy()
-            elif isinstance(mlp, SwiGLUFFN):
-                mlp.gate_proj = params[Keys.ffn(i, Mlp.GATE_PROJ)].copy()
-                mlp.up_proj = params[Keys.ffn(i, Mlp.UP_PROJ)].copy()
-                mlp.down_proj = params[Keys.ffn(i, Mlp.DOWN_PROJ)].copy()
+        arrays = registry.bind(self._param_arrays())
+        for entry in registry.entries:
+            arrays[entry.key][...] = params[entry.key]
+
+    def to(self, dtype: np.dtype | type) -> NumPyModel:
+        """Cast every parameter array to ``dtype`` (the ``.double()`` mirror).
+
+        Rebinds each slot to a NEW array of the target dtype (NumPy cannot
+        change dtype in place); storage identity changes, so call this
+        before capturing live references (e.g. before the gradient checker
+        perturbs arrays). Values are preserved bit-for-bit (float32 →
+        float64 is exact).
+        """
+        for _key, owner, attr in self._param_slots():
+            setattr(owner, attr, getattr(owner, attr).astype(dtype))
+        return self
 
     def forward_with_trace(
         self, input_ids: np.ndarray, position: int = 0, record: dict | None = None
