@@ -67,29 +67,26 @@ def load_learning_model(
     params, cfg = load_checkpoint(model_dir)
     if cfg is None:
         raise ValueError(f"checkpoint {model_dir} is missing config.json")
+    # Constructor injection on all four tracks: the model is BORN with the
+    # checkpoint's trained weights (no post-construction load step).
     if backend == "numpy":
-        model: NumPyModel | TorchModel | Any = NumPyModel(cfg)
-        model.load_from_numpy_dict({k: v.copy() for k, v in params.items()})
+        from impl._np.model import NumPyModel
+
+        model: NumPyModel | TorchModel | Any = NumPyModel(cfg, params)
     elif backend == "torch":
         from impl._torch.layers import TorchModel as _TorchModel
 
-        torch_model = _TorchModel(cfg).double()
-        torch_model.load_from_numpy_dict({k: v.copy() for k, v in params.items()})
-        torch_model.eval()
-        model = torch_model
+        model = _TorchModel(cfg, params).double()
+        model.eval()
     elif backend == "triton":
         from impl._triton.model import TritonModel
 
-        triton_model = TritonModel(cfg).cuda()
-        triton_model.load_from_numpy_dict({k: v.copy() for k, v in params.items()})
-        triton_model.eval()
-        model = triton_model
+        model = TritonModel(cfg, params).cuda()
+        model.eval()
     elif backend == "cuda":
         from impl._cuda.model import CUDAModel as _CUDAModel
 
-        cuda_model = _CUDAModel(cfg)
-        cuda_model.load_from_numpy_dict({k: v.copy() for k, v in params.items()})
-        model = cuda_model
+        model = _CUDAModel(cfg, params)
     else:
         raise ValueError(f"backend must be 'numpy'|'torch'|'triton'|'cuda', got {backend!r}")
 
@@ -457,8 +454,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
             from impl._np.drafters import MTPDrafter as NpMTP
 
             cls = NpMTP if meta.family == "mtp" else NpDSpark
-            drafter = cls(meta, self.model.embedding.weight, self.model.lm_head_weight)
-            drafter.load_from_numpy_dict(params)
+            drafter = cls(meta, self.model.embedding.weight, self.model.lm_head_weight, params=params)
         else:
             from impl._torch.drafters import drafter_from_sidecar
             from shared.device_util import compute_device, shared_embedding_and_head

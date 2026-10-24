@@ -187,32 +187,22 @@ def _config_from_dict(config: dict) -> TransformerConfig:
     )
 
 
-def _enable_cuda_grads(model) -> None:
-    """Enable gradient tracking for every trainable tensor in a CUDAModel."""
-    import torch
-
-    for block in model.stacking.blocks:
-        for attr_name in block.__dict__:
-            sub = getattr(block, attr_name)
-            if isinstance(sub, torch.Tensor):
-                sub.requires_grad_(True)
-    model.embedding_weights.requires_grad_(True)
-    model.final_norm_gamma.requires_grad_(True)
-    model.lm_head_weight.requires_grad_(True)
-
-
 def _cuda_model_to_device(model, device) -> None:
-    """Move all CUDAModel tensors (blocks + embedding/final-norm/lm_head) to a device."""
+    """Move all CUDAModel tensors (blocks + embedding/final-norm/lm_head) to a device.
+
+    ``tensor.data = tensor.data.to(device)`` preserves leaf-ness and
+    ``requires_grad``: a plain ``.to()`` on a grad-requiring tensor creates a
+    non-leaf tensor that torch.optim rejects.
+    """
     import torch
 
-    model.embedding_weights = model.embedding_weights.to(device)
-    model.final_norm_gamma = model.final_norm_gamma.to(device)
-    model.lm_head_weight = model.lm_head_weight.to(device)
+    model.embedding_weights.data = model.embedding_weights.data.to(device)
+    model.final_norm_gamma.data = model.final_norm_gamma.data.to(device)
+    model.lm_head_weight.data = model.lm_head_weight.data.to(device)
     for block in model.stacking.blocks:
-        for sub_attr in list(block.__dict__):
-            sub = getattr(block, sub_attr)
+        for sub in list(block.__dict__.values()):
             if isinstance(sub, torch.Tensor):
-                setattr(block, sub_attr, sub.to(device))
+                sub.data = sub.data.to(device)
 
 
 def build_model(backend: str, config: dict) -> tuple:
@@ -248,7 +238,6 @@ def build_model(backend: str, config: dict) -> tuple:
         from impl._cuda.model import CUDAModel
 
         model = CUDAModel(cfg)
-        _enable_cuda_grads(model)
         _cuda_model_to_device(model, torch.device("cuda:0"))
         return model, cfg
 

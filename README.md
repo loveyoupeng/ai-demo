@@ -190,7 +190,12 @@ the equation, the *why*, and the code anchor) lives in one place:
 - **Checkpoint interchange**: one flat-dict key scheme
   (`shared.constants.Keys`, HF-Llama naming) + a parameter registry
   (`shared/registry.py`) that validates shape and key-set on load
-  (stale checkpoints fail fast).
+  (stale checkpoints fail fast). Every track builds its model by
+  **constructor injection** — `Model.from_checkpoint(dir)` (or
+  `Model(config, params)`) injects the trained arrays at construction, so a
+  served model is born with learned weights, while `Model(config)` is the
+  fresh training start; loading always copies in place (never reassigns
+  storage).
 - **Learning mode** (all four backends): `scripts/learning.py` hosts a web
   page (stdlib HTTP server, no dependencies) with prompt + generation, an
   architecture diagram with flow navigation (click a node to light up its

@@ -73,9 +73,7 @@ def sft_step(
     params = model.get_all_parameters()
     optimizer.step(params, grads)
     # get_all_parameters() returns live array references (registry bind), so
-    # optimizer.step() already mutated the model's own memory; this reload is
-    # a self-copy and exists only to keep the parameter contract explicit.
-    model.load_from_numpy_dict(params)
+    # optimizer.step() already mutated the model's own memory in place.
     return float(loss)
 
 

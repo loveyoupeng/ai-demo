@@ -30,10 +30,12 @@ practice get a `# PROD:` note instead.
 
 ## Cross-track naming (audited 2026-09, revised 2026-09-23)
 
-Deliberate: every track owns `forward` + `load_from_numpy_dict` +
-`get_all_parameters`/`save_as_numpy` and `make_cache` / `forward_prefill` /
-`forward_step` (the shared KV-step interface), and classes carry the
-track prefix (`NumPyModel`, `TorchModel`, `TritonModel`, `CUDAModel`).
+Deliberate: every track owns `forward` + the constructor-injection
+lifecycle (`Model(config[, params])` / `from_checkpoint`) +
+`load_from_numpy_dict` + `get_all_parameters`/`save_as_numpy` and
+`make_cache` / `forward_prefill` / `forward_step` (the shared KV-step
+interface), and classes carry the track prefix (`NumPyModel`,
+`TorchModel`, `TritonModel`, `CUDAModel`).
 Known deltas, kept consciously:
 
 - The NumPy `TextGenerator` skips the `NumPy…` prefix —
@@ -61,7 +63,7 @@ flowchart TD
 
 - All 4 backends accept the same JSON config + env vars → same model topology
 - **Save**: NumPy `get_all_parameters()` / PyTorch `save_as_numpy()` / Triton `save_as_numpy()` / CUDA flat → `model.npz` (flat dict, via the shared `ParameterRegistry`)
-- **Load**: NumPy `load_from_*` / PyTorch `load_from_*` / Triton `load_from_*` / CUDA flat assign — all copy **in place** into the storage created at construction (the `load_state_dict` convention)
+- **Load (constructor injection)**: all four tracks accept the checkpoint arrays in their constructor (`Model(config, params)`) or via the `from_checkpoint(dir)` factory — the model is born with the trained weights, and the injection copies **in place** into the storage the constructor created (the `load_state_dict` convention; storage identity never changes). `Model(config)` alone stays the fresh seed-initialized training start. `load_from_numpy_dict` remains the explicit in-place loading interface for swapping weights into a live model (training reload, round-trip tests)
 - **PyTorch↔Triton**: direct load via compatible `save_as_numpy()` / `load_from_numpy_dict()`
 - **NumPy↔NumPy**: direct load (identical API)
 - **NumPy↔CUDA**: direct load via shared flat format (no conversion needed)

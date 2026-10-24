@@ -100,7 +100,6 @@ def main() -> None:
     )
     loader = SFTLoader(tokenizer, max_len=args.max_len)
     make_model, make_trainer, sft_epoch_fn = _BACKENDS[args.backend]()
-    model = make_model(cfg)
 
     # Stage "pre": pre-training on the tinystories corpus (if none exists at
     # --model, run the regular pre-training pipeline to build one).
@@ -126,9 +125,13 @@ def main() -> None:
         args.model = save_dir
         print(f"[pre] pretrained → {save_dir}")
 
+    # ONE construction site: fresh (training) when no checkpoint is given,
+    # injected (post-training / inference) when it is.
     if args.model is not None:
         params = dict(np.load(args.model / "model.npz"))
-        model.load_from_numpy_dict(params)
+        model = make_model(cfg, params)
+    else:
+        model = make_model(cfg)
 
     rows = loader.load_sft_data(args.dataset)
     b = loader.batch(rows)

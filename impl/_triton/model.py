@@ -18,6 +18,11 @@ Parameter keys follow the ``shared.constants.Keys`` scheme (the
 cross-backend checkpoint contract).
 """
 
+from __future__ import annotations
+
+from collections.abc import Mapping
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -26,6 +31,7 @@ from impl._triton.transformer import (
     TritonDecoderStack,
     TritonMixtureOfExperts,
 )
+from shared.checkpoint import load_checkpoint
 from shared.config import TransformerConfig
 from shared.constants import Attn, Keys, LayerNorm, Mlp
 from shared.registry import ParameterRegistry
@@ -44,8 +50,16 @@ class TritonModel(nn.Module):
     vocab_size, k = the drafter's block size.
     """
 
-    def __init__(self, config: TransformerConfig) -> None:
-        """Build the model from a :class:`TransformerConfig`."""
+    def __init__(self, config: TransformerConfig, params: Mapping[str, np.ndarray] | None = None) -> None:
+        """Build the model from a :class:`TransformerConfig`.
+
+        params: optional checkpoint arrays (the shared Keys scheme)
+        **injected at construction** — validated against the registry and
+        copied in place into the constructor-built tensors, so the model
+        is born with trained weights (the inference path; see
+        ``from_checkpoint``). When None (default) the tensors keep their
+        seed-initialized values (the training path).
+        """
         super().__init__()
         self.config = config
         self.vocab_size = config.vocab_size
@@ -58,6 +72,25 @@ class TritonModel(nn.Module):
         self.final_norm = nn.RMSNorm(config.embed_dim, eps=config.norm_eps)
         # lm_head: (in=D, out=V) per nn.Linear convention, no bias
         self.lm_head = nn.Linear(config.embed_dim, config.vocab_size, bias=False)
+
+        if params is not None:
+            self.load_from_numpy_dict(params)
+
+    @classmethod
+    def from_checkpoint(cls, checkpoint_dir: str | Path, device: torch.device | str | None = None) -> TritonModel:
+        """Construct a model from a checkpoint directory (the explicit
+        inference factory).
+
+        Reads ``config.json`` + ``model.npz`` and injects the trained
+        arrays at construction. ``device`` optionally moves the tensors
+        (e.g. ``"cuda"``); defaults to the constructor device.
+        """
+        arrays, cfg = load_checkpoint(checkpoint_dir)
+        if cfg is None:
+            raise ValueError(f"checkpoint {checkpoint_dir} is missing config.json")
+        model = cls(cfg) if device is None else cls(cfg).to(device)
+        model.load_from_numpy_dict(arrays)
+        return model
 
     def make_cache(self, batch_size: int) -> list[dict[str, torch.Tensor]]:
         """Create an empty per-layer KV cache for the per-token step path.
@@ -250,7 +283,7 @@ class TritonModel(nn.Module):
         """All parameters as a flat numpy dict (interface parity with NumPy/CUDA)."""
         return self.save_as_numpy()
 
-    def load_from_numpy_dict(self, params: dict[str, np.ndarray]) -> None:
+    def load_from_numpy_dict(self, params: Mapping[str, np.ndarray]) -> None:
         """Load parameters from a flat dict (inverse of ``save_as_numpy``).
 
         Validates against the registry first, so stale or mismatched

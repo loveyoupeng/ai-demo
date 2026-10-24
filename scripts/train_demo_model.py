@@ -140,31 +140,15 @@ def _cuda_to_device(model: Any, device: Any) -> None:
     leaf-ness and ``requires_grad``: a plain ``.to()`` on a grad-requiring tensor creates a
     non-leaf tensor that ``torch.optim.AdamW`` rejects.
     """
+    import torch
+
     model.embedding_weights.data = model.embedding_weights.data.to(device)
     model.final_norm_gamma.data = model.final_norm_gamma.data.to(device)
     model.lm_head_weight.data = model.lm_head_weight.data.to(device)
     for block in model.stacking.blocks:
         for attr in block.__dict__.values():
-            if isinstance(attr, _cuda_tensor_type()):
+            if isinstance(attr, torch.Tensor):
                 attr.data = attr.data.to(device)
-
-
-def _cuda_tensor_type() -> type:
-    """``torch.Tensor`` (imported lazily so the default numpy path never loads torch)."""
-    import torch
-
-    return torch.Tensor
-
-
-def _enable_cuda_grads(model: Any) -> None:
-    """Enable gradients on every CUDAModel tensor so autograd builds a graph through the kernels."""
-    torch_tensor = _cuda_tensor_type()
-    for block in model.stacking.blocks:
-        for attr in block.__dict__.values():
-            if isinstance(attr, torch_tensor):
-                attr.requires_grad_(True)
-    for name in ("embedding_weights", "final_norm_gamma", "lm_head_weight"):
-        getattr(model, name).requires_grad_(True)
 
 
 def _train_numpy(cfg: TransformerConfig, stream: list[int], args: argparse.Namespace) -> dict[str, np.ndarray]:
@@ -200,22 +184,16 @@ def _train_gpu(
     if backend == "torch":
         from impl._torch.layers import TorchModel
 
-        model: Any = TorchModel(cfg)
+        model: Any = TorchModel(cfg, ref).to(args.device)
     elif backend == "triton":
         from impl._triton.model import TritonModel
 
-        model = TritonModel(cfg)
+        model = TritonModel(cfg, ref).to(args.device)
     else:  # cuda
         from impl._cuda.model import CUDAModel
 
-        model = CUDAModel(cfg)
-
-    model.load_from_numpy_dict(ref)
-    if backend == "cuda":
-        _enable_cuda_grads(model)
+        model = CUDAModel(cfg, ref)
         _cuda_to_device(model, args.device)
-    else:
-        model = model.to(args.device)
 
     params: list = list(model.parameters()) if hasattr(model, "parameters") else _cuda_params(model)
     optimizer = torch.optim.AdamW(params, lr=args.lr)
@@ -312,8 +290,7 @@ def main() -> None:
     print("\n=== 4. Sample output (sanity: should be word-like, not random) ===")
     from impl._np.model import NumPyModel
 
-    np_model = NumPyModel(cfg)
-    np_model.load_from_numpy_dict(params)
+    np_model = NumPyModel(cfg, params)
     rng2 = np.random.default_rng(args.seed)
     prompt = [vocab.index(c) for c in "the she"]
     seq = list(prompt)

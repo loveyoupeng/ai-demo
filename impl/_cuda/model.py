@@ -33,15 +33,33 @@ https://arxiv.org/abs/1706.03762
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
+from pathlib import Path
 
 import numpy as np
 import torch
 
 from impl._cuda.layernorm import rmsnorm as _rmsnorm
 from impl._cuda.stack import CuDecoderStack
+from shared.checkpoint import load_checkpoint
 from shared.config import TransformerConfig
 from shared.constants import Attn, Keys, LayerNorm, Mlp
 from shared.registry import ParameterRegistry
+
+
+def _cuda_to_device(model: CUDAModel, device: torch.device | str) -> None:
+    """Move every CUDAModel tensor to ``device`` by relocating its storage.
+
+    ``tensor.data = tensor.data.to(device)`` (not ``tensor = tensor.to(...)``)
+    preserves leaf-ness and ``requires_grad``: a plain ``.to()`` on a
+    grad-requiring tensor creates a non-leaf tensor that torch.optim rejects.
+    """
+    for name in ("embedding_weights", "final_norm_gamma", "lm_head_weight"):
+        getattr(model, name).data = getattr(model, name).data.to(device)
+    for block in model.stacking.blocks:
+        for attr in list(block.__dict__.values()):
+            if isinstance(attr, torch.Tensor):
+                attr.data = attr.data.to(device)
 
 
 class CUDAModel:
@@ -67,19 +85,27 @@ class CUDAModel:
         The transformer blocks.
     """
 
-    def __init__(self, config: TransformerConfig, stacking: CuDecoderStack | None = None) -> None:
+    def __init__(self, config: TransformerConfig, params: Mapping[str, np.ndarray] | None = None) -> None:
         """Initialize CUDAModel from a :class:`TransformerConfig`.
 
         For parity checking, weights are initialized with the config's seed,
         mirroring the NumPy/PyTorch models.
+
+        params: optional checkpoint arrays (the shared Keys scheme)
+        **injected at construction** — validated against the registry and
+        copied in place (preserves ``requires_grad``), so the model is born
+        with trained weights (the inference path; see ``from_checkpoint``).
+        When None (default) the tensors keep their seed-initialized values
+        (the training path); the tensors live on CPU until a caller moves
+        them to CUDA.
         """
         self.config = config
         self.vocab_size = config.vocab_size
         self.embed_dim = config.embed_dim
         seed = config.seed
 
-        # Create or use provided stack
-        self.stacking = stacking if stacking is not None else CuDecoderStack(config)
+        # Decoder stack (n_layers CuTransformerBlocks)
+        self.stacking = CuDecoderStack(config)
 
         # Embedding table (V, D)
         gen = torch.Generator().manual_seed(seed)
@@ -98,6 +124,26 @@ class CUDAModel:
             0.0, 1.0 / math.sqrt(config.embed_dim), size=(config.embed_dim, config.vocab_size), generator=gen2
         )
         self.lm_head_weight.requires_grad_(True)
+
+        if params is not None:
+            self.load_from_numpy_dict(params)
+
+    @classmethod
+    def from_checkpoint(cls, checkpoint_dir: str | Path, device: str = "cuda") -> CUDAModel:
+        """Construct a model from a checkpoint directory (the explicit
+        inference factory).
+
+        Reads ``config.json`` + ``model.npz`` and injects the trained
+        arrays at construction; ``device`` mirrors the track's train
+        scripts ("cuda" default — kernels expect CUDA tensors).
+        """
+        arrays, cfg = load_checkpoint(checkpoint_dir)
+        if cfg is None:
+            raise ValueError(f"checkpoint {checkpoint_dir} is missing config.json")
+        model = cls(cfg)
+        _cuda_to_device(model, torch.device(device))
+        model.load_from_numpy_dict(arrays)
+        return model
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the complete model.
@@ -312,7 +358,7 @@ class CUDAModel:
             entry.key: tensors[entry.key].detach().cpu().numpy() for entry in ParameterRegistry(self.config).entries
         }
 
-    def load_from_numpy_dict(self, params: dict[str, np.ndarray]) -> None:
+    def load_from_numpy_dict(self, params: Mapping[str, np.ndarray]) -> None:
         """Load parameters from a flat dict keyed by ``shared.constants.Keys``.
 
         Validates against the registry first (stale checkpoints fail fast);

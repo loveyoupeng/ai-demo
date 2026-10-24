@@ -232,16 +232,14 @@ if __name__ == "__main__":
     save_checkpoint(base, names["base"], tok)
 
     # ── stage 2: SFT on code instructions ───────────────────────────────
-    sft = TorchModel(cfg).cuda().train()
-    sft.load_from_numpy_dict(dict(np.load(RESOURCE / "models" / names["base"] / "model.npz")))
+    sft = TorchModel(cfg, dict(np.load(RESOURCE / "models" / names["base"] / "model.npz"))).cuda().train()
     print(f"stage 2 ({args.variant}): SFT on code instructions")
     train(sft, code, epochs=ep_sft, lr=5e-4, tag="sft")
     sft.eval()
     save_checkpoint(sft, names["sft"], tok)
 
     # ── stage 3: SFT on tool calls ───────────────────────────────────────
-    tool_m = TorchModel(cfg).cuda().train()
-    tool_m.load_from_numpy_dict(dict(np.load(RESOURCE / "models" / names["sft"] / "model.npz")))
+    tool_m = TorchModel(cfg, dict(np.load(RESOURCE / "models" / names["sft"] / "model.npz"))).cuda().train()
     print(f"stage 3 ({args.variant}): SFT on tool calls")
     train(tool_m, tool, epochs=ep_tool, lr=5e-4, tag="tool")
     tool_m.eval()

@@ -70,8 +70,7 @@ def load_frozen_target(model_dir: str) -> tuple[NumPyModel, TransformerConfig]:
     params, cfg = load_checkpoint(model_dir)
     if cfg is None:
         raise ValueError(f"checkpoint {model_dir} is missing config.json")
-    model = NumPyModel(cfg)
-    model.load_from_numpy_dict({k: v.copy() for k, v in params.items()})
+    model = NumPyModel(cfg, {k: v.copy() for k, v in params.items()})
     return model, cfg
 
 
@@ -247,8 +246,7 @@ def _report_acceptance(
     over held-out rollouts (also proves the round trip: torch-trained,
     NumPy-loaded, NumPy-verified)."""
     meta, sc_params = load_drafter(sidecar_dir(model_dir, family))
-    drafter = np_cls(meta, target_np.embedding.weight, target_np.lm_head_weight)
-    drafter.load_from_numpy_dict(sc_params)
+    drafter = np_cls(meta, target_np.embedding.weight, target_np.lm_head_weight, params=sc_params)
     gen = NpSpecGen(target_np, drafter)
     accepted = drafted = 0
     for roll in val_rolls[:16]:

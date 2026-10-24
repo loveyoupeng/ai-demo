@@ -126,36 +126,38 @@ def load_model_from_checkpoint(model_path: str, backend: str):
 
     from shared.checkpoint import load_checkpoint
 
-    params, cfg = load_checkpoint(str(model_dir))
+    _params, cfg = load_checkpoint(str(model_dir))
     if cfg is None:
         raise ValueError(f"Config missing in checkpoint: {model_dir}")
 
+    # Constructor injection: each model is BORN with the trained weights
+    # (from_checkpoint reads config.json + model.npz and injects the
+    # arrays at construction) — no post-construction load step exists
+    # to forget.
     if backend == "numpy":
         from impl._np.model import NumPyModel
 
-        model = NumPyModel(cfg)
-        model.load_from_numpy_dict(params)
+        model = NumPyModel.from_checkpoint(str(model_dir))
         return model, _config_dict(cfg)
 
     if backend == "torch":
         from impl._torch.layers import TorchModel
 
-        model = TorchModel(cfg)
-        model.load_from_numpy_dict(params)
+        model = TorchModel.from_checkpoint(str(model_dir))
+        model.eval()
         return model, _config_dict(cfg)
 
     if backend == "triton":
         from impl._triton.model import TritonModel
 
-        model = TritonModel(cfg)
-        model.load_from_numpy_dict(params)
+        model = TritonModel.from_checkpoint(str(model_dir), device="cuda")
+        model.eval()
         return model, _config_dict(cfg)
 
     if backend == "cuda":
         from impl._cuda.model import CUDAModel
 
-        model = CUDAModel(cfg)
-        model.load_from_numpy_dict(params)
+        model = CUDAModel.from_checkpoint(str(model_dir), device="cuda")
         return model, _config_dict(cfg)
 
     raise ValueError(f"Unsupported backend: {backend}. Must be numpy, torch, triton, or cuda.")
@@ -288,8 +290,7 @@ def generate_speculative(
         from impl._np.spec import SpeculativeGenerator
 
         cls = NpMTP if meta.family == "mtp" else NpDSpark
-        drafter = cls(meta, model.embedding.weight, model.lm_head_weight)
-        drafter.load_from_numpy_dict(params)
+        drafter = cls(meta, model.embedding.weight, model.lm_head_weight, params=params)
         seq, stats = SpeculativeGenerator(model, drafter).generate_greedy(
             np.array([prompt_tokens], dtype=np.int32), max_new_tokens, k=k
         )

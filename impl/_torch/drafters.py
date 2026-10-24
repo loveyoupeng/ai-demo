@@ -266,6 +266,7 @@ class TorchMTPDrafter(nn.Module):
         embedding_weight: torch.Tensor,  # (V, D) — the TARGET's embedding (shared)
         lm_head_weight: torch.Tensor,  # (D, V) — the TARGET's lm_head (shared)
         seed: int = 0,
+        params: Mapping[str, torch.Tensor | np.ndarray] | None = None,
     ) -> None:
         super().__init__()
         D, H = meta.embed_dim, meta.n_heads
@@ -282,6 +283,10 @@ class TorchMTPDrafter(nn.Module):
         self.block = _DrafterBlock(D, H, G, meta.ff_dim, meta.rope_dim, causal=True)
         self.out_norm = RMSNorm(D)
         self.reset()
+        # Constructor injection: a sidecar checkpoint's arrays arrive HERE,
+        # at birth — never by assignment after construction.
+        if params is not None:
+            self.load_from_numpy_dict(params)
 
     def reset(self) -> None:
         """Fresh sequence: empty the drafter's KV cache."""
@@ -390,6 +395,7 @@ class TorchDSparkDrafter(nn.Module):
         embedding_weight: torch.Tensor,  # (V, D) — the TARGET's embedding (shared)
         lm_head_weight: torch.Tensor,  # (D, V) — the TARGET's lm_head (shared)
         seed: int = 0,
+        params: Mapping[str, torch.Tensor | np.ndarray] | None = None,
     ) -> None:
         super().__init__()
         D, H = meta.embed_dim, meta.n_heads
@@ -406,6 +412,9 @@ class TorchDSparkDrafter(nn.Module):
         self.parallel = _DrafterBlock(D, H, G, meta.ff_dim, meta.rope_dim, causal=False)
         self.seq = _DrafterBlock(D, H, G, meta.ff_dim, meta.rope_dim, causal=True)
         self.out_norm = RMSNorm(D)
+        # Constructor injection (see TorchMTPDrafter.__init__).
+        if params is not None:
+            self.load_from_numpy_dict(params)
 
     def reset(self) -> None:
         """Stateless drafter — nothing to clear."""
@@ -472,12 +481,11 @@ def drafter_from_sidecar(
     """Build a torch drafter from a validated sidecar + the target's shared
     embedding/lm_head. Any track's sidecar loads here (round-trip guarantee)."""
     if meta.family == MTP:
-        d: TorchMTPDrafter | TorchDSparkDrafter = TorchMTPDrafter(meta, embedding_weight, lm_head_weight)
+        d: TorchMTPDrafter | TorchDSparkDrafter = TorchMTPDrafter(meta, embedding_weight, lm_head_weight, params=params)
     elif meta.family == DSHARK:
-        d = TorchDSparkDrafter(meta, embedding_weight, lm_head_weight)
+        d = TorchDSparkDrafter(meta, embedding_weight, lm_head_weight, params=params)
     else:
         raise ValueError(f"no torch drafter for family {meta.family!r}")
-    d.load_from_numpy_dict(params)
     # Align the drafter with the target it runs beside: the shared
     # embedding/lm_head arrive in the target's dtype/device (float64 on the
     # torch record path, float32+CUDA on triton/cuda), while the sidecar

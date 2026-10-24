@@ -26,6 +26,8 @@ Parameter keys follow the flat-dict scheme in ``shared.constants``
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
+from pathlib import Path
 
 import numpy as np
 
@@ -34,6 +36,7 @@ from impl._np.embedding import Embedding
 from impl._np.layernorm import RMSNorm
 from impl._np.moe import MixtureOfExperts
 from impl._np.stack import DecoderStack
+from shared.checkpoint import load_checkpoint
 from shared.config import TransformerConfig
 from shared.constants import ATTN_PROJS, FFN_PROJS, Attn, Keys, LayerNorm, Mlp
 from shared.registry import ParameterRegistry
@@ -54,11 +57,19 @@ class NumPyModel:
     full key → shape table).
     """
 
-    def __init__(self, config: TransformerConfig) -> None:
+    def __init__(self, config: TransformerConfig, params: Mapping[str, np.ndarray] | None = None) -> None:
         """Build the model from a :class:`TransformerConfig`.
 
         The config is the single source of truth for every dimension; the
         model derives head_dim, K/V group width, and FFN/MoE width from it.
+
+        params: optional checkpoint arrays (the shared Keys scheme)
+        **injected at construction** — validated against the registry and
+        copied in place, so the model is born with trained weights (the
+        inference path; see ``from_checkpoint``). When None (default) the
+        arrays keep their seed-initialized random values (the training
+        path). There is no third lifecycle: weights are either injected
+        here or trained in place.
         """
         self.config = config
         self.vocab_size = config.vocab_size
@@ -79,6 +90,24 @@ class NumPyModel:
         self.lm_head_weight: np.ndarray = rng.normal(
             0.0, 1.0 / np.sqrt(config.embed_dim), (config.embed_dim, config.vocab_size)
         ).astype(np.float32)
+
+        if params is not None:
+            self.load_from_numpy_dict(params)
+
+    @classmethod
+    def from_checkpoint(cls, checkpoint_dir: str | Path) -> NumPyModel:
+        """Construct a model from a checkpoint directory (the explicit
+        inference factory).
+
+        Reads ``config.json`` + ``model.npz`` and injects the trained
+        arrays at construction, so the returned model is born with
+        learned weights (e.g. RMSNorm gammas ≠ ones) — no post-hoc load
+        step exists to forget.
+        """
+        arrays, cfg = load_checkpoint(checkpoint_dir)
+        if cfg is None:
+            raise ValueError(f"checkpoint {checkpoint_dir} is missing config.json")
+        return cls(cfg, arrays)
 
     def forward(self, input_ids: np.ndarray) -> np.ndarray:
         """Full forward pass.
@@ -159,7 +188,7 @@ class NumPyModel:
         """
         return ParameterRegistry(self.config).bind(self._param_arrays())
 
-    def load_from_numpy_dict(self, params: dict[str, np.ndarray]) -> None:
+    def load_from_numpy_dict(self, params: Mapping[str, np.ndarray]) -> None:
         """Load parameters from a flat dict (inverse of ``get_all_parameters``).
 
         params: the registry-keyed arrays (checkpoint format) — validated

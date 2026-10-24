@@ -23,12 +23,15 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from shared.checkpoint import load_checkpoint
 from shared.config import TransformerConfig
 from shared.constants import Attn, Keys, LayerNorm, Mlp
 from shared.registry import ParameterRegistry
@@ -668,8 +671,17 @@ class TorchModel(nn.Module):
     checkpoint contract.
     """
 
-    def __init__(self, config: TransformerConfig) -> None:
-        """Build the model from a :class:`TransformerConfig`."""
+    def __init__(self, config: TransformerConfig, params: Mapping[str, Any] | None = None) -> None:
+        """Build the model from a :class:`TransformerConfig`.
+
+        params: optional checkpoint arrays (the shared Keys scheme)
+        **injected at construction** — validated against the registry,
+        transposed per the ``nn.Linear`` layout rule, and copied in place
+        into the constructor-built tensors, so the model is born with
+        trained weights (the inference path; see ``from_checkpoint``).
+        When None (default) the tensors keep their seed-initialized
+        values (the training path).
+        """
         super().__init__()
         self.config = config
         self.vocab_size = config.vocab_size
@@ -682,6 +694,26 @@ class TorchModel(nn.Module):
         self.final_norm = RMSNorm(config.embed_dim, eps=config.norm_eps)
         # lm_head: (in=D, out=V) per nn.Linear convention
         self.lm_head = nn.Linear(config.embed_dim, config.vocab_size, bias=False)
+
+        if params is not None:
+            self.load_from_numpy_dict(params)
+
+    @classmethod
+    def from_checkpoint(cls, checkpoint_dir: str | Path, dtype: torch.dtype | None = None) -> TorchModel:
+        """Construct a model from a checkpoint directory (the explicit
+        inference factory).
+
+        Reads ``config.json`` + ``model.npz`` and injects the trained
+        arrays at construction. ``dtype`` optionally casts the tensors
+        (e.g. ``torch.float64`` for the record-display parity path);
+        defaults to the constructor dtype.
+        """
+        arrays, cfg = load_checkpoint(checkpoint_dir)
+        if cfg is None:
+            raise ValueError(f"checkpoint {checkpoint_dir} is missing config.json")
+        model = cls(cfg) if dtype is None else cls(cfg).to(dtype)
+        model.load_from_numpy_dict(arrays)
+        return model
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass. x: (B, S) int → logits: (B, S, V)."""
@@ -859,7 +891,7 @@ class TorchModel(nn.Module):
         """All parameters as a flat numpy dict (interface parity with NumPy/CUDA)."""
         return self.save_as_numpy()
 
-    def load_from_numpy_dict(self, params_dict: dict[str, Any]) -> None:
+    def load_from_numpy_dict(self, params_dict: Mapping[str, Any]) -> None:
         """Load parameters from a flat dict (inverse of ``save_as_numpy``).
 
         Validates the dict against the registry first, so stale or

@@ -357,6 +357,16 @@ letters. Where each value comes from:
   never changes; `NumPyModel.to(dtype)` is the one deliberate
   re-binding path (a dtype cast cannot be done in place in NumPy).
 
+- **Model lifecycle** (all four tracks): a model is born in one of two
+  states — `Model(config)` with fresh seed-initialized weights (the
+  training start point; RMSNorm gammas are ones) or `Model(config, params)`
+  / `Model.from_checkpoint(dir)`, where the checkpoint arrays are injected
+  **at construction** (the inference path), so a served model's gammas are
+  the trained ones from the moment it exists. This is dependency injection
+  through the constructor: the constructor owns the init invariant, and
+  no post-construction assignment step exists to forget or to misread as
+  "initialization".
+
 ## Tracks
 
 - **NumPy track** (`impl/_np/`): the math reference. Hand-rolled

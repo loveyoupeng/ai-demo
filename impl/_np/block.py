@@ -66,6 +66,11 @@ class TransformerBlock:
         D, H, G = config.embed_dim, config.n_heads, config.kv_heads
         seed = config.seed
 
+        # Init invariant: both RMSNorm gammas start at ones (identity) — this
+        # is the TRAINING start point. Trained gammas never arrive by
+        # assignment after construction: the owning model injects the whole
+        # checkpoint at birth (NumPyModel(config, params) / from_checkpoint,
+        # same in all four tracks), which copies in place over these arrays.
         self.input_layernorm = RMSNorm(D, eps=config.norm_eps)
         self.post_attention_layernorm = RMSNorm(D, eps=config.norm_eps)
         self.self_attn = MultiHeadAttention(embed_dim=D, n_heads=H, n_groups=G, rope_dim=config.rope_dim, seed=seed + 1)

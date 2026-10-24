@@ -73,9 +73,19 @@ differences (float64, ~1e-10, MoE top-k flip-aware).
   and the `torch_transpose` layout rule — only `nn.Linear`-backed weights are
   transposed for the PyTorch track.
 - Each track has exactly **one** storage-binding map
-  (`_param_arrays()` np / `_param_tensors()` torch, triton, cuda →
-  `ParameterRegistry.bind()`); all save/load walk the registry, not a
+  (`_param_slots()`/`_param_arrays()` np / `_param_tensors()` torch, triton,
+  cuda → `ParameterRegistry.bind()`); all save/load walk the registry, not a
   per-track key list. Load validates key-set + shapes (stale checkpoints fail fast).
+- **Construction lifecycle (constructor injection, all four tracks)** — every
+  model is born in exactly one of two states: `Model(config)` = fresh
+  seed-initialized weights (training), or `Model(config, params)` /
+  `Model.from_checkpoint(dir)` = the checkpoint arrays injected **at
+  construction** (inference). Injection copies **in place** over the arrays
+  the constructor created (the `load_state_dict` convention: storage identity
+  never changes, dtype/device moves are the only re-binding paths —
+  `NumPyModel.to()` mirrors torch's `.double()`). `load_from_numpy_dict` stays
+  the explicit in-place loading interface (weight swap into a live model,
+  round-trip tests); nothing loads by reassigning attributes.
 - `shared/checkpoint.py` does disk I/O: `config.json` + flat `model.npz`.
 
 **Learning mode (all four backends):** the web page runs records on all four

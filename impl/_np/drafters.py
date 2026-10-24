@@ -211,6 +211,7 @@ class MTPDrafter:
         embedding_weight: np.ndarray,  # (V, D) — the TARGET's embedding (shared)
         lm_head_weight: np.ndarray,  # (D, V) — the TARGET's lm_head (shared)
         seed: int = 0,
+        params: dict[str, np.ndarray] | None = None,
     ) -> None:
         D, H = meta.embed_dim, meta.n_heads
         G = meta.n_groups if meta.n_groups is not None else meta.n_heads
@@ -223,6 +224,10 @@ class MTPDrafter:
         self.block = _DrafterBlock(D, H, G, meta.ff_dim, meta.rope_dim, causal=True, seed=seed + 10)
         self.out_norm = RMSNorm(D)
         self.reset()
+        # Constructor injection: a sidecar checkpoint's arrays arrive HERE,
+        # at birth — never by assignment after construction.
+        if params is not None:
+            self.load_from_numpy_dict(params)
 
     _cache: dict[str, np.ndarray]
 
@@ -371,6 +376,7 @@ class DSparkDrafter:
         embedding_weight: np.ndarray,  # (V, D) — the TARGET's embedding (shared)
         lm_head_weight: np.ndarray,  # (D, V) — the TARGET's lm_head (shared)
         seed: int = 0,
+        params: dict[str, np.ndarray] | None = None,
     ) -> None:
         D, H = meta.embed_dim, meta.n_heads
         G = meta.n_groups if meta.n_groups is not None else meta.n_heads
@@ -385,6 +391,9 @@ class DSparkDrafter:
         self.parallel = _DrafterBlock(D, H, G, meta.ff_dim, meta.rope_dim, causal=False, seed=seed + 10)
         self.seq = _DrafterBlock(D, H, G, meta.ff_dim, meta.rope_dim, causal=True, seed=seed + 30)
         self.out_norm = RMSNorm(D)
+        # Constructor injection (see MTPDrafter.__init__).
+        if params is not None:
+            self.load_from_numpy_dict(params)
 
     def reset(self) -> None:
         """Stateless drafter — nothing to clear."""
@@ -468,12 +477,11 @@ def drafter_from_sidecar(
     """Build a NumPy drafter from a validated sidecar + the target's shared
     embedding/lm_head. Any track's sidecar loads here (round-trip guarantee)."""
     if meta.family == MTP:
-        d: MTPDrafter | DSparkDrafter = MTPDrafter(meta, embedding_weight, lm_head_weight)
+        d: MTPDrafter | DSparkDrafter = MTPDrafter(meta, embedding_weight, lm_head_weight, params=params)
     elif meta.family == DSHARK:
-        d = DSparkDrafter(meta, embedding_weight, lm_head_weight)
+        d = DSparkDrafter(meta, embedding_weight, lm_head_weight, params=params)
     else:
         raise ValueError(f"no NumPy drafter for family {meta.family!r}")
-    d.load_from_numpy_dict(params)
     return d
 
 

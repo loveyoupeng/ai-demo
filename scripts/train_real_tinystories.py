@@ -100,41 +100,6 @@ def load_dataset(
     return tokenizer, batches, len(dataset.token_ids)
 
 
-def _build_model(backend: str, cfg: TransformerConfig) -> Any:
-    """Construct a fresh (CPU, seed-initialized) model for a backend."""
-    if backend == "numpy":
-        from impl._np.model import NumPyModel
-
-        return NumPyModel(cfg)
-    if backend == "torch":
-        from impl._torch.layers import TorchModel
-
-        return TorchModel(cfg)
-    if backend == "triton":
-        from impl._triton.model import TritonModel
-
-        return TritonModel(cfg)
-    from impl._cuda.model import CUDAModel
-
-    return CUDAModel(cfg)
-
-
-def _enable_cuda_grads(model: Any) -> None:
-    """Set requires_grad on every CUDAModel tensor (blocks + the 3 top-level weights).
-
-    ``load_from_numpy_dict`` reassigns the tensors to fresh CPU tensors, which lose
-    requires_grad; the CUDA train_step needs gradients on all of them.
-    """
-    import torch
-
-    for name in ("embedding_weights", "final_norm_gamma", "lm_head_weight"):
-        getattr(model, name).requires_grad_(True)
-    for block in model.stacking.blocks:
-        for attr in block.__dict__.values():
-            if isinstance(attr, torch.Tensor):
-                attr.requires_grad_(True)
-
-
 def _cuda_to_device(model: Any, device: Any) -> None:
     """Move every CUDAModel tensor to `device` by relocating its storage (``.data``).
 
@@ -164,15 +129,28 @@ def _cuda_params(model: Any) -> list:
     return params
 
 
-def _prepare(backend: str, model: Any, ref_params: dict, device: str | None) -> Any:
-    """Load the identical NumPy init, then enable grads (cuda) / move to device."""
-    model.load_from_numpy_dict(ref_params)
-    if backend == "cuda":
-        _enable_cuda_grads(model)
-        if device is not None:
-            _cuda_to_device(model, device)
-    elif device is not None:  # torch / triton
-        model = model.to(device)
+def _prepare(backend: str, cfg: TransformerConfig, ref_params: dict | None, device: str | None) -> Any:
+    """Construct with the identical NumPy init injected, then enable grads
+    (cuda) / move to device."""
+    if backend == "numpy":
+        from impl._np.model import NumPyModel
+
+        return NumPyModel(cfg, ref_params)
+    if backend == "torch":
+        from impl._torch.layers import TorchModel
+
+        model = TorchModel(cfg, ref_params)
+        return model if device is None else model.to(device)
+    if backend == "triton":
+        from impl._triton.model import TritonModel
+
+        model = TritonModel(cfg, ref_params)
+        return model if device is None else model.to(device)
+    from impl._cuda.model import CUDAModel
+
+    model = CUDAModel(cfg, ref_params)
+    if device is not None:
+        _cuda_to_device(model, device)
     return model
 
 
@@ -274,7 +252,7 @@ def main() -> int:
 
     # Reference weights: every backend trains from this exact (seed-initialized) NumPy set,
     # captured as a copy before any training mutates the arrays in place.
-    ref_model = _build_model("numpy", cfg)
+    ref_model = _prepare("numpy", cfg, None, None)
     ref_params = {k: np.asarray(v).copy() for k, v in ref_model.get_all_parameters().items()}
 
     out_root = Path(args.out)
@@ -284,7 +262,7 @@ def main() -> int:
             print(f"[skip] {backend}: requires a CUDA GPU (none available)")
             continue
         t0 = time.time()
-        model = ref_model if backend == "numpy" else _prepare(backend, _build_model(backend, cfg), ref_params, device)
+        model = ref_model if backend == "numpy" else _prepare(backend, cfg, ref_params, device)
         first, last, mean = _train(backend, model, batches, args.lr, args.max_norm, device)
         out_dir = out_root / f"{backend}_{args.suffix}"
         save_checkpoint(out_dir, config=cfg, params=_export_params(backend, model))

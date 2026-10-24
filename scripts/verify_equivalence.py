@@ -152,13 +152,17 @@ def _to_transformer_config(kwargs: dict[str, Any]):
     return TransformerConfig(**mapped)
 
 
-def _make_model(backend: str, kwargs: dict[str, Any]) -> Any:
-    """Create a model instance for the given backend from shared config."""
+def _make_model(backend: str, kwargs: dict[str, Any], params: dict[str, np.ndarray] | None = None) -> Any:
+    """Create a model instance for the given backend from shared config.
+
+    params: optional reference weights injected at construction (the
+    constructor-injection path); None → seed-initialized (training).
+    """
     import importlib
 
     module_path, cls_name = _BACKEND_CLASSES[backend].rsplit(".", 1)
     cls = getattr(importlib.import_module(module_path), cls_name)
-    return cls(_to_transformer_config(kwargs))
+    return cls(_to_transformer_config(kwargs), params)
 
 
 def _model_device(backend: str) -> str:
@@ -175,11 +179,6 @@ def _get_params(backend: str, model: Any) -> dict[str, np.ndarray]:
     if backend in ("numpy", "cuda"):
         return {k: np.asarray(v).copy() for k, v in model.get_all_parameters().items()}
     return {k: np.asarray(v).copy() for k, v in model.save_as_numpy().items()}
-
-
-def _load_params_to_model(backend: str, model: Any, params: dict[str, np.ndarray]) -> None:
-    """Load parameters into a model via the shared Keys scheme (all backends)."""
-    model.load_from_numpy_dict(params)
 
 
 # ─── Inference helpers ─────────────────────────────────────────────────────────
@@ -452,10 +451,9 @@ def run_scenario(scenario: Scenario, steps: int = 2) -> dict:
         )
 
         for b in scenario.backends:
-            model = _make_model(b, kwargs)
+            model = _make_model(b, kwargs, ref_params)
             if b in ("torch", "triton"):
                 model = model.to("cuda")
-            _load_params_to_model(b, model, ref_params)
             params = _get_params(b, model)  # capture before training mutates the model
             logits = _forward_logits(b, model, tokens)
             greedy = _greedy_tokens(b, model, tokens[0].tolist(), kwargs.get("context_length", 16), steps=steps)
