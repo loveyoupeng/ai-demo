@@ -594,6 +594,27 @@ class MultiHeadAttention:
         return bits, scale
 
     @staticmethod
+    def _quantize_turbo_full(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """1-bit quantize a K or V tensor over a WHOLE cached block (prefill).
+
+        The batched form of ``_quantize_turbo``: the same per-token write
+        rule — sign bits plus one scalar scale per (batch, head) per token,
+        mean(|x|) over that token's head-dim vector — applied to every
+        cached position at once instead of one append at a time.
+
+        x: (B, H, S, hd) — S tokens' K or V (after GQA repeat).
+        Returns:
+            bits: (B, H, S, hd) int8 — 1 for positive, 0 for non-positive.
+            scale: (B, H, S, 1) float.
+        Dequantize: bits.astype(float) * scale (broadcast over hd) —
+        identical to what per-token appends would have stored.
+        """
+        absolute_values = np.abs(x)  # (B, H, S, hd)
+        scale = np.mean(absolute_values, axis=-1, keepdims=True)  # (B, H, S, 1)
+        bits = (x > 0).astype(np.int8)  # (B, H, S, hd)
+        return bits, scale
+
+    @staticmethod
     def _dequantize_turbo(bits: np.ndarray, scale: np.ndarray) -> np.ndarray:
         """Dequantize 1-bit storage back to float.
 

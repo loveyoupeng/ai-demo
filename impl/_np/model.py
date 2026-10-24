@@ -271,6 +271,7 @@ class NumPyModel:
         input_ids: np.ndarray,
         cache: list[dict] | None = None,
         position: int = 0,
+        quantize: bool = False,
         record: dict | None = None,
     ) -> tuple[np.ndarray, list[dict]]:
         """Run a full-sequence forward and fill the per-layer KV cache.
@@ -286,6 +287,11 @@ class NumPyModel:
             — the windowed-prefill offset, so a prompt longer than the
             context prefills at its absolute positions while the decode
             steps keep using absolute ones.
+        quantize: if True, backfill the cache in 1-bit TurboQuant form
+            (bits + one scalar scale per (batch, head) per token — the same
+            write rule ``forward_step(quantize=True)`` applies, vectorized
+            over the prompt length) so the prompt and every decode step share
+            one lossy cache. If False, backfill full-precision K/V (exact).
         record: optional dict filled with the raw intermediates of this pass
             (same keys as ``forward_with_trace``'s record) — the
             learning-mode prefill step.
@@ -297,7 +303,7 @@ class NumPyModel:
         """
         B, S = input_ids.shape
         if cache is None:
-            cache = self.make_cache(B)
+            cache = self.make_cache(B, quantize=quantize)
         blocks_rec = [{} for _ in self.stack.layers]
         x = self.embedding.forward(input_ids)  # (B, S, D)
         stack_out = self.stack.forward(x, position, record=blocks_rec)  # (B, S, D)
@@ -305,10 +311,24 @@ class NumPyModel:
         logits = x_final @ self.lm_head_weight  # (B, S, V)
         # Backfill each layer's cache from this pass's attention state:
         # K/V per group (GQA keeps it small), K already RoPE'd, V un-rotated.
+        # Naive path stores per group; TurboQuant quantizes per head after
+        # GQA repeat (one (bits, scale) pair per token-write) — the same
+        # storage form make_cache(quantize=True) allocates.
+        H = self.config.n_heads
+        G = self.config.kv_heads
         for i, block_state in enumerate(blocks_rec):
             attn_state = block_state["attn"]
-            cache[i]["k"] = attn_state["k_group"]  # (B, G, S, hd)
-            cache[i]["v"] = attn_state["v_group"]  # (B, G, S, hd)
+            k_group = attn_state["k_group"]  # (B, G, S, hd)
+            v_group = attn_state["v_group"]  # (B, G, S, hd)
+            if quantize:
+                attn_layer = self.stack.layers[i].self_attn
+                k_r = np.repeat(k_group, H // G, axis=1) if G != H else k_group  # (B, H, S, hd)
+                v_r = np.repeat(v_group, H // G, axis=1) if G != H else v_group
+                cache[i]["bits_k"], cache[i]["scales_k"] = attn_layer._quantize_turbo_full(k_r)
+                cache[i]["bits_v"], cache[i]["scales_v"] = attn_layer._quantize_turbo_full(v_r)
+            else:
+                cache[i]["k"] = k_group
+                cache[i]["v"] = v_group
         if record is not None:
             record.update(
                 {

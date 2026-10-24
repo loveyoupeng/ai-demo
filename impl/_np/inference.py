@@ -11,12 +11,14 @@ Logging
 
 Architecture
 -------------
-Generation loop (KV-cached, O(1) attention work per new token):
+Generation loop (KV-cached, like a real inference engine: one bulk prefill,
+then O(1) attention work per new token):
     cache = model.make_cache(B, quantize=quantize)
-    for i in range(prompt_len - 1):
-        model.forward_step(sequence[:, [i]], i, cache)     # thread the prompt
+    prefill_logits = model.forward_prefill(prompt, cache, quantize=quantize)  # (B, S, V)
+    step_logits = prefill_logits[:, -1, :]                       # last position predicts token S
     for step in range(max_new_tokens):
-        step_logits = model.forward_step(sequence[:, [-1]], len-1, cache)  # (B, 1, V)
+        if step > 0:  # the first logits come from the prefill pass itself
+            step_logits = model.forward_step(sequence[:, [-1]], len-1, cache)  # (B, 1, V)
         if sampled:
             probs = softmax(step_logits / temperature)     # (B, V)
             if top_k > 0: logits = top_k_filter(logits, top_k)
@@ -25,9 +27,11 @@ Generation loop (KV-cached, O(1) attention work per new token):
             token = argmax(step_logits, axis=-1)           # greedy
         sequence = concat(sequence, token)                 # (B, S+1)
 
-Only the newest token is forwarded each step; the cached K/V of all earlier
-tokens is reused. (``model.forward_prefill`` can fill the same cache from a
-whole prompt in one pass — equivalent to the per-token threading above.)
+The prefill pass runs the whole prompt through the causal-masked forward in
+ONE batched call (the mask is what makes the model decoder-only: position i
+attends to 0..i only, so the last position's logits already predict token
+S+1 — no per-token loop needed to warm the cache). Only the newest token is
+forwarded in the decode loop; the cached K/V of all earlier tokens is reused.
 """
 
 from __future__ import annotations
@@ -139,26 +143,29 @@ class TextGenerator:
         batch_size, seq_len = prompt.shape
         sequence = prompt.copy()
 
-        # Build the KV cache by threading the prompt (all but the last token)
-        # one token at a time, then step the last token to get the first
-        # generated logits. Each subsequent step appends one new token.
-        # quantize=True uses the 1-bit TurboQuant cache (lossy; int8 storage
-        # ≈4x smaller than the float cache);
-        # quantize=False uses the full-precision naive cache (exact).
+        # Prefill: ONE batched pass over the whole prompt fills the KV cache
+        # (the causal mask inside that pass lets every position attend only
+        # to its past — the last position's logits predict the token AFTER
+        # the prompt, so they serve as the first decode step's logits).
+        # quantize=True backfills the cache in 1-bit TurboQuant form (lossy;
+        # int8 storage ≈4x smaller than the float cache);
+        # quantize=False backfills the full-precision cache (exact).
         cache = self.model.make_cache(batch_size, quantize=self.quantize)
-
-        for i in range(seq_len - 1):
-            self.model.forward_step(sequence[:, [i]], i, cache, quantize=self.quantize)
+        prefill_logits, _ = self.model.forward_prefill(sequence, cache, quantize=self.quantize)  # (B, S, V)
 
         # Per-row emitted tokens (repeat guard, cf. shared/generator.py —
         # rows are independent sequences, so the guard must be per row).
         emitted = [[] for _ in range(sequence.shape[0])]
 
         for step in range(self.max_new_tokens):
-            step_logits = self.model.forward_step(
-                sequence[:, [-1]], sequence.shape[1] - 1, cache, quantize=self.quantize
-            )  # (B, 1, V)
-            step_logits = step_logits[:, 0, :].astype(np.float64)  # (B, V)
+            if step == 0:
+                # First logits come from the prefill pass itself — no step.
+                step_logits = prefill_logits[:, -1, :].astype(np.float64)  # (B, V)
+            else:
+                step_logits = self.model.forward_step(
+                    sequence[:, [-1]], sequence.shape[1] - 1, cache, quantize=self.quantize
+                )  # (B, 1, V)
+                step_logits = step_logits[:, 0, :].astype(np.float64)  # (B, V)
 
             # Repetition guard — same rule as every other sampler in the repo
             # (server _sample, record _pick, shared generator).
@@ -235,25 +242,28 @@ class TextGenerator:
         sequence = prompt.copy()
         rng = np.random.default_rng(self.model.config.seed)
 
-        # Build the KV cache by threading the prompt (all but the last token)
-        # one token at a time, then step the last token to get the first
-        # generated logits. Each subsequent step appends one new token.
-        # quantize=True uses the 1-bit TurboQuant cache (lossy; int8 storage
-        # ≈4x smaller than the float cache);
-        # quantize=False uses the full-precision naive cache (exact).
+        # Prefill: ONE batched pass over the whole prompt fills the KV cache
+        # (the causal mask inside that pass lets every position attend only
+        # to its past — the last position's logits predict the token AFTER
+        # the prompt, so they serve as the first decode step's logits).
+        # quantize=True backfills the cache in 1-bit TurboQuant form (lossy;
+        # int8 storage ≈4x smaller than the float cache);
+        # quantize=False backfills the full-precision cache (exact).
         cache = self.model.make_cache(batch_size, quantize=self.quantize)
-
-        for i in range(seq_len - 1):
-            self.model.forward_step(sequence[:, [i]], i, cache, quantize=self.quantize)
+        prefill_logits, _ = self.model.forward_prefill(sequence, cache, quantize=self.quantize)  # (B, S, V)
 
         # Per-row emitted tokens (repeat guard; rows are independent).
         emitted = [[] for _ in range(sequence.shape[0])]
 
         for step in range(self.max_new_tokens):
-            step_logits = self.model.forward_step(
-                sequence[:, [-1]], sequence.shape[1] - 1, cache, quantize=self.quantize
-            )  # (B, 1, V)
-            step_logits = step_logits[:, 0, :].astype(np.float64)  # (B, V)
+            if step == 0:
+                # First logits come from the prefill pass itself — no step.
+                step_logits = prefill_logits[:, -1, :].astype(np.float64)  # (B, V)
+            else:
+                step_logits = self.model.forward_step(
+                    sequence[:, [-1]], sequence.shape[1] - 1, cache, quantize=self.quantize
+                )  # (B, 1, V)
+                step_logits = step_logits[:, 0, :].astype(np.float64)  # (B, V)
 
             # Repetition guard — same rule as every other sampler in the repo.
             step_logits = _apply_rep_guard(step_logits, emitted)
