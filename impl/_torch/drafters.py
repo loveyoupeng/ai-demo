@@ -115,7 +115,26 @@ class _DrafterBlock(nn.Module):
     → out (B, 1, D).
     """
 
-    def __init__(self, D: int, H: int, G: int, ff_dim: int, rope_dim: int, causal: bool) -> None:
+    def __init__(
+        self,
+        D: int,
+        H: int,
+        G: int,
+        ff_dim: int,
+        rope_dim: int,
+        causal: bool,
+        prefix: str = "",
+        meta: DrafterMeta | None = None,
+        params: Mapping[str, torch.Tensor | np.ndarray] | None = None,
+    ) -> None:
+        """Build the block's operators, injecting this block's sidecar slice.
+
+        prefix/meta/params: the block's sidecar key path ("mtp.block" /
+        "dspark.parallel" / "dspark.seq"), the drafter meta and the validated
+        sidecar dict; when all three are given every tensor is born with its
+        trained value (same transpose rule and shape checks as
+        ``load_from_numpy_dict``). None (default) keeps the fresh init.
+        """
         super().__init__()
         self.causal = causal
         self.n_heads, self.n_groups, self.head_dim = H, G, D // H
@@ -138,6 +157,10 @@ class _DrafterBlock(nn.Module):
         nn.init.kaiming_uniform_(self.mlp_gate, a=math.sqrt(5))
         nn.init.kaiming_uniform_(self.mlp_up, a=math.sqrt(5))
         nn.init.kaiming_uniform_(self.mlp_down, a=math.sqrt(5))
+        # Constructor injection: this block's sidecar slice lands at birth
+        # (same transpose rule + shape validation as load_from_numpy_dict).
+        if params is not None and meta is not None:
+            _load_into_binding(meta, params, self.params(prefix))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Standard pre-norm block forward with the configured mask.
@@ -231,15 +254,20 @@ def _load_into_binding(
     """Copy sidecar arrays into their owning tensors, transposing the keys
     ``expected_drafter_params`` flags as ``torch_transpose`` — the single
     load path every torch drafter shares, and the reason a NumPy-saved
-    sidecar lands bit-exact here."""
-    for key, shape, transpose in expected_drafter_params(meta):
+    sidecar lands bit-exact here.
+
+    Iterates the BINDING's own keys, so a partial binding (one block's
+    slice, the drafter's direct tensors) loads exactly what it owns —
+    construction-time injection and the full load share this path."""
+    expected = {key: (shape, transpose) for key, shape, transpose in expected_drafter_params(meta)}
+    for key, target in binding.items():
+        shape, transpose = expected[key]
         arr = params[key]
         loaded = torch.from_numpy(np.ascontiguousarray(arr)) if isinstance(arr, np.ndarray) else torch.as_tensor(arr)
         if tuple(loaded.shape) != shape:
             raise ValueError(f"drafter param {key!r} has shape {tuple(loaded.shape)}, expected {shape}")
         if transpose:
             loaded = loaded.T  # npz (in, out) → nn.Linear (out, in)
-        target = binding[key]
         loaded = loaded.to(device=target.device, dtype=target.dtype)
         if tuple(loaded.shape) != tuple(target.shape):
             raise ValueError(
@@ -280,13 +308,24 @@ class TorchMTPDrafter(nn.Module):
         torch.manual_seed(seed)  # deterministic init (same convention as TorchModel)
         self.norm = RMSNorm(D)
         self.in_proj = nn.Linear(2 * D, D, bias=False)
-        self.block = _DrafterBlock(D, H, G, meta.ff_dim, meta.rope_dim, causal=True)
+        self.block = _DrafterBlock(
+            D, H, G, meta.ff_dim, meta.rope_dim, causal=True, prefix="mtp.block", meta=meta, params=params
+        )
         self.out_norm = RMSNorm(D)
         self.reset()
-        # Constructor injection: a sidecar checkpoint's arrays arrive HERE,
-        # at birth — never by assignment after construction.
+        # Constructor injection: the drafter's own tensors are born with their
+        # sidecar values (the block injected its slice above) — nothing is
+        # patched after construction.
         if params is not None:
-            self.load_from_numpy_dict(params)
+            _load_into_binding(
+                meta,
+                params,
+                {
+                    "mtp.norm.weight": self.norm.weight,
+                    "mtp.in_proj.weight": self.in_proj.weight,
+                    "mtp.out_norm.weight": self.out_norm.weight,
+                },
+            )
 
     def reset(self) -> None:
         """Fresh sequence: empty the drafter's KV cache."""
@@ -409,12 +448,26 @@ class TorchDSparkDrafter(nn.Module):
         self.in_proj = nn.Linear(2 * D, D, bias=False)
         self.pos_emb = nn.Parameter(torch.empty(meta.block_size, D))
         nn.init.normal_(self.pos_emb, mean=0.0, std=0.02)
-        self.parallel = _DrafterBlock(D, H, G, meta.ff_dim, meta.rope_dim, causal=False)
-        self.seq = _DrafterBlock(D, H, G, meta.ff_dim, meta.rope_dim, causal=True)
+        self.parallel = _DrafterBlock(
+            D, H, G, meta.ff_dim, meta.rope_dim, causal=False, prefix="dspark.parallel", meta=meta, params=params
+        )
+        self.seq = _DrafterBlock(
+            D, H, G, meta.ff_dim, meta.rope_dim, causal=True, prefix="dspark.seq", meta=meta, params=params
+        )
         self.out_norm = RMSNorm(D)
-        # Constructor injection (see TorchMTPDrafter.__init__).
+        # Constructor injection (see TorchMTPDrafter.__init__): each block
+        # injected its own slice above; the drafter's own tensors land here.
         if params is not None:
-            self.load_from_numpy_dict(params)
+            _load_into_binding(
+                meta,
+                params,
+                {
+                    "dspark.norm.weight": self.norm.weight,
+                    "dspark.in_proj.weight": self.in_proj.weight,
+                    "dspark.pos_emb.weight": self.pos_emb,
+                    "dspark.out_norm.weight": self.out_norm.weight,
+                },
+            )
 
     def reset(self) -> None:
         """Stateless drafter — nothing to clear."""

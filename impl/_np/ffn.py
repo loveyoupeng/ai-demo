@@ -72,11 +72,28 @@ class SwiGLUFFN:
     x: (..., D) — flattened to (T, D) with T = B*S for the matrix products.
     """
 
-    def __init__(self, embed_dim: int, ff_dim: int, seed: int = 0) -> None:
+    def __init__(
+        self,
+        embed_dim: int,
+        ff_dim: int,
+        seed: int = 0,
+        gate_proj: np.ndarray | None = None,
+        up_proj: np.ndarray | None = None,
+        down_proj: np.ndarray | None = None,
+    ) -> None:
+        """Create the three (in, out) projections.
+
+        gate_proj/up_proj/down_proj: optional trained arrays injected **at
+        construction** (copied in place over the seed-initialized storage).
+        None (default) keeps the seed-initialized weights (training path).
+        """
         rng = np.random.default_rng(seed)
         self.gate_proj = xavier_uniform(rng, embed_dim, ff_dim)  # (D, FF)
         self.up_proj = xavier_uniform(rng, embed_dim, ff_dim)  # (D, FF)
         self.down_proj = xavier_uniform(rng, ff_dim, embed_dim)  # (FF, D)
+        for target, injected in ((self.gate_proj, gate_proj), (self.up_proj, up_proj), (self.down_proj, down_proj)):
+            if injected is not None:
+                target[...] = injected
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         """SwiGLU forward: gate⊙up then project down. x: (..., D) → out: (..., D).

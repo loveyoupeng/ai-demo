@@ -40,7 +40,9 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Mapping
 
+import numpy as np
 import torch
 
 from impl._cuda.attention import scaled_dot_product_attention as cuda_sdp_attention
@@ -48,6 +50,7 @@ from impl._cuda.ffn import swiglu_ffn
 from impl._cuda.layernorm import rmsnorm
 from impl._cuda.rope import apply_rope
 from shared.config import TransformerConfig
+from shared.constants import Attn, Keys, LayerNorm, Mlp
 from shared.result import Result
 
 logger = logging.getLogger(__name__)
@@ -78,6 +81,26 @@ def _init_zeros(shape: tuple[int, ...]) -> torch.Tensor:
     return torch.zeros(shape)
 
 
+def _copy_in_place(tensor: torch.Tensor, value: np.ndarray) -> None:
+    """Copy a checkpoint array over the storage ``tensor`` already owns.
+
+    ``tensor.data.copy_`` writes IN PLACE: the tensor keeps its identity,
+    its ``requires_grad`` flag and its leaf-ness, so a model born with
+    trained weights stays trainable and the caller's arrays are never
+    aliased. Every CUDA projection is stored in the checkpoint's ``(in, out)``
+    layout, so the copy never transposes.
+
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Destination — the storage the constructor created (or a view of it,
+        for one slice of the stacked MoE experts).
+    value : np.ndarray
+        Source array of the matching shape (cast to ``tensor.dtype``).
+    """
+    tensor.data.copy_(torch.from_numpy(np.asarray(value)).to(tensor.dtype))
+
+
 # ── CUDA block assembly ────────────────────────────────────────────────────────
 
 
@@ -106,10 +129,36 @@ class CuTransformerBlock:
     """
 
     # ------------------------------------------------------------------ init
-    def __init__(self, config: TransformerConfig, seed: int = 0) -> None:
+    def __init__(
+        self,
+        config: TransformerConfig,
+        seed: int = 0,
+        layer_index: int = 0,
+        params: Mapping[str, np.ndarray] | None = None,
+    ) -> None:
+        """Build the block's tensors, injecting this layer's trained weights.
+
+        layer_index/params: this layer's position in the stack and the flat
+        registry-keyed checkpoint (the shared ``Keys`` scheme). When params
+        is given, EVERY tensor is born with its trained array — the two
+        RMSNorm gains from ``Keys.ln(layer_index, ...)``, the four attention
+        projections from ``Keys.attn(...)``, and the FFN/MoE weights from
+        ``Keys.ffn(...)`` / ``Keys.moe_gate(...)`` / ``Keys.moe_expert(...)``
+        / ``Keys.moe_shared_expert(...)`` — each copied in place over the
+        seed-initialized storage (``requires_grad`` survives; see
+        ``_copy_in_place``). None (default) is the training path: the gammas
+        stay at ones (identity) and every weight at its seeded init.
+
+        ``seed`` is the per-layer init seed (unchanged); ``layer_index``
+        only selects which checkpoint slice this block owns.
+        """
         self.config = config
         D, H, G = config.embed_dim, config.n_heads, config.kv_heads
         hd, FF, E = config.head_dim, config.expert_dim, config.n_experts
+        i = layer_index
+        # Short alias; None → the training path. (``p`` is taken by the
+        # per-tensor ``requires_grad_`` loops below.)
+        ckpt = params
         self.n_heads = H
         self.n_groups = G
         self.n_experts = E
@@ -165,6 +214,35 @@ class CuTransformerBlock:
             self.down_proj = _init_weight(FF, D, seed=seed + 11)
             for p in (self.gate_proj, self.up_proj, self.down_proj):
                 p.requires_grad_(True)
+
+        # ── Trained-slice injection (inference path) ───────────────────
+        # One key vocabulary (shared.constants.Keys) end to end: the same
+        # keys the model's save/load traverse. Layouts agree (CUDA stores
+        # every projection as (in, out)), so each copy is a direct write
+        # over storage this constructor just created.
+        if ckpt is not None:
+            _copy_in_place(self.input_layernorm_gamma, ckpt[Keys.ln(i, LayerNorm.INPUT)])
+            _copy_in_place(self.post_attention_layernorm_gamma, ckpt[Keys.ln(i, LayerNorm.POST_ATTENTION)])
+            _copy_in_place(self.q_proj, ckpt[Keys.attn(i, Attn.Q_PROJ)])
+            _copy_in_place(self.k_proj, ckpt[Keys.attn(i, Attn.K_PROJ)])
+            _copy_in_place(self.v_proj, ckpt[Keys.attn(i, Attn.V_PROJ)])
+            _copy_in_place(self.o_proj, ckpt[Keys.attn(i, Attn.O_PROJ)])
+            if config.has_moe():
+                _copy_in_place(self.router, ckpt[Keys.moe_gate(i)])
+                for e in range(E):
+                    # Views of the stacked (E, ·, ·) storages — the copy
+                    # lands in the base tensor that holds requires_grad.
+                    _copy_in_place(self.expert_gate_proj[e], ckpt[Keys.moe_expert(i, e, Mlp.GATE_PROJ)])
+                    _copy_in_place(self.expert_up_proj[e], ckpt[Keys.moe_expert(i, e, Mlp.UP_PROJ)])
+                    _copy_in_place(self.expert_down_proj[e], ckpt[Keys.moe_expert(i, e, Mlp.DOWN_PROJ)])
+                for s in range(config.n_shared_experts):
+                    _copy_in_place(self.shared_gate_proj[s], ckpt[Keys.moe_shared_expert(i, s, Mlp.GATE_PROJ)])
+                    _copy_in_place(self.shared_up_proj[s], ckpt[Keys.moe_shared_expert(i, s, Mlp.UP_PROJ)])
+                    _copy_in_place(self.shared_down_proj[s], ckpt[Keys.moe_shared_expert(i, s, Mlp.DOWN_PROJ)])
+            else:
+                _copy_in_place(self.gate_proj, ckpt[Keys.ffn(i, Mlp.GATE_PROJ)])
+                _copy_in_place(self.up_proj, ckpt[Keys.ffn(i, Mlp.UP_PROJ)])
+                _copy_in_place(self.down_proj, ckpt[Keys.ffn(i, Mlp.DOWN_PROJ)])
 
     # ---------------------------------------------------------------- forward
     def forward(self, x: torch.Tensor, position: int = 0) -> torch.Tensor:

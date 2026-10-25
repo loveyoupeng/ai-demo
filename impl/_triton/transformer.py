@@ -12,9 +12,13 @@ triton track reuses the torch building blocks it does not kernelize
 (a deliberate seam, documented; see docs).
 """
 
+from __future__ import annotations
+
 import logging
 import math
+from collections.abc import Mapping
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -22,9 +26,47 @@ from impl._torch.layers import RoPE
 from impl._triton.attn import scaled_dot_product_attention
 from impl._triton.ffn import swiglu_ffn
 from shared.config import TransformerConfig
+from shared.constants import Attn, Keys, LayerNorm, Mlp
 from shared.result import Result  # shared-seam: torch building block reused by triton
 
 logger = logging.getLogger(__name__)
+
+
+def copy_in_place(target: torch.Tensor, value: np.ndarray | None, *, transpose: bool = False) -> None:
+    """Copy one checkpoint array into ``target``'s storage in place.
+
+    The triton track's constructor-injection primitive: a model built as
+    ``TritonModel(config, params)`` is *born* with its trained weights, so
+    every operator owns the storage it was constructed with and there is no
+    second lifecycle (no post-hoc ``load_from_numpy_dict`` step to forget).
+
+    Parameters
+    ----------
+    target : torch.Tensor
+        The live parameter tensor (or ``nn.Linear`` weight) the constructor
+        created; its storage is written through ``target.data``.
+    value : np.ndarray | None
+        The checkpoint array for this key (``shared.constants.Keys`` scheme,
+        ``(in, out)`` layout). None is the training path: ``target`` keeps
+        its seed initialization (e.g. RMSNorm gains stay ones).
+    transpose : bool, keyword-only
+        True when ``target`` holds the transposed ``(out, in)`` layout of
+        ``nn.Linear`` (attention projections, MoE router, lm_head).
+
+    Notes
+    -----
+    Nothing is rebound and no caller array is aliased — the usual checkpoint
+    layout is (in, out) whereas ``nn.Linear`` is (out, in), so those weights
+    are transposed (``.T``) on the way in, exactly like ``save_as_numpy`` /
+    ``load_from_numpy_dict`` do through the registry's ``torch_transpose``.
+    """
+    if value is None:
+        return
+    array = np.ascontiguousarray(value.T if transpose else value)
+    # PROD: copy_ casts to the target dtype, so a float64 checkpoint loads
+    # into the float32 model without a separate conversion pass.
+    with torch.no_grad():
+        target.data.copy_(torch.from_numpy(array))
 
 
 class TritonMultiHeadAttention(nn.Module):
@@ -45,7 +87,22 @@ class TritonMultiHeadAttention(nn.Module):
     in the same memory layout as a naive implementation (tiled).
     """
 
-    def __init__(self, config: TransformerConfig) -> None:
+    def __init__(
+        self,
+        config: TransformerConfig,
+        q_proj: np.ndarray | None = None,
+        k_proj: np.ndarray | None = None,
+        v_proj: np.ndarray | None = None,
+        o_proj: np.ndarray | None = None,
+    ) -> None:
+        """Build the four no-bias projections, injecting this layer's trained weights.
+
+        q_proj/k_proj/v_proj/o_proj: optional checkpoint arrays (the
+        ``(in, out)`` layout of ``shared.constants.Keys``), copied IN PLACE
+        over the ``nn.Linear`` storage the constructor creates — the
+        ``(out, in)`` layout, hence the transpose. None (default) keeps the
+        seeded init (the training path).
+        """
         super().__init__()
         D, H, G = config.embed_dim, config.n_heads, config.kv_heads
         hd = config.head_dim
@@ -59,6 +116,10 @@ class TritonMultiHeadAttention(nn.Module):
         self.k_proj = nn.Linear(D, G * hd, bias=False)
         self.v_proj = nn.Linear(D, G * hd, bias=False)
         self.o_proj = nn.Linear(H * hd, D, bias=False)
+        copy_in_place(self.q_proj.weight, q_proj, transpose=True)
+        copy_in_place(self.k_proj.weight, k_proj, transpose=True)
+        copy_in_place(self.v_proj.weight, v_proj, transpose=True)
+        copy_in_place(self.o_proj.weight, o_proj, transpose=True)
         self.rope = RoPE()
 
     def _move_to_device(self, x: torch.Tensor) -> None:
@@ -265,12 +326,29 @@ class TritonSwiGLUFFN(nn.Module):
 
     __slots__ = ("gate_proj", "up_proj", "down_proj")
 
-    def __init__(self, embed_dim: int, ff_dim: int) -> None:
+    def __init__(
+        self,
+        embed_dim: int,
+        ff_dim: int,
+        gate_proj: np.ndarray | None = None,
+        up_proj: np.ndarray | None = None,
+        down_proj: np.ndarray | None = None,
+    ) -> None:
+        """Create the three (in, out) projection weights.
+
+        gate_proj/up_proj/down_proj: optional checkpoint arrays injected AT
+        CONSTRUCTION (copied in place over the seeded storage; the ``(in,
+        out)`` layout already matches the parameter layout). None (default)
+        keeps the seeded init — the training path.
+        """
         super().__init__()
         self.gate_proj = nn.Parameter(torch.empty(embed_dim, ff_dim))
         self.up_proj = nn.Parameter(torch.empty(embed_dim, ff_dim))
         self.down_proj = nn.Parameter(torch.empty(ff_dim, embed_dim))
         self.reset_parameters()
+        copy_in_place(self.gate_proj, gate_proj)
+        copy_in_place(self.up_proj, up_proj)
+        copy_in_place(self.down_proj, down_proj)
 
     def reset_parameters(self) -> None:
         """Initialize all weights with Kaiming uniform."""
@@ -302,12 +380,30 @@ class TritonExpert(nn.Module):
 
     __slots__ = ("gate_proj", "up_proj", "down_proj")
 
-    def __init__(self, embed_dim: int, ff_dim: int) -> None:
+    def __init__(
+        self,
+        embed_dim: int,
+        ff_dim: int,
+        gate_proj: np.ndarray | None = None,
+        up_proj: np.ndarray | None = None,
+        down_proj: np.ndarray | None = None,
+    ) -> None:
+        """Create the expert's three (in, out) projection weights.
+
+        gate_proj/up_proj/down_proj: optional checkpoint arrays injected AT
+        CONSTRUCTION (copied in place; the ``(in, out)`` layout already
+        matches). None (default) keeps the seeded init — the training path;
+        the MoE passes this expert's own ``Keys.moe_expert`` /
+        ``Keys.moe_shared_expert`` slice.
+        """
         super().__init__()
         self.gate_proj = nn.Parameter(torch.empty(embed_dim, ff_dim))
         self.up_proj = nn.Parameter(torch.empty(embed_dim, ff_dim))
         self.down_proj = nn.Parameter(torch.empty(ff_dim, embed_dim))
         self.reset_parameters()
+        copy_in_place(self.gate_proj, gate_proj)
+        copy_in_place(self.up_proj, up_proj)
+        copy_in_place(self.down_proj, down_proj)
 
     def reset_parameters(self) -> None:
         """Initialize all weights with Kaiming uniform."""
@@ -328,18 +424,59 @@ class TritonMixtureOfExperts(nn.Module):
     Router: gate = nn.Linear(D, E, bias=False) (Mixtral convention).
     """
 
-    def __init__(self, embed_dim: int, n_experts: int, ff_dim: int, top_k: int, n_shared_experts: int = 0) -> None:
+    def __init__(
+        self,
+        embed_dim: int,
+        n_experts: int,
+        ff_dim: int,
+        top_k: int,
+        n_shared_experts: int = 0,
+        layer_index: int | None = None,
+        params: Mapping[str, np.ndarray] | None = None,
+    ) -> None:
+        """Create the router + expert FFNs, injecting this layer's trained weights.
+
+        layer_index/params: the layer's position in the stack and the flat
+        registry-keyed checkpoint. When both are given, every operator is
+        born with its trained array — the router from ``Keys.moe_gate(i)``
+        and each expert's three projections from ``Keys.moe_expert(i, j,
+        proj)`` / ``Keys.moe_shared_expert(i, s, proj)`` — copied in place
+        over the storage created here. None (default) keeps the seeded
+        init — the training path.
+        """
         super().__init__()
         self.n_experts = n_experts
         self.top_k = top_k
         self.n_shared_experts = n_shared_experts
+
+        def expert_slice(idx: int, *, shared: bool) -> dict[str, np.ndarray]:
+            """This expert's trained projections — {} on the training path."""
+            if params is None or layer_index is None:
+                return {}
+            key = Keys.moe_shared_expert if shared else Keys.moe_expert
+            return {
+                "gate_proj": params[key(layer_index, idx, Mlp.GATE_PROJ)],
+                "up_proj": params[key(layer_index, idx, Mlp.UP_PROJ)],
+                "down_proj": params[key(layer_index, idx, Mlp.DOWN_PROJ)],
+            }
+
         self.gate = nn.Linear(embed_dim, n_experts, bias=False)
+        # The router is nn.Linear (E, D) while the checkpoint keeps (D, E).
+        copy_in_place(
+            self.gate.weight,
+            None if params is None or layer_index is None else params[Keys.moe_gate(layer_index)],
+            transpose=True,
+        )
         # Typed view for pyright; nn.ModuleList registers parameters for torch
-        self.expert_list: list[TritonExpert] = [TritonExpert(embed_dim, ff_dim) for _ in range(n_experts)]
+        self.expert_list: list[TritonExpert] = [
+            TritonExpert(embed_dim, ff_dim, **expert_slice(j, shared=False)) for j in range(n_experts)
+        ]
         self.experts = nn.ModuleList(self.expert_list)
         # Shared experts (ADR 0002): ungated, always active — same Triton FFN
         # kernels, just not selected by the router.
-        self.shared_expert_list: list[TritonExpert] = [TritonExpert(embed_dim, ff_dim) for _ in range(n_shared_experts)]
+        self.shared_expert_list: list[TritonExpert] = [
+            TritonExpert(embed_dim, ff_dim, **expert_slice(s, shared=True)) for s in range(n_shared_experts)
+        ]
         self.shared_experts = nn.ModuleList(self.shared_expert_list)
 
     def reset_parameters(self) -> None:
@@ -406,15 +543,42 @@ class TritonTransformerBlock(nn.Module):
     ``config.has_moe()``.
     """
 
-    def __init__(self, config: TransformerConfig) -> None:
+    def __init__(
+        self,
+        config: TransformerConfig,
+        layer_index: int = 0,
+        params: Mapping[str, np.ndarray] | None = None,
+    ) -> None:
+        """Build the block's sublayers, injecting this layer's trained weights.
+
+        layer_index/params: the layer's position in the stack and the flat
+        registry-keyed checkpoint. When both are given, EVERY sublayer is
+        born with its trained array — the two RMSNorm gains from
+        ``Keys.ln(layer_index, ...)``, the four attention projections from
+        ``Keys.attn(...)``, the FFN/MoE weights from ``Keys.ffn(...)`` /
+        ``Keys.moe_*`` — each copied in place over the storage created
+        here. None (default) is the training path: gammas start at ones
+        (identity) and the projections at their seeded init.
+        """
         super().__init__()
         self.config = config
         D = config.embed_dim
+        i = layer_index
+        p = params  # short alias; None → the training path (all keys below unused)
 
         # nn.RMSNorm exposes its gain as ``weight`` (D,), init ones
         self.input_layernorm = nn.RMSNorm(D, eps=config.norm_eps)
         self.post_attention_layernorm = nn.RMSNorm(D, eps=config.norm_eps)
-        self.self_attn = TritonMultiHeadAttention(config)
+        if p is not None:
+            copy_in_place(self.input_layernorm.weight, p[Keys.ln(i, LayerNorm.INPUT)])
+            copy_in_place(self.post_attention_layernorm.weight, p[Keys.ln(i, LayerNorm.POST_ATTENTION)])
+        self.self_attn = TritonMultiHeadAttention(
+            config,
+            q_proj=None if p is None else p[Keys.attn(i, Attn.Q_PROJ)],
+            k_proj=None if p is None else p[Keys.attn(i, Attn.K_PROJ)],
+            v_proj=None if p is None else p[Keys.attn(i, Attn.V_PROJ)],
+            o_proj=None if p is None else p[Keys.attn(i, Attn.O_PROJ)],
+        )
         if config.has_moe():
             self.mlp: TritonSwiGLUFFN | TritonMixtureOfExperts = TritonMixtureOfExperts(
                 embed_dim=D,
@@ -422,9 +586,17 @@ class TritonTransformerBlock(nn.Module):
                 ff_dim=config.expert_dim,
                 top_k=config.top_k,
                 n_shared_experts=config.n_shared_experts,
+                layer_index=i if p is not None else None,
+                params=p,
             )
         else:
-            self.mlp = TritonSwiGLUFFN(embed_dim=D, ff_dim=config.expert_dim)
+            self.mlp = TritonSwiGLUFFN(
+                embed_dim=D,
+                ff_dim=config.expert_dim,
+                gate_proj=None if p is None else p[Keys.ffn(i, Mlp.GATE_PROJ)],
+                up_proj=None if p is None else p[Keys.ffn(i, Mlp.UP_PROJ)],
+                down_proj=None if p is None else p[Keys.ffn(i, Mlp.DOWN_PROJ)],
+            )
 
     def forward(self, x: torch.Tensor, position: int = 0) -> torch.Tensor:
         """Block forward. x: (B, S, D) → out: (B, S, D)."""
@@ -512,11 +684,21 @@ class TritonDecoderStack(nn.Module):
     out = block_{n-1}( ... block_1(block_0(x)) ... ), x: (B, S, D) → (B, S, D).
     """
 
-    def __init__(self, config: TransformerConfig) -> None:
+    def __init__(self, config: TransformerConfig, params: Mapping[str, np.ndarray] | None = None) -> None:
+        """Build ``n_layers`` blocks, injecting each layer's slice of ``params``.
+
+        params: the flat registry-keyed checkpoint (the ``shared.constants.
+        Keys`` scheme), already validated by the model constructor. Every
+        block is born with its trained weights (``Keys.ln/attn/ffn/moe_*``
+        sliced by its ``layer_index``). None (default) keeps the seeded
+        init — the training path.
+        """
         super().__init__()
         self.config = config
         # Typed view for pyright; nn.ModuleList registers parameters for torch
-        self.blocks: list[TritonTransformerBlock] = [TritonTransformerBlock(config) for _ in range(config.n_layers)]
+        self.blocks: list[TritonTransformerBlock] = [
+            TritonTransformerBlock(config, layer_index=i, params=params) for i in range(config.n_layers)
+        ]
         self.layers = nn.ModuleList(self.blocks)
 
     def reset_parameters(self) -> None:

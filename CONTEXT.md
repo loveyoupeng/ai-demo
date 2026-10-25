@@ -367,6 +367,16 @@ letters. Where each value comes from:
   no post-construction assignment step exists to forget or to misread as
   "initialization".
 
+- **Injection chain**: `params` travels the same path the forward pass does
+  — `Model(config, params)` validates the registry, then `DecoderStack`
+  gives block *i* its `(layer_index, params)` slice, and the block hands
+  each operator its own array (`RMSNorm(gamma=…)`,
+  `MultiHeadAttention(q_proj=…, k_proj=…, v_proj=…, o_proj=…)`,
+  `SwiGLUFFN(gate_proj=…, …)`, keyed by the same `shared.constants.Keys`
+  vocabulary that save/load and the block's gradient dict use). Reading any
+  constructor therefore shows exactly where trained data comes from;
+  `params=None` is the seed-initialized training start.
+
 ## Tracks
 
 - **NumPy track** (`impl/_np/`): the math reference. Hand-rolled

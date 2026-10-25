@@ -46,10 +46,19 @@ class Embedding:
     the matrix product d(one_hot) ^T @ dout, where one_hot is (B*S, V).
     """
 
-    def __init__(self, vocab_size: int, embed_dim: int, seed: int = 0) -> None:
+    def __init__(self, vocab_size: int, embed_dim: int, seed: int = 0, weight: np.ndarray | None = None) -> None:
+        """Create the (V, D) table.
+
+        weight: optional trained table injected **at construction** (copied
+        in place over the seed-initialized storage — storage identity never
+        changes, matching ``NumPyModel``'s in-place load convention).
+        None (default) keeps the seed-initialized table (the training path).
+        """
         rng = np.random.default_rng(seed)
         # (V, D) — one learned vector per token
         self.weight: np.ndarray = rng.normal(0.0, 1.0 / np.sqrt(embed_dim), (vocab_size, embed_dim)).astype(np.float32)
+        if weight is not None:
+            self.weight[...] = weight
 
     def forward(self, input_ids: np.ndarray) -> np.ndarray:
         """Look up the embedding vector for every token.

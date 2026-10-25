@@ -15,6 +15,8 @@ input in a scale that dot-products can reason about.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 
 from impl._np.attention import MultiHeadAttention
@@ -22,6 +24,7 @@ from impl._np.ffn import SwiGLUFFN
 from impl._np.layernorm import RMSNorm
 from impl._np.moe import MixtureOfExperts
 from shared.config import TransformerConfig
+from shared.constants import Attn, Keys, LayerNorm, Mlp
 
 
 class TransformerBlock:
@@ -61,19 +64,50 @@ class TransformerBlock:
     the model can map them onto the shared Keys scheme in one place.
     """
 
-    def __init__(self, config: TransformerConfig) -> None:
+    def __init__(
+        self,
+        config: TransformerConfig,
+        layer_index: int = 0,
+        params: Mapping[str, np.ndarray] | None = None,
+    ) -> None:
+        """Build the block's sublayers, injecting this layer's trained weights.
+
+        layer_index/params: the layer's position in the stack and the flat
+        registry-keyed checkpoint. When both are given, EVERY sublayer is
+        born with its trained array — the two RMSNorm gains from
+        ``Keys.ln(layer_index, ...)``, the four attention projections from
+        ``Keys.attn(...)``, the FFN/MoE weights from ``Keys.ffn(...)`` /
+        ``Keys.moe_*`` — each copied in place over the seed-initialized
+        storage. None (default) is the training path: gammas start at ones
+        (identity) and the projections at their seeded init.
+
+        The mapping is the same ``shared.constants.Keys`` vocabulary the
+        block's ``backward`` gradient dict and the model's save/load use,
+        so there is one key language end to end.
+        """
         self.config = config
         D, H, G = config.embed_dim, config.n_heads, config.kv_heads
         seed = config.seed
+        i = layer_index
+        p = params  # short alias; None → the training path (all keys below unused)
 
-        # Init invariant: both RMSNorm gammas start at ones (identity) — this
-        # is the TRAINING start point. Trained gammas never arrive by
-        # assignment after construction: the owning model injects the whole
-        # checkpoint at birth (NumPyModel(config, params) / from_checkpoint,
-        # same in all four tracks), which copies in place over these arrays.
-        self.input_layernorm = RMSNorm(D, eps=config.norm_eps)
-        self.post_attention_layernorm = RMSNorm(D, eps=config.norm_eps)
-        self.self_attn = MultiHeadAttention(embed_dim=D, n_heads=H, n_groups=G, rope_dim=config.rope_dim, seed=seed + 1)
+        self.input_layernorm = RMSNorm(
+            D, eps=config.norm_eps, gamma=None if p is None else p[Keys.ln(i, LayerNorm.INPUT)]
+        )
+        self.post_attention_layernorm = RMSNorm(
+            D, eps=config.norm_eps, gamma=None if p is None else p[Keys.ln(i, LayerNorm.POST_ATTENTION)]
+        )
+        self.self_attn = MultiHeadAttention(
+            embed_dim=D,
+            n_heads=H,
+            n_groups=G,
+            rope_dim=config.rope_dim,
+            seed=seed + 1,
+            q_proj=None if p is None else p[Keys.attn(i, Attn.Q_PROJ)],
+            k_proj=None if p is None else p[Keys.attn(i, Attn.K_PROJ)],
+            v_proj=None if p is None else p[Keys.attn(i, Attn.V_PROJ)],
+            o_proj=None if p is None else p[Keys.attn(i, Attn.O_PROJ)],
+        )
         if config.has_moe():
             self.mlp: SwiGLUFFN | MixtureOfExperts = MixtureOfExperts(
                 embed_dim=D,
@@ -82,9 +116,18 @@ class TransformerBlock:
                 top_k=config.top_k,
                 seed=seed + 2,
                 n_shared_experts=config.n_shared_experts,
+                layer_index=i if p is not None else None,
+                params=p,
             )
         else:
-            self.mlp = SwiGLUFFN(embed_dim=D, ff_dim=config.expert_dim, seed=seed + 2)
+            self.mlp = SwiGLUFFN(
+                embed_dim=D,
+                ff_dim=config.expert_dim,
+                seed=seed + 2,
+                gate_proj=None if p is None else p[Keys.ffn(i, Mlp.GATE_PROJ)],
+                up_proj=None if p is None else p[Keys.ffn(i, Mlp.UP_PROJ)],
+                down_proj=None if p is None else p[Keys.ffn(i, Mlp.DOWN_PROJ)],
+            )
 
     def forward(self, x: np.ndarray, position: int = 0, record: dict | None = None) -> np.ndarray:
         """Block forward: LN1 → attention → +residual → LN2 → FFN/MoE → +residual.

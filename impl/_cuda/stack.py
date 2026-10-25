@@ -18,6 +18,9 @@ https://arxiv.org/abs/1706.03762
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
+import numpy as np
 import torch
 
 from impl._cuda.block import CuTransformerBlock
@@ -71,15 +74,26 @@ class CuDecoderStack:
 
     """
 
-    def __init__(self, config: TransformerConfig) -> None:
+    def __init__(self, config: TransformerConfig, params: Mapping[str, np.ndarray] | None = None) -> None:
+        """Build one block per layer, each born with ITS OWN layer slice.
+
+        params: flat registry-keyed checkpoint; block i reads the
+        ``Keys.ln(i, ...)`` / ``Keys.attn(i, ...)`` / ``Keys.ffn(i, ...)`` /
+        ``Keys.moe_*`` slice (see ``CuTransformerBlock.__init__``). None
+        (default) → every block is seed-initialized (the training path).
+        """
         self.config = config
         self.n_layers = config.n_layers
         self.embed_dim = config.embed_dim
         self.head_dim = config.head_dim
 
         # Create transformer blocks in sequence (distinct seed per layer,
-        # matching the NumPy/PyTorch offset scheme)
-        self.blocks = [CuTransformerBlock(config, seed=100 + layer_idx) for layer_idx in range(config.n_layers)]
+        # matching the NumPy/PyTorch offset scheme); ``layer_index`` tells
+        # block i which checkpoint slice to read when params is given.
+        self.blocks = [
+            CuTransformerBlock(config, seed=100 + layer_idx, layer_index=layer_idx, params=params)
+            for layer_idx in range(config.n_layers)
+        ]
 
     def forward(
         self,

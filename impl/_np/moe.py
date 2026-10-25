@@ -14,10 +14,13 @@ conjugate the verb") without paying for all of them on every token.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 
 from impl._np.ffn import SwiGLUFFN
 from impl._np.init import xavier_uniform
+from shared.constants import Keys, Mlp
 from shared.result import Result
 
 
@@ -76,20 +79,56 @@ class MixtureOfExperts:
     """
 
     def __init__(
-        self, embed_dim: int, n_experts: int, ff_dim: int, top_k: int, seed: int = 0, n_shared_experts: int = 0
+        self,
+        embed_dim: int,
+        n_experts: int,
+        ff_dim: int,
+        top_k: int,
+        seed: int = 0,
+        n_shared_experts: int = 0,
+        layer_index: int | None = None,
+        params: Mapping[str, np.ndarray] | None = None,
     ) -> None:
+        """Create the router + expert FFNs.
+
+        layer_index/params: optional layer index and the flat registry-keyed
+        checkpoint; when both are given, every operator is born with its
+        trained array (each expert's three projections read from
+        ``Keys.moe_expert(layer_index, j, proj)``, the shared experts from
+        ``Keys.moe_shared_expert(...)``). None (default) keeps the
+        seed-initialized weights (the training path).
+        """
         self.embed_dim = embed_dim
         self.n_experts = n_experts
         self.top_k = top_k
         self.n_shared_experts = n_shared_experts
         rng = np.random.default_rng(seed)
+
+        def _expert_params(idx: int, *, shared: bool) -> dict[str, np.ndarray]:
+            """This expert's trained projections — {} on the training path."""
+            if params is None or layer_index is None:
+                return {}
+            key = Keys.moe_shared_expert if shared else Keys.moe_expert
+            return {
+                "gate_proj": params[key(layer_index, idx, Mlp.GATE_PROJ)],
+                "up_proj": params[key(layer_index, idx, Mlp.UP_PROJ)],
+                "down_proj": params[key(layer_index, idx, Mlp.DOWN_PROJ)],
+            }
+
         # Router: (D, E) — no bias (Mixtral convention)
         self.gate = xavier_uniform(rng, embed_dim, n_experts)
+        if params is not None and layer_index is not None:
+            self.gate[...] = params[Keys.moe_gate(layer_index)]
         # Experts: one SwiGLU FFN each, distinct seeds per expert
-        self.experts = [SwiGLUFFN(embed_dim, ff_dim, seed=seed + 1 + j) for j in range(n_experts)]
+        self.experts = [
+            SwiGLUFFN(embed_dim, ff_dim, seed=seed + 1 + j, **_expert_params(j, shared=False)) for j in range(n_experts)
+        ]
         # Shared experts (ADR 0002): always active, ungated — every token gets
         # their output added to the routed sum (DeepSeek-V2/V3 style).
-        self.shared_experts = [SwiGLUFFN(embed_dim, ff_dim, seed=seed + 50 + s) for s in range(n_shared_experts)]
+        self.shared_experts = [
+            SwiGLUFFN(embed_dim, ff_dim, seed=seed + 50 + s, **_expert_params(s, shared=True))
+            for s in range(n_shared_experts)
+        ]
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         """MoE forward: router → top-k mask → renormalize → weighted expert sum

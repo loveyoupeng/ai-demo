@@ -64,35 +64,48 @@ class NumPyModel:
         model derives head_dim, K/V group width, and FFN/MoE width from it.
 
         params: optional checkpoint arrays (the shared Keys scheme)
-        **injected at construction** — validated against the registry and
-        copied in place, so the model is born with trained weights (the
-        inference path; see ``from_checkpoint``). When None (default) the
-        arrays keep their seed-initialized random values (the training
-        path). There is no third lifecycle: weights are either injected
-        here or trained in place.
+        **injected at construction** — validated against the registry, then
+        threaded DOWN the chain (embedding → stack → block → RMSNorm /
+        attention / FFN / MoE), so every operator is born with its trained
+        array (the inference path; see ``from_checkpoint``). When None
+        (default) every operator keeps its seed-initialized values (the
+        training path). There is no third lifecycle: weights are either
+        injected here or trained in place.
         """
         self.config = config
         self.vocab_size = config.vocab_size
         self.embed_dim = config.embed_dim
         seed = config.seed
 
-        # Embedding table: (V, D)
-        self.embedding = Embedding(vocab_size=config.vocab_size, embed_dim=config.embed_dim, seed=seed)
+        if params is not None:
+            # Fail fast on a stale/mismatched checkpoint BEFORE building, so a
+            # bad slice can never silently leave an operator at its defaults.
+            ParameterRegistry(config).validate(params)
+        p = params
 
-        # Decoder stack (n_layers TransformerBlocks)
-        self.stack = DecoderStack(config)
+        # Embedding table: (V, D)
+        self.embedding = Embedding(
+            vocab_size=config.vocab_size,
+            embed_dim=config.embed_dim,
+            seed=seed,
+            weight=None if p is None else p[Keys.embed()],
+        )
+
+        # Decoder stack (n_layers TransformerBlocks) — each block gets its slice
+        self.stack = DecoderStack(config, p)
 
         # Final RMSNorm gamma: (D,)
-        self.final_norm = RMSNorm(config.embed_dim, eps=config.norm_eps)
+        self.final_norm = RMSNorm(
+            config.embed_dim, eps=config.norm_eps, gamma=None if p is None else p[Keys.final_norm()]
+        )
 
         # Language-model head: linear D → V (no bias, Llama convention)
         rng = np.random.default_rng(seed + 300)
         self.lm_head_weight: np.ndarray = rng.normal(
             0.0, 1.0 / np.sqrt(config.embed_dim), (config.embed_dim, config.vocab_size)
         ).astype(np.float32)
-
-        if params is not None:
-            self.load_from_numpy_dict(params)
+        if p is not None:
+            self.lm_head_weight[...] = p[Keys.lm_head()]
 
     @classmethod
     def from_checkpoint(cls, checkpoint_dir: str | Path) -> NumPyModel:

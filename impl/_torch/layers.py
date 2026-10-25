@@ -27,6 +27,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -40,6 +41,26 @@ from shared.result import Result
 logger = logging.getLogger(__name__)
 
 
+def _copy_checkpoint(target: torch.Tensor, value: np.ndarray, *, transpose: bool = False) -> None:
+    """Copy a checkpoint array into ``target`` in place (registry layout rule).
+
+    ``value`` is the checkpoint-format array: linear weights are ``(in, out)``
+    while ``nn.Linear`` stores ``(out, in)``, so ``transpose`` mirrors the
+    registry's ``torch_transpose`` flag — exactly the rule
+    ``load_from_numpy_dict`` applies. Raw ``nn.Parameter`` weights (the
+    embedding table, the RMSNorm gain, the SwiGLU projections) already share
+    the checkpoint layout and copy straight through.
+
+    The copy is *in place* (``target.data.copy_``) and casts to ``target``'s
+    dtype, so a checkpoint array can never rebind the storage the constructor
+    created.
+    """
+    loaded = torch.from_numpy(np.asarray(value))
+    if transpose:
+        loaded = loaded.T  # checkpoint (in, out) → nn.Linear (out, in)
+    target.data.copy_(loaded.contiguous().to(target.dtype))
+
+
 class Embedding(nn.Module):
     """Token embedding: maps token IDs to dense vectors.
 
@@ -48,11 +69,19 @@ class Embedding(nn.Module):
 
     __slots__ = ("weight",)
 
-    def __init__(self, vocab_size: int, embed_dim: int) -> None:
+    def __init__(self, vocab_size: int, embed_dim: int, weight: np.ndarray | None = None) -> None:
+        """Create the (V, D) table.
+
+        weight: optional trained table injected **at construction** (copied
+        in place over the seed-initialized storage). None (default) keeps the
+        seed-initialized table (the training path).
+        """
         super().__init__()
         # (V, D) — one learned vector per token
         self.weight = nn.Parameter(torch.empty(vocab_size, embed_dim))
         self.reset_parameters()
+        if weight is not None:
+            _copy_checkpoint(self.weight, weight)
 
     def reset_parameters(self) -> None:
         """Initialize weight using Kaiming uniform."""
@@ -80,11 +109,19 @@ class RMSNorm(nn.Module):
 
     __slots__ = ("weight", "eps")
 
-    def __init__(self, embed_dim: int, eps: float = 1e-6) -> None:
+    def __init__(self, embed_dim: int, eps: float = 1e-6, weight: np.ndarray | None = None) -> None:
+        """Create the (D,) gain.
+
+        weight: optional trained gain injected **at construction** (copied in
+        place over the identity-initialized storage). None (default) keeps the
+        identity init (the training path).
+        """
         super().__init__()
         self.eps = eps
         # (D,) — learned per-dimension gain, identity at init
         self.weight = nn.Parameter(torch.ones(embed_dim))
+        if weight is not None:
+            _copy_checkpoint(self.weight, weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply RMSNorm. x: (..., D) → out: (..., D)."""
@@ -193,7 +230,18 @@ class MultiHeadAttention(nn.Module):
         n_heads: int,
         n_groups: int,
         rope_dim: int,
+        q_proj: np.ndarray | None = None,
+        k_proj: np.ndarray | None = None,
+        v_proj: np.ndarray | None = None,
+        o_proj: np.ndarray | None = None,
     ) -> None:
+        """Create the four projections.
+
+        q_proj/k_proj/v_proj/o_proj: optional trained ``(in, out)`` arrays
+        injected **at construction** (transposed to the ``nn.Linear``
+        ``(out, in)`` layout and copied in place over the seed-initialized
+        storage). None (default) keeps the seeded weights (the training path).
+        """
         super().__init__()
         self.embed_dim = embed_dim
         self.n_heads = n_heads
@@ -209,6 +257,15 @@ class MultiHeadAttention(nn.Module):
         self.v_proj = nn.Linear(embed_dim, n_groups * hd, bias=False)
         # o: H*hd → D (mixes the heads back into one vector)
         self.o_proj = nn.Linear(n_heads * hd, embed_dim, bias=False)
+
+        for module, injected in (
+            (self.q_proj, q_proj),
+            (self.k_proj, k_proj),
+            (self.v_proj, v_proj),
+            (self.o_proj, o_proj),
+        ):
+            if injected is not None:
+                _copy_checkpoint(module.weight, injected, transpose=True)
 
         self.rope = RoPE()
 
@@ -389,12 +446,34 @@ class SwiGLUFFN(nn.Module):
 
     __slots__ = ("gate_proj", "up_proj", "down_proj")
 
-    def __init__(self, embed_dim: int, ff_dim: int) -> None:
+    def __init__(
+        self,
+        embed_dim: int,
+        ff_dim: int,
+        gate_proj: np.ndarray | None = None,
+        up_proj: np.ndarray | None = None,
+        down_proj: np.ndarray | None = None,
+    ) -> None:
+        """Create the three ``(in, out)`` projections.
+
+        gate_proj/up_proj/down_proj: optional trained arrays injected **at
+        construction** (copied in place over the seed-initialized storage;
+        the FFN weights already use the checkpoint ``(in, out)`` layout, so no
+        transpose is needed). None (default) keeps the seed init (the training
+        path).
+        """
         super().__init__()
         self.gate_proj = nn.Parameter(torch.empty(embed_dim, ff_dim))
         self.up_proj = nn.Parameter(torch.empty(embed_dim, ff_dim))
         self.down_proj = nn.Parameter(torch.empty(ff_dim, embed_dim))
         self.reset_parameters()
+        for target, injected in (
+            (self.gate_proj, gate_proj),
+            (self.up_proj, up_proj),
+            (self.down_proj, down_proj),
+        ):
+            if injected is not None:
+                _copy_checkpoint(target, injected)
 
     def reset_parameters(self) -> None:
         """Initialize all weights with Kaiming uniform."""
@@ -431,20 +510,58 @@ class MixtureOfExperts(nn.Module):
     Router: nn.Linear(D, E) with no bias (Mixtral convention); experts: SwiGLUFFN.
     """
 
-    def __init__(self, embed_dim: int, n_experts: int, ff_dim: int, top_k: int, n_shared_experts: int = 0) -> None:
+    def __init__(
+        self,
+        embed_dim: int,
+        n_experts: int,
+        ff_dim: int,
+        top_k: int,
+        n_shared_experts: int = 0,
+        layer_index: int | None = None,
+        params: Mapping[str, np.ndarray] | None = None,
+    ) -> None:
+        """Create the router + expert FFNs.
+
+        layer_index/params: optional layer index and the flat registry-keyed
+        checkpoint; when both are given, every operator is born with its
+        trained array — the router from ``Keys.moe_gate(layer_index)`` (an
+        ``nn.Linear`` weight, transposed on injection) and each expert's three
+        projections from ``Keys.moe_expert(...)`` / ``Keys.moe_shared_expert(...)``
+        (SwiGLU ``(in, out)`` parameters, copied as-is). None (default) keeps
+        the seed-initialized weights (the training path).
+        """
         super().__init__()
         self.n_experts = n_experts
         self.top_k = top_k
         self.n_shared_experts = n_shared_experts
+        p = params
+
+        def _expert_params(idx: int, *, shared: bool) -> dict[str, np.ndarray]:
+            """This expert's trained projections — {} on the training path."""
+            if p is None or layer_index is None:
+                return {}
+            key = Keys.moe_shared_expert if shared else Keys.moe_expert
+            return {
+                "gate_proj": p[key(layer_index, idx, Mlp.GATE_PROJ)],
+                "up_proj": p[key(layer_index, idx, Mlp.UP_PROJ)],
+                "down_proj": p[key(layer_index, idx, Mlp.DOWN_PROJ)],
+            }
+
         # Router: (out=E, in=D) per nn.Linear convention, no bias
         self.gate = nn.Linear(embed_dim, n_experts, bias=False)
+        if p is not None and layer_index is not None:
+            _copy_checkpoint(self.gate.weight, p[Keys.moe_gate(layer_index)], transpose=True)
         # One SwiGLU expert per index (Mixtral-style)
         # Typed list for pyright; nn.ModuleList registers parameters for torch
-        self.expert_list: list[SwiGLUFFN] = [SwiGLUFFN(embed_dim, ff_dim) for _ in range(n_experts)]
+        self.expert_list: list[SwiGLUFFN] = [
+            SwiGLUFFN(embed_dim, ff_dim, **_expert_params(j, shared=False)) for j in range(n_experts)
+        ]
         self.experts = nn.ModuleList(self.expert_list)
         # Shared experts (ADR 0002): ungated, always active — every token gets
         # their (averaged) output added to the routed sum, DeepSeek-style.
-        self.shared_expert_list: list[SwiGLUFFN] = [SwiGLUFFN(embed_dim, ff_dim) for _ in range(n_shared_experts)]
+        self.shared_expert_list: list[SwiGLUFFN] = [
+            SwiGLUFFN(embed_dim, ff_dim, **_expert_params(s, shared=True)) for s in range(n_shared_experts)
+        ]
         self.shared_experts = nn.ModuleList(self.shared_expert_list)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -491,15 +608,45 @@ class TransformerBlock(nn.Module):
     ``config.has_moe()``.
     """
 
-    def __init__(self, config: TransformerConfig) -> None:
+    def __init__(
+        self, config: TransformerConfig, layer_index: int = 0, params: Mapping[str, np.ndarray] | None = None
+    ) -> None:
+        """Build the block's sublayers, injecting this layer's trained weights.
+
+        layer_index/params: the layer's position in the stack and the flat
+        registry-keyed checkpoint. When both are given, EVERY sublayer is born
+        with its trained array — the two RMSNorm gains from
+        ``Keys.ln(layer_index, ...)``, the four attention projections from
+        ``Keys.attn(...)``, the FFN/MoE weights from ``Keys.ffn(...)`` /
+        ``Keys.moe_*`` — each copied in place over the seed-initialized
+        storage. None (default) is the training path.
+
+        The mapping is the same ``shared.constants.Keys`` vocabulary the
+        model's save/load use, so there is one key language end to end.
+        """
         super().__init__()
         self.config = config
         D, H, G = config.embed_dim, config.n_heads, config.kv_heads
+        i = layer_index
+        p = params  # short alias; None → the training path (all keys below unused)
 
         # Norms (LLama naming: input norm, norm after attention)
-        self.input_layernorm = RMSNorm(D, eps=config.norm_eps)
-        self.post_attention_layernorm = RMSNorm(D, eps=config.norm_eps)
-        self.self_attn = MultiHeadAttention(embed_dim=D, n_heads=H, n_groups=G, rope_dim=config.rope_dim)
+        self.input_layernorm = RMSNorm(
+            D, eps=config.norm_eps, weight=None if p is None else p[Keys.ln(i, LayerNorm.INPUT)]
+        )
+        self.post_attention_layernorm = RMSNorm(
+            D, eps=config.norm_eps, weight=None if p is None else p[Keys.ln(i, LayerNorm.POST_ATTENTION)]
+        )
+        self.self_attn = MultiHeadAttention(
+            embed_dim=D,
+            n_heads=H,
+            n_groups=G,
+            rope_dim=config.rope_dim,
+            q_proj=None if p is None else p[Keys.attn(i, Attn.Q_PROJ)],
+            k_proj=None if p is None else p[Keys.attn(i, Attn.K_PROJ)],
+            v_proj=None if p is None else p[Keys.attn(i, Attn.V_PROJ)],
+            o_proj=None if p is None else p[Keys.attn(i, Attn.O_PROJ)],
+        )
         if config.has_moe():
             self.mlp: SwiGLUFFN | MixtureOfExperts = MixtureOfExperts(
                 embed_dim=D,
@@ -507,9 +654,17 @@ class TransformerBlock(nn.Module):
                 ff_dim=config.expert_dim,
                 top_k=config.top_k,
                 n_shared_experts=config.n_shared_experts,
+                layer_index=i if p is not None else None,
+                params=p,
             )
         else:
-            self.mlp = SwiGLUFFN(embed_dim=D, ff_dim=config.expert_dim)
+            self.mlp = SwiGLUFFN(
+                embed_dim=D,
+                ff_dim=config.expert_dim,
+                gate_proj=None if p is None else p[Keys.ffn(i, Mlp.GATE_PROJ)],
+                up_proj=None if p is None else p[Keys.ffn(i, Mlp.UP_PROJ)],
+                down_proj=None if p is None else p[Keys.ffn(i, Mlp.DOWN_PROJ)],
+            )
 
     def forward(self, x: torch.Tensor, position: int = 0) -> torch.Tensor:
         """Block forward. x: (B, S, D) → out: (B, S, D); position: this
@@ -585,12 +740,18 @@ class DecoderStack(nn.Module):
     out = block_{n-1}( ... block_1(block_0(x)) ... ), x: (B, S, D) → (B, S, D).
     """
 
-    def __init__(self, config: TransformerConfig) -> None:
+    def __init__(self, config: TransformerConfig, params: Mapping[str, np.ndarray] | None = None) -> None:
+        """Build one block per layer, each born with ITS OWN layer slice.
+
+        params: optional flat registry-keyed checkpoint threaded down to each
+        block together with its layer index; None (default) is the training
+        path (blocks keep their seed-initialized weights).
+        """
         super().__init__()
         self.config = config
         # Typed view of the blocks: nn.ModuleList registers parameters for
         # torch; the plain list keeps per-block attribute types for pyright.
-        self.blocks: list[TransformerBlock] = [TransformerBlock(config) for _ in range(config.n_layers)]
+        self.blocks: list[TransformerBlock] = [TransformerBlock(config, i, params) for i in range(config.n_layers)]
         self.layers = nn.ModuleList(self.blocks)
 
     def forward(self, x: torch.Tensor, position: int = 0) -> torch.Tensor:
@@ -689,14 +850,21 @@ class TorchModel(nn.Module):
 
         torch.manual_seed(config.seed)
 
-        self.embedding = Embedding(config.vocab_size, config.embed_dim)
-        self.stack = DecoderStack(config)
-        self.final_norm = RMSNorm(config.embed_dim, eps=config.norm_eps)
+        if params is not None:
+            # Fail fast on a stale/mismatched checkpoint BEFORE building, so a
+            # bad slice can never silently leave an operator at its defaults.
+            ParameterRegistry(config).validate(params)
+        p = params
+
+        self.embedding = Embedding(config.vocab_size, config.embed_dim, weight=None if p is None else p[Keys.embed()])
+        self.stack = DecoderStack(config, p)
+        self.final_norm = RMSNorm(
+            config.embed_dim, eps=config.norm_eps, weight=None if p is None else p[Keys.final_norm()]
+        )
         # lm_head: (in=D, out=V) per nn.Linear convention
         self.lm_head = nn.Linear(config.embed_dim, config.vocab_size, bias=False)
-
-        if params is not None:
-            self.load_from_numpy_dict(params)
+        if p is not None:
+            _copy_checkpoint(self.lm_head.weight, p[Keys.lm_head()], transpose=True)
 
     @classmethod
     def from_checkpoint(cls, checkpoint_dir: str | Path, dtype: torch.dtype | None = None) -> TorchModel:

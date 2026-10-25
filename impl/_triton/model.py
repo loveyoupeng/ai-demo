@@ -30,6 +30,7 @@ import torch.nn as nn
 from impl._triton.transformer import (
     TritonDecoderStack,
     TritonMixtureOfExperts,
+    copy_in_place,
 )
 from shared.checkpoint import load_checkpoint
 from shared.config import TransformerConfig
@@ -54,27 +55,42 @@ class TritonModel(nn.Module):
         """Build the model from a :class:`TransformerConfig`.
 
         params: optional checkpoint arrays (the shared Keys scheme)
-        **injected at construction** — validated against the registry and
-        copied in place into the constructor-built tensors, so the model
-        is born with trained weights (the inference path; see
-        ``from_checkpoint``). When None (default) the tensors keep their
-        seed-initialized values (the training path).
+        **injected at construction** — validated against the registry, then
+        threaded DOWN the chain (embedding → stack → block → RMSNorm /
+        attention / FFN / MoE), so every operator is born with its trained
+        tensor (the inference path; see ``from_checkpoint``). When None
+        (default) every operator keeps its seed-initialized values (the
+        training path). There is no third lifecycle: weights are either
+        injected here or trained in place.
         """
         super().__init__()
         self.config = config
         self.vocab_size = config.vocab_size
         self.embed_dim = config.embed_dim
 
+        if params is not None:
+            # Fail fast on a stale/mismatched checkpoint BEFORE building, so a
+            # bad slice can never silently leave an operator at its defaults.
+            ParameterRegistry(config).validate(params)
+        p = params
+
         torch.manual_seed(config.seed)
 
         self.embedding = nn.Embedding(config.vocab_size, config.embed_dim)
-        self.stack = TritonDecoderStack(config)
-        self.final_norm = nn.RMSNorm(config.embed_dim, eps=config.norm_eps)
-        # lm_head: (in=D, out=V) per nn.Linear convention, no bias
-        self.lm_head = nn.Linear(config.embed_dim, config.vocab_size, bias=False)
+        if p is not None:
+            copy_in_place(self.embedding.weight, p[Keys.embed()])  # (V, D) — same layout
 
-        if params is not None:
-            self.load_from_numpy_dict(params)
+        # Decoder stack (n_layers TritonTransformerBlocks) — each block gets its slice.
+        self.stack = TritonDecoderStack(config, p)
+
+        self.final_norm = nn.RMSNorm(config.embed_dim, eps=config.norm_eps)
+        if p is not None:
+            copy_in_place(self.final_norm.weight, p[Keys.final_norm()])  # (D,) gain
+
+        # lm_head: (V, D) per nn.Linear convention, no bias; checkpoint keeps (D, V).
+        self.lm_head = nn.Linear(config.embed_dim, config.vocab_size, bias=False)
+        if p is not None:
+            copy_in_place(self.lm_head.weight, p[Keys.lm_head()], transpose=True)
 
     @classmethod
     def from_checkpoint(cls, checkpoint_dir: str | Path, device: torch.device | str | None = None) -> TritonModel:

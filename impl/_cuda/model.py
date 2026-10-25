@@ -39,6 +39,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from impl._cuda.block import _copy_in_place
 from impl._cuda.layernorm import rmsnorm as _rmsnorm
 from impl._cuda.stack import CuDecoderStack
 from shared.checkpoint import load_checkpoint
@@ -92,20 +93,28 @@ class CUDAModel:
         mirroring the NumPy/PyTorch models.
 
         params: optional checkpoint arrays (the shared Keys scheme)
-        **injected at construction** — validated against the registry and
-        copied in place (preserves ``requires_grad``), so the model is born
-        with trained weights (the inference path; see ``from_checkpoint``).
-        When None (default) the tensors keep their seed-initialized values
-        (the training path); the tensors live on CPU until a caller moves
-        them to CUDA.
+        **injected at construction** — validated against the registry, then
+        threaded DOWN the chain (embedding → stack → block) and copied in
+        place (preserves ``requires_grad``), so the model is born with
+        trained weights (the inference path; see ``from_checkpoint``). When
+        None (default) the tensors keep their seed-initialized values (the
+        training path); the tensors live on CPU until a caller moves them to
+        CUDA — an injected checkpoint is copied before any device move, so
+        the placement contract is unchanged.
         """
         self.config = config
         self.vocab_size = config.vocab_size
         self.embed_dim = config.embed_dim
         seed = config.seed
 
-        # Decoder stack (n_layers CuTransformerBlocks)
-        self.stacking = CuDecoderStack(config)
+        if params is not None:
+            # Fail fast on a stale/mismatched checkpoint BEFORE building, so a
+            # bad slice can never silently leave a tensor at its seed defaults.
+            ParameterRegistry(config).validate(params)
+        p = params
+
+        # Decoder stack (n_layers CuTransformerBlocks) — each block gets its slice
+        self.stacking = CuDecoderStack(config, p)
 
         # Embedding table (V, D)
         gen = torch.Generator().manual_seed(seed)
@@ -113,10 +122,14 @@ class CUDAModel:
             0.0, 1.0 / math.sqrt(config.embed_dim), size=(config.vocab_size, config.embed_dim), generator=gen
         )
         self.embedding_weights.requires_grad_(True)
+        if p is not None:
+            _copy_in_place(self.embedding_weights, p[Keys.embed()])
 
         # Final RMSNorm gamma (D,)
         self.final_norm_gamma = torch.ones(config.embed_dim, dtype=torch.float32)
         self.final_norm_gamma.requires_grad_(True)
+        if p is not None:
+            _copy_in_place(self.final_norm_gamma, p[Keys.final_norm()])
 
         # lm_head (D, V) — no bias (Llama convention)
         gen2 = torch.Generator().manual_seed(seed + 300)
@@ -124,9 +137,8 @@ class CUDAModel:
             0.0, 1.0 / math.sqrt(config.embed_dim), size=(config.embed_dim, config.vocab_size), generator=gen2
         )
         self.lm_head_weight.requires_grad_(True)
-
-        if params is not None:
-            self.load_from_numpy_dict(params)
+        if p is not None:
+            _copy_in_place(self.lm_head_weight, p[Keys.lm_head()])
 
     @classmethod
     def from_checkpoint(cls, checkpoint_dir: str | Path, device: str = "cuda") -> CUDAModel:
@@ -134,15 +146,16 @@ class CUDAModel:
         inference factory).
 
         Reads ``config.json`` + ``model.npz`` and injects the trained
-        arrays at construction; ``device`` mirrors the track's train
-        scripts ("cuda" default — kernels expect CUDA tensors).
+        arrays at construction, so the returned model is born with learned
+        weights (gammas ≠ ones) — no post-hoc load step exists to forget.
+        ``device`` mirrors the track's train scripts ("cuda" default —
+        kernels expect CUDA tensors); the (CPU-side) copy happens first.
         """
         arrays, cfg = load_checkpoint(checkpoint_dir)
         if cfg is None:
             raise ValueError(f"checkpoint {checkpoint_dir} is missing config.json")
-        model = cls(cfg)
+        model = cls(cfg, arrays)
         _cuda_to_device(model, torch.device(device))
-        model.load_from_numpy_dict(arrays)
         return model
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

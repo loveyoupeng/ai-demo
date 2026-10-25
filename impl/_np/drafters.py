@@ -81,6 +81,8 @@ mirroring the main per-layer names, ``{family}.out_norm.weight`` (+
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 
 from impl._np.attention import MultiHeadAttention
@@ -107,14 +109,56 @@ class _DrafterBlock:
     (parallel → non-causal; seq module → causal).
     """
 
-    def __init__(self, D: int, H: int, G: int, ff_dim: int, rope_dim: int, causal: bool, seed: int) -> None:
+    def __init__(
+        self,
+        D: int,
+        H: int,
+        G: int,
+        ff_dim: int,
+        rope_dim: int,
+        causal: bool,
+        seed: int,
+        prefix: str = "",
+        params: Mapping[str, np.ndarray] | None = None,
+    ) -> None:
+        """Build the block's operators, injecting this block's sidecar arrays.
+
+        prefix/params: the block's sidecar key path ("mtp.block" /
+        "dspark.parallel" / "dspark.seq") and the validated sidecar dict; when
+        both are given every operator is born with its trained array (the same
+        keys ``load``/``params`` use). None (default) → seed-initialized
+        weights (the distillation start point).
+        """
         self.causal = causal
-        self.input_layernorm = RMSNorm(D)
-        self.post_attention_layernorm = RMSNorm(D)
-        self.self_attn = MultiHeadAttention(embed_dim=D, n_heads=H, n_groups=G, rope_dim=rope_dim, seed=seed + 1)
+        p = params
+
+        def arr(name: str) -> np.ndarray | None:
+            """This block's array for ``name``, or None on the training path."""
+            return None if p is None else p[f"{prefix}.{name}"]
+
+        self.input_layernorm = RMSNorm(D, gamma=arr("input_layernorm.weight"))
+        self.post_attention_layernorm = RMSNorm(D, gamma=arr("post_attention_layernorm.weight"))
+        self.self_attn = MultiHeadAttention(
+            embed_dim=D,
+            n_heads=H,
+            n_groups=G,
+            rope_dim=rope_dim,
+            seed=seed + 1,
+            q_proj=arr("self_attn.q_proj.weight"),
+            k_proj=arr("self_attn.k_proj.weight"),
+            v_proj=arr("self_attn.v_proj.weight"),
+            o_proj=arr("self_attn.o_proj.weight"),
+        )
         from impl._np.ffn import SwiGLUFFN
 
-        self.mlp = SwiGLUFFN(embed_dim=D, ff_dim=ff_dim, seed=seed + 2)
+        self.mlp = SwiGLUFFN(
+            embed_dim=D,
+            ff_dim=ff_dim,
+            seed=seed + 2,
+            gate_proj=arr("mlp.gate_proj.weight"),
+            up_proj=arr("mlp.up_proj.weight"),
+            down_proj=arr("mlp.down_proj.weight"),
+        )
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         """Standard pre-norm block forward with the configured mask.
@@ -219,15 +263,19 @@ class MTPDrafter:
         self.block_size = meta.block_size
         self.embedding_weight = embedding_weight
         self.lm_head_weight = lm_head_weight
-        self.norm = RMSNorm(D)
+        p = params
+        # Constructor injection: every operator below is born with its sidecar
+        # array (same keys as load_from_numpy_dict) — nothing is patched after
+        # construction.
+        self.norm = RMSNorm(D, gamma=None if p is None else p["mtp.norm.weight"])
         self.in_proj = xavier_uniform(np.random.default_rng(seed), 2 * D, D)
-        self.block = _DrafterBlock(D, H, G, meta.ff_dim, meta.rope_dim, causal=True, seed=seed + 10)
-        self.out_norm = RMSNorm(D)
+        if p is not None:
+            self.in_proj[...] = p["mtp.in_proj.weight"]
+        self.block = _DrafterBlock(
+            D, H, G, meta.ff_dim, meta.rope_dim, causal=True, seed=seed + 10, prefix="mtp.block", params=p
+        )
+        self.out_norm = RMSNorm(D, gamma=None if p is None else p["mtp.out_norm.weight"])
         self.reset()
-        # Constructor injection: a sidecar checkpoint's arrays arrive HERE,
-        # at birth — never by assignment after construction.
-        if params is not None:
-            self.load_from_numpy_dict(params)
 
     _cache: dict[str, np.ndarray]
 
@@ -384,16 +432,24 @@ class DSparkDrafter:
         self.block_size = meta.block_size
         self.embedding_weight = embedding_weight
         self.lm_head_weight = lm_head_weight
-        self.norm = RMSNorm(D)
+        p = params
+        # Constructor injection (see MTPDrafter.__init__) — same keys as
+        # load_from_numpy_dict, applied at birth.
+        self.norm = RMSNorm(D, gamma=None if p is None else p["dspark.norm.weight"])
         self.in_proj = xavier_uniform(np.random.default_rng(seed), 2 * D, D)
+        if p is not None:
+            self.in_proj[...] = p["dspark.in_proj.weight"]
         rng = np.random.default_rng(seed + 5)
         self.pos_emb = rng.normal(0.0, 0.02, size=(meta.block_size, D)).astype(np.float32)
-        self.parallel = _DrafterBlock(D, H, G, meta.ff_dim, meta.rope_dim, causal=False, seed=seed + 10)
-        self.seq = _DrafterBlock(D, H, G, meta.ff_dim, meta.rope_dim, causal=True, seed=seed + 30)
-        self.out_norm = RMSNorm(D)
-        # Constructor injection (see MTPDrafter.__init__).
-        if params is not None:
-            self.load_from_numpy_dict(params)
+        if p is not None:
+            self.pos_emb[...] = p["dspark.pos_emb.weight"]
+        self.parallel = _DrafterBlock(
+            D, H, G, meta.ff_dim, meta.rope_dim, causal=False, seed=seed + 10, prefix="dspark.parallel", params=p
+        )
+        self.seq = _DrafterBlock(
+            D, H, G, meta.ff_dim, meta.rope_dim, causal=True, seed=seed + 30, prefix="dspark.seq", params=p
+        )
+        self.out_norm = RMSNorm(D, gamma=None if p is None else p["dspark.out_norm.weight"])
 
     def reset(self) -> None:
         """Stateless drafter — nothing to clear."""

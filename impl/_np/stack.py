@@ -11,6 +11,8 @@ itself.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 
 from impl._np.block import TransformerBlock
@@ -34,9 +36,16 @@ class DecoderStack:
     gradient from the last block back to the input.
     """
 
-    def __init__(self, config: TransformerConfig) -> None:
+    def __init__(self, config: TransformerConfig, params: Mapping[str, np.ndarray] | None = None) -> None:
+        """Build one block per layer, each born with ITS OWN layer slice.
+
+        params: flat registry-keyed checkpoint; block i reads the
+        ``Keys.ln(i, ...)`` / ``Keys.attn(i, ...)`` / ``Keys.ffn(i, ...)``
+        slice (see ``TransformerBlock.__init__``). None (default) → every
+        block is seed-initialized (the training path).
+        """
         self.config = config
-        self.layers = [TransformerBlock(config) for _ in range(config.n_layers)]
+        self.layers = [TransformerBlock(config, i, params) for i in range(config.n_layers)]
 
     def forward(self, x: np.ndarray, position: int = 0, record: list[dict] | None = None) -> np.ndarray:
         """Run all blocks in order. x: (B, S, D) → out: (B, S, D).

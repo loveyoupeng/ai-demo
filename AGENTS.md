@@ -80,12 +80,22 @@ differences (float64, ~1e-10, MoE top-k flip-aware).
   model is born in exactly one of two states: `Model(config)` = fresh
   seed-initialized weights (training), or `Model(config, params)` /
   `Model.from_checkpoint(dir)` = the checkpoint arrays injected **at
-  construction** (inference). Injection copies **in place** over the arrays
-  the constructor created (the `load_state_dict` convention: storage identity
-  never changes, dtype/device moves are the only re-binding paths —
-  `NumPyModel.to()` mirrors torch's `.double()`). `load_from_numpy_dict` stays
-  the explicit in-place loading interface (weight swap into a live model,
-  round-trip tests); nothing loads by reassigning attributes.
+  construction** (inference). Injection is threaded **down the whole chain**:
+  the model validates against the registry, then passes the flat `Keys`-keyed
+  mapping to `DecoderStack`/`Embedding`/final norm/lm_head; each
+  `TransformerBlock` takes its own `(layer_index, params)` slice and hands each
+  operator its array (`RMSNorm(gamma=…)`, `MultiHeadAttention(q_proj=…, …)`,
+  `SwiGLUFFN(gate_proj=…, …)`, MoE reads `Keys.moe_*` itself) — so no operator
+  is ever built with defaults and patched afterwards, and `params=None` is
+  visibly the training start (gammas = ones). Injection copies **in place**
+  over the storage the constructor created (the `load_state_dict` convention:
+  storage identity never changes, dtype/device moves are the only re-binding
+  paths — `NumPyModel.to()` mirrors torch's `.double()`), and a stale
+  checkpoint fails the registry validation before anything is built.
+  `load_from_numpy_dict` stays the explicit in-place loading interface (weight
+  swap into a live model, round-trip tests); nothing loads by reassigning
+  attributes. Drafters (sidecars) follow the same pattern with their sidecar
+  key paths.
 - `shared/checkpoint.py` does disk I/O: `config.json` + flat `model.npz`.
 
 **Learning mode (all four backends):** the web page runs records on all four

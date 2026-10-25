@@ -62,9 +62,17 @@ class RMSNorm:
     radial component" form).
     """
 
-    def __init__(self, embed_dim: int, eps: float = 1e-6, seed: int = 0) -> None:
+    def __init__(self, embed_dim: int, eps: float = 1e-6, seed: int = 0, gamma: np.ndarray | None = None) -> None:
+        """Create the (D,) gain.
+
+        gamma: optional trained gain injected **at construction** (copied in
+        place; storage identity never changes). None (default) keeps the
+        ones-initialized gain — the training start point (identity).
+        """
         self.eps = eps
         self.gamma: np.ndarray = np.ones(embed_dim, dtype=np.float32)
+        if gamma is not None:
+            self.gamma[...] = gamma
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         """Scale each row to unit RMS, then re-scale per channel by γ. x: (..., D) → out: (..., D)."""

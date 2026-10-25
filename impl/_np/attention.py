@@ -117,7 +117,18 @@ class MultiHeadAttention:
         n_groups: int,
         rope_dim: int,
         seed: int = 0,
+        q_proj: np.ndarray | None = None,
+        k_proj: np.ndarray | None = None,
+        v_proj: np.ndarray | None = None,
+        o_proj: np.ndarray | None = None,
     ) -> None:
+        """Create the four (in, out) projections.
+
+        q_proj/k_proj/v_proj/o_proj: optional trained arrays injected **at
+        construction** (copied in place over the seed-initialized storage;
+        storage identity never changes). None (default) keeps the
+        seed-initialized weights (the training path).
+        """
         self.embed_dim = embed_dim
         self.n_heads = n_heads
         self.n_groups = n_groups
@@ -132,6 +143,14 @@ class MultiHeadAttention:
         self.v_proj = xavier_uniform(rng, embed_dim, n_groups * hd)
         # (H*hd, D) output projection (mixes the heads back into one vector)
         self.o_proj = xavier_uniform(rng, n_heads * hd, embed_dim)
+        for target, injected in (
+            (self.q_proj, q_proj),
+            (self.k_proj, k_proj),
+            (self.v_proj, v_proj),
+            (self.o_proj, o_proj),
+        ):
+            if injected is not None:
+                target[...] = injected
 
     def forward_state(self, x: np.ndarray, position: int, causal: bool = True) -> Result[np.ndarray, dict]:
         """Run the attention forward; return THE result + the captured context.

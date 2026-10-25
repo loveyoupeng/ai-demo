@@ -191,11 +191,13 @@ the equation, the *why*, and the code anchor) lives in one place:
   (`shared.constants.Keys`, HF-Llama naming) + a parameter registry
   (`shared/registry.py`) that validates shape and key-set on load
   (stale checkpoints fail fast). Every track builds its model by
-  **constructor injection** — `Model.from_checkpoint(dir)` (or
-  `Model(config, params)`) injects the trained arrays at construction, so a
-  served model is born with learned weights, while `Model(config)` is the
-  fresh training start; loading always copies in place (never reassigns
-  storage).
+  **constructor injection threaded down the chain** —
+  `Model.from_checkpoint(dir)` (or `Model(config, params)`) validates the
+  checkpoint, then the stack/block/operator constructors each receive their
+  slice, so a served model is born with learned weights and no operator is
+  built with defaults and patched later; `Model(config)` is the fresh
+  training start (RMSNorm gammas = ones). Injection always copies in place
+  (never reassigns storage).
 - **Learning mode** (all four backends): `scripts/learning.py` hosts a web
   page (stdlib HTTP server, no dependencies) with prompt + generation, an
   architecture diagram with flow navigation (click a node to light up its
