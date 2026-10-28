@@ -505,7 +505,7 @@ class NumPyModel:
         return logits, x_final
 
     def backward(self, input_ids: np.ndarray, targets: np.ndarray) -> dict[str, np.ndarray]:
-        """Analytic gradients of the loss w.r.t. every parameter.
+        """Analytic gradients of the CE loss w.r.t. every parameter.
 
         The chain rule runs in reverse of the forward:
 
@@ -525,7 +525,24 @@ class NumPyModel:
         """
         logits, trace = self.forward_with_trace(input_ids)
         dlogits = CrossEntropyLoss(shift=False).backward(logits, targets)  # (B, S, V)
+        return self.backward_from_dlogits(dlogits, trace, input_ids)
 
+    def backward_from_dlogits(
+        self,
+        dlogits: np.ndarray,
+        trace: dict,
+        input_ids: np.ndarray,
+    ) -> dict[str, np.ndarray]:
+        """Analytic gradients from a caller-supplied dlogits (B, S, V).
+
+        The backward chain downstream of the logits — lm_head → final
+        norm → stack → embedding — is shared by every loss on the logits.
+        ``backward`` (cross-entropy) is the standard entry; the GRPO
+        trainer (``impl/_np/rl.py``, ADR 0004) enters here with a
+        reweighted CE gradient (advantage-scaled), which is the whole
+        policy-gradient theorem in practice: same chain, different scalar
+        weights per position.
+        """
         stack_out = trace["stack_out"]  # (B, S, D)
         position = trace["position"]  # the pass's first token index
         D, V = self.embed_dim, self.vocab_size

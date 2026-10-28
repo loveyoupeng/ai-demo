@@ -230,7 +230,7 @@ def _load_corpus_for(cfg: TransformerConfig, model_dir: str) -> list[list[int]]:
                 seqs.append(tok.encode(msg["content"]).ids[:128])
     seqs = [s for s in seqs if len(s) > 8]
     if not seqs:
-        raise FileNotFoundError("no corpus under resource/ (run scripts.train_demo_model_v2 first)")
+        raise FileNotFoundError("no corpus under resource/ (run scripts.train_demo_model_v3 first)")
     return seqs
 
 

@@ -47,11 +47,45 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL_DIR = "resource/models/learning_tool"  # BPE-trained (mirrors scripts/learning.py DEFAULT_MODEL)
+DEFAULT_MODEL_DIR = (
+    "resource/models/learning_moe_rl"  # the full v3 pipeline model (mirrors scripts/learning.py DEFAULT_MODEL)
+)
 WEB_DIR = Path(__file__).parent / "web"
 
 
 Backend = Literal["numpy", "torch", "triton", "cuda"]
+
+
+def count_active_params(cfg: TransformerConfig) -> int:
+    """Parameters that process ONE token (the MoE total-vs-active trade).
+
+    Dense: every parameter is active. MoE (ADR 0005): the routed slice is
+    top_k of the n_experts experts (plus the always-on shared experts);
+    everything else — embeddings, attention, norms, lm_head, router — is
+    fully active. This is the number the page's badge line shows next to
+    the TOTAL so the param-matched MoE's whole point is visible.
+    """
+    D, V, L = cfg.embed_dim, cfg.vocab_size, cfg.n_layers
+    H, G = cfg.n_heads, cfg.kv_heads
+    hd = cfg.head_dim
+    n = V * D  # embedding
+    n += D  # final norm gamma
+    n += D * V  # lm_head
+    n += L * (2 * D + 4 * D * D)  # two norm gammas + q/k/v/o per layer (MHA-sized)
+    if cfg.has_moe():
+        FF, E = cfg.expert_dim, cfg.n_experts
+        routed = cfg.top_k
+        shared = cfg.n_shared_experts
+        n += L * (D * E)  # router: always active (it scores every expert)
+        n += L * (2 * D * FF + FF * D) * (routed + shared)  # active experts
+    else:
+        FF = cfg.expert_dim
+        n += L * (2 * D * FF + FF * D)  # dense FFN: fully active
+    # (GQA shaves the k/v columns; counted at MHA size — the badge is a
+    # teaching number, the exact GQA correction is the diagram's job)
+    if G != H:
+        n -= L * 2 * (H - G) * hd * D
+    return int(n)
 
 
 def load_learning_model(
@@ -229,14 +263,16 @@ class _LearningHandler(BaseHTTPRequestHandler):
     def _per_variant(self, variant: str | None):
         """Swap self.model/vocab/tokenizer for the named VARIANT checkpoint.
 
-        Variants are DIFFERENT CHECKPOINTS of the same demo family served by
-        one page: "dense" (the learning_tool model, plain SwiGLU FFN) and
-        "moe" (the learning_moe model — the dense pipeline's twin with the
-        FFN swapped for a MoE: E routed experts + an always-on shared
-        expert, ADR 0002; same BPE tokenizer and training data, so the
-        comparison is controlled and the page shows the router/top-k/shared
-        cells). Lazily loaded per backend so switching stays cheap; an
-        unknown variant raises a 400 the page surfaces.
+        Variants are DIFFERENT CHECKPOINTS of the demo families served by
+        one page (the v3 pipeline, ADRs 0004/0005): "moe-rl" (the DEFAULT —
+        the full pipeline's param-matched MoE: E=8 routed + 1 shared at
+        dim 32 after GRPO RL), "dense-rl" (the dense FFN twin), and the
+        two SFT-final checkpoints "moe" / "dense" the RL runs started
+        from — so *-rl-vs-* isolates RL's delta and moe-vs-dense isolates
+        the FFN geometry, both controlled. Lazily loaded per backend so
+        switching stays cheap; an unknown variant raises a 400 the page
+        surfaces, and a variant still training in the background
+        bootstrap raises an actionable "retry shortly" 400.
         """
         target = variant or self.default_variant
         if not self.variant_dirs:
@@ -246,6 +282,11 @@ class _LearningHandler(BaseHTTPRequestHandler):
             return
         if target not in self.variant_dirs:
             raise ValueError(f"unknown model variant {target!r}")
+        if target not in self.variant_models and not os.path.isdir(self.variant_dirs[target]):
+            # The background bootstrap (scripts/learning.py) is still
+            # training this family's pipeline — a distinct, actionable
+            # answer rather than a generic load failure.
+            raise ValueError(f"model variant {target!r} is still training in the background — retry in a few minutes")
         # The startup model IS a registry entry when its dir matches: bind
         # it (record vocab/tokenizer so swapping back is symmetric).
         if target not in self.variant_models and os.path.abspath(self.model_dir) == os.path.abspath(
@@ -378,12 +419,19 @@ class _LearningHandler(BaseHTTPRequestHandler):
             "has_vocab": self.vocab is not None,
             "backend": self.backend,
             "n_params": n_params,
+            # the total-vs-active trade the param-matched MoE exists to
+            # show (ADR 0005): which slice of n_params stands behind ONE
+            # token (routed top_k of E + the shared experts).
+            "n_params_active": count_active_params(cfg),
             "has_moe": cfg.has_moe(),
             "spec_available": self._spec_available(),
             "default_spec": self.default_spec if self.default_spec in self._spec_available() else "plain",
             "spec_block_size": self._spec_block_sizes(),
-            # model-variant registry: which checkpoints this page can serve
+            # model-variant registry: which checkpoints this page can serve,
+            # and which of them are still training in a background bootstrap
+            # (the page shows "training…" instead of failing the switch)
             "variants": sorted(self.variant_dirs.keys()),
+            "training_variants": sorted(v for v, d in self.variant_dirs.items() if not os.path.isdir(os.path.join(d))),
             "variant": self._active_variant or self.default_variant,
             "default_variant": self.default_variant,
         }
@@ -494,7 +542,10 @@ class _LearningHandler(BaseHTTPRequestHandler):
         ids, skipped = tokenize_text(text, self.vocab, self.tokenizer)
         if not ids:
             raise ValueError("no in-vocab characters in the input text")
-        t: float | None = None if temp is None else float(temp)
+        # T=0.0 means GREEDY (the page's convention) — collapse it to
+        # None here so the sampled paths (which would divide by T) are
+        # never entered with a degenerate temperature.
+        t: float | None = None if temp is None or float(temp) <= 0.0 else float(temp)
         k: int | None = None if top_k is None else int(top_k)
         return ids, t, k, seed, skipped, backend
 

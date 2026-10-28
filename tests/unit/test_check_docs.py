@@ -55,7 +55,7 @@ class TestPathDrift:
         assert check_docs.check_paths(texts) == []
 
     def test_module_style_reference_accepted_when_module_exists(self) -> None:
-        texts = _texts_with_readme("run scripts.train_demo_model_v2\n")
+        texts = _texts_with_readme("run scripts.train_demo_model_v3\n")
         assert check_docs.check_paths(texts) == []
 
     def test_module_style_reference_flagged_when_module_missing(self) -> None:
@@ -71,9 +71,10 @@ class TestScenarioCount:
         assert n >= 9, "verify_equivalence lost scenarios?"
 
     def test_wrong_count_is_caught(self) -> None:
+        n = check_docs._load_scenario_count()
         texts = _texts_with_readme("verify_equivalence runs 7 scenarios today\n")
-        errs = check_docs.check_scenario_counts(texts, 9)
-        assert len(errs) == 1 and "claims 7" in errs[0] and "has 9" in errs[0]
+        errs = check_docs.check_scenario_counts(texts, n)
+        assert len(errs) == 1 and "claims 7" in errs[0] and f"has {n}" in errs[0]
 
     def test_correct_count_passes(self) -> None:
         n = check_docs._load_scenario_count()

@@ -144,5 +144,5 @@ arch flag; the NumPy/Torch tracks are GPU-agnostic.
    same sidecar runs on all four tracks
 
 The irreversible decisions (residual form, shared-expert MoE, drafter
-sidecars) are recorded as ADRs in [adr/](adr/) — this section summarizes;
-the ADR is the record.
+sidecars, thinking-SFT + GRPO RL, param-matched MoE scale) are recorded
+as ADRs in [adr/](adr/) — this section summarizes; the ADR is the record.

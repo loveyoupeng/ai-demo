@@ -115,6 +115,10 @@ class TransformerConfig:
             "k_dim",
             "v_dim",
             "model_type",
+            # metadata key that rides along in config.json but is not a
+            # model knob: "pipeline" = the demo-pipeline version marker
+            # (ADR 0004; scripts/learning.py checks it for staleness)
+            "pipeline",
             # legacy keys from pre-cleanup configs, ignored on load
             "max_length",
             "quant_type",

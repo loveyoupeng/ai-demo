@@ -23,8 +23,8 @@ link, never duplicate):
   `seam_triton_to_torch.md` shared-seam contract, `adr/` (irreversible
   decisions).
 - `docs/math/` — `transformer-walkthrough.md` (the forward-pass derivation
-  tour, code-anchored), `training-pipeline.md` (pre-train → SFT → tool
-  pipeline + drafter distillation).
+  tour, code-anchored), `training-pipeline.md` (pre-train → SFT → tool →
+  thinking → RL → drafter pipeline, ADRs 0003/0004).
 - `docs/reference/` — `docstring_style.md` (the numpydoc + shape-comment
   convention this repo's docstrings follow).
 - Finished task specs are **deleted** — the git history is the record.
@@ -111,14 +111,21 @@ interchangeably. `impl/_np/learning_server.py` serves the web page
 (`impl/_np/web/`) plus a small JSON API (`/api/model`, `/api/inference`,
 `/api/record`) via stdlib `http.server`, listening on `0.0.0.0:8080` by
 default; the CLI `--backend` (`numpy`|`torch`) only picks which track the
-*startup* load materializes. The default served checkpoint is `learning_tool`
-(BPE-512 vocab, `D=64, L=3, H=4`, dense SwiGLU — built by
-`scripts/train_demo_model_v2.py` in a 3-stage pretrain→SFT→tool pipeline;
-). The page's default variant is
-the MoE twin (`learning_moe`, `E=3+1 shared` — the same pipeline run with
-`scripts/train_demo_model_v2 --variant moe`: same BPE-512 tokenizer, same
-corpus, same seed, only the FFN differs, so dense-vs-moe is a controlled
-experiment).
+*startup* load materializes. The default served checkpoint is
+`learning_moe_rl` — the MoE family's FULL v3 pipeline model (BPE-512
+vocab with the `<|think|>`/`<|answer|>` specials, `D=64, L=3, H=4`;
+built by `scripts/train_demo_model_v3.py --variant moe`: pretrain →
+code SFT → tool SFT → thinking SFT (reasoning distillation, ADR 0004) →
+GRPO RL (ADR 0004) → drafter distillation). The page's Model dropdown
+carries four variants — `moe-rl` (default), `dense-rl`, `moe`, `dense` —
+giving TWO controlled comparisons: `*-rl` vs `*` isolates RL's delta
+(the RL run started from exactly the shown SFT checkpoint), and
+`moe-rl` vs `dense-rl` isolates the FFN geometry — the param-matched
+MoE of ADR 0005 (E=8 routed + 1 shared at `expert_dim=32`: ~1.08× the
+dense total at ~54% active/token). Missing/stale checkpoints (the
+`"pipeline": 3` config.json marker) bootstrap: the default family at
+startup, the other family in a background thread after the server is
+up (a still-training variant answers "training, retry shortly").
 
 The full directory tree lives in [README.md](README.md) → "Project
 structure" (one owner, kept aligned by `scripts/check_docs.py`).
@@ -208,13 +215,14 @@ the dev loop.
 - `impl/_torch/layers.py` — PyTorch operator mirror (SDPA, GQA repeat before
   SDPA); `impl/_triton/transformer.py` — Triton stack + the documented seam.
 - `scripts/train.py`, `scripts/infer.py`, `scripts/learning.py` — unified
-  4-backend entry points; `scripts/verify_equivalence.py` — 9-scenario
+  4-backend entry points; `scripts/verify_equivalence.py` — 11-scenario
   parity check (`scripts.check_docs` pins the count).
 - `tests/unit/_cuda/conftest.py` — NVRTC per-file context isolation
   (CUDA tests run one file per invocation).
 - `CONTEXT.md` — the domain glossary (every term + the shape notation);
   `docs/architecture/adr/` — the irreversible decisions (residual,
-  shared-expert MoE, drafter sidecars).
+  shared-expert MoE, drafter sidecars, thinking-SFT + GRPO RL,
+  param-matched MoE scale).
 
 ## Runtime/Tooling Preferences
 
@@ -236,8 +244,9 @@ the dev loop.
   invocations (see below).
 - `resource/` is fully git-ignored: TinyStories data and all checkpoints are
   local artifacts. Recreate: `scripts/train_real_tinystories` (real-data
-  checkpoints), `scripts/train_demo_model_v2` (learning-mode pipeline +
-  `--variant moe`), `scripts/download_tinystories` (dataset).
+  checkpoints), `scripts/train_demo_model_v3` (learning-mode pipeline +
+  `--variant moe`; the thinking/RL stages need `scripts/download_gsm8k`
+  first), `scripts/download_tinystories` (dataset).
 
 ## Testing & QA
 
@@ -271,9 +280,10 @@ uv run python -m scripts.check_docs
 - Gradient correctness: `tests/unit/_np/test_gradient_check.py` — analytic
   backward vs finite differences at ~1e-10 (incl. MoE kink handling).
 - End-to-end equivalence: `uv run python -m scripts.verify_equivalence` —
-  9 scenarios (`dense_np_torch`, `gqa_np_torch`, `moe_np_torch`,
-  `moe_shared_experts_np_torch`, `gqa_torch_triton`,
-  `spec_mtp_np_torch`, `spec_dspark_np_torch`, `cuda_shared_weights`,
-  `all_four_backends`); greedy outputs must match.
+  11 scenarios (`dense_np_torch`, `gqa_np_torch`, `moe_np_torch`,
+  `moe_shared_experts_np_torch`, `gqa_torch_triton`, `spec_mtp_np_torch`,
+  `spec_dspark_np_torch`, `moe_param_matched_np_torch`,
+  `rl_dense_np_torch`, `cuda_shared_weights`, `all_four_backends`);
+  greedy outputs must match.
 - Round-trip guarantee to preserve: save from any backend → load into any
   other → identical logits.

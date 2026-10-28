@@ -17,7 +17,7 @@ from impl._np.learning import generate_with_records, instrumented_forward
 from impl._np.model import NumPyModel
 from shared.config import TransformerConfig
 
-DEMO_MODEL = Path(__file__).resolve().parents[3] / "resource" / "models" / "learning_moe"
+DEMO_MODEL = Path(__file__).resolve().parents[3] / "resource" / "models" / "learning_moe_rl"
 
 
 def tiny_model() -> NumPyModel:
@@ -288,7 +288,7 @@ class TestDemoModelCheckpoint:
 
         from impl._np.learning_server import load_learning_model
 
-        assert DEMO_MODEL.is_dir(), "moe checkpoint missing — run scripts/train_demo_model_v2 --variant moe"
+        assert DEMO_MODEL.is_dir(), "moe checkpoint missing — run scripts.train_demo_model_v3 --variant moe"
         model, vocab, cfg, _tok = load_learning_model(str(DEMO_MODEL))
         assert vocab is not None and len(vocab) == cfg.vocab_size
         assert isinstance(model, NumPyModel)  # default backend is numpy

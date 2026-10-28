@@ -49,7 +49,7 @@ class MultiHeadAttention:
       exists so one matmul processes all B sequences instead of B
       separate loops. Training stacks many sequences per step (e.g. 32
       padded story chunks from ``make_batch`` in
-      scripts/train_demo_model_v2.py, each truncated/padded to the same
+      scripts/train_demo_model_v3.py, each truncated/padded to the same
       S, so one weight update averages their gradients); inference on
       the learning page generates one sequence (B = 1). The whole
       attention math below runs identically for every B row — nothing

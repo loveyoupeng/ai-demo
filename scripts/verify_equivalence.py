@@ -115,6 +115,18 @@ SCENARIOS: list[Scenario] = [
         backends=["numpy", "torch"],
     ),
     Scenario(
+        name="moe_param_matched_np_torch",
+        description="Param-matched MoE of ADR 0005 (8 routed + 1 shared @ dim 32, top-1): NumPy vs PyTorch",
+        kwargs=_cfg(n_experts=8, top_k=1, n_shared_experts=1, expert_dim=32),
+        backends=["numpy", "torch"],
+    ),
+    Scenario(
+        name="rl_dense_np_torch",
+        description="RL-track math (ADR 0004): GRPO dlogits gradient == weighted-CE backward, NumPy vs PyTorch",
+        kwargs=_cfg(),
+        backends=["numpy", "torch"],
+    ),
+    Scenario(
         name="cuda_shared_weights",
         description="CUDA track: shared-weight load + forward validity",
         kwargs=_cfg(),
@@ -474,7 +486,9 @@ def run_scenario(scenario: Scenario, steps: int = 2) -> dict:
     if scenario.name.startswith("spec_"):
         _spec_lossless_check(scenario, kwargs, details)
         passed = passed and bool(details.get("spec_lossless", False))
-
+    if scenario.name.startswith("rl_"):
+        _rl_gradient_check(kwargs, details)
+        passed = passed and bool(details.get("rl_gradient_match", False))
     elapsed = round(time.time() - T1, 2)
     return {"passed": passed, "name": scenario.name, "details": details, "elapsed": elapsed}
 
@@ -533,6 +547,55 @@ def _spec_lossless_check(scenario: Scenario, kwargs: dict[str, Any], details: di
         t_seq, _t_stats = TorchSpecGen(t_model, t_drafter).generate_greedy(prompt_t, 6, k=k)
     details["spec_torch_match"] = bool(t_seq[0].tolist() == plain)
     details["spec_lossless"] = bool(details["spec_numpy_match"] and details["spec_torch_match"])
+
+
+def _rl_gradient_check(kwargs: dict[str, Any], details: dict[str, Any]) -> None:
+    """GRPO gradient parity (ADR 0004): on a FIXED batch (no sampling),
+    the torch trainer's backward must match the NumPy reference
+    formulas through the shared checkpoint — the same trick as the
+    drafter acceptance checks (deterministic parity, sampling excluded)."""
+    import torch as th
+
+    from impl._np.model import NumPyModel
+    from impl._np.rl import grpo_dlogits
+    from impl._torch.layers import TorchModel
+    from impl._torch.rl import TorchGRPOTrainer
+    from shared.constants import Keys
+
+    cfg = _to_transformer_config(kwargs)
+    seed = int(kwargs.get("seed", 42))
+    rng = np.random.default_rng(seed)
+    B, S = 2, 8
+    batch = rng.integers(0, cfg.vocab_size, size=(B, S)).astype(np.int64)
+    rmask = np.zeros_like(batch)
+    rmask[:, S // 2 :] = 1
+    adv = rng.normal(size=(B,))
+
+    tm = TorchModel(cfg)
+    params_np = dict(tm.get_all_parameters())
+    tr = TorchGRPOTrainer(tm, TorchModel(cfg), device="cpu", lr=1e-4, kl_beta=0.0)
+    loss_t, _ = tr.grpo_loss(th.from_numpy(batch), th.from_numpy(rmask.astype(np.int64)), th.from_numpy(adv))
+    loss_t.backward()
+    # nn.Linear keeps (out, in); the registry layout is (in, out)
+    assert tm.lm_head.weight.grad is not None  # backward just populated it
+    g_torch = tm.lm_head.weight.grad.detach().cpu().numpy().T
+
+    nm = NumPyModel(cfg, {k: v.copy() for k, v in params_np.items()}).to(np.float64)
+    logits, trace = nm.forward_with_trace(batch)
+    graded_mask = np.zeros((B, S))
+    graded_mask[:, :-1] = rmask[:, 1:]
+    graded_ids = np.full_like(batch, -100)
+    graded_ids[:, :-1] = batch[:, 1:]
+    valid = (graded_mask == 1) & (graded_ids >= 0)
+    gid = np.where(valid, graded_ids, 0)
+    gm = valid.astype(float)
+    dl = grpo_dlogits(logits, gid, adv[:, None] * gm, gm, ref_logprobs=None, kl_beta=0.0)
+    grads = nm.backward_from_dlogits(dl, trace, batch)
+    g_np = grads[Keys.lm_head()]
+
+    diff = float(np.abs(g_torch - g_np).max())
+    details["rl_gradient_diff"] = diff
+    details["rl_gradient_match"] = bool(diff < 1e-5)
 
 
 # ─── Report ────────────────────────────────────────────────────────────────────

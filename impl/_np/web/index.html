@@ -191,7 +191,7 @@
       <div class="row">
         <div><label>Tokens to generate</label><input type="number" id="ntokens" value="8" min="1" max="32"></div>
         <div><label>Model — which checkpoint runs (architecture variant)</label>
-          <select id="variant"><option value="moe" selected>moe — router + top-k + shared expert</option></select>
+          <select id="variant"><option value="moe-rl" selected>moe-rl — full pipeline: SFT + GRPO</option></select>
         </div>
         <div><label>Backend — which implementation computes the forward pass</label>
           <select id="backend">
@@ -615,21 +615,37 @@ async function init(prefetched) {
   ];
   if (MODEL.has_moe) badges.push([`E = ${c.n_experts}`, "MoE experts (top-k " + c.top_k + ")"]);
   if (c.n_shared_experts > 0) badges.push([`shared = ${c.n_shared_experts}`, "always-on ungated expert(s) — every token passes through them; their averaged output is added on top of the routed experts' sum"]);
-  badges.push([`${MODEL.n_params.toLocaleString()}`, "parameters"]);
+  // The total-vs-active trade (ADR 0005): which slice stands behind ONE
+  // token. Dense: identical numbers. MoE: active < total — the point.
+  const active = MODEL.n_params_active != null ? MODEL.n_params_active : MODEL.n_params;
+  const paramTitle = active === MODEL.n_params
+    ? "parameters (all active — dense)"
+    : "parameters total · the per-token active slice (routed top-" + c.top_k + " + shared)";
+  badges.push([`${MODEL.n_params.toLocaleString()} · ${active.toLocaleString()}/tok`, paramTitle]);
   $("badges").innerHTML = badges.map(([v, t]) => `<span class="badge" title="${t}"><b>${v}</b> ${t}</span>`).join("");
   if (!MODEL.has_vocab) setStatus("This checkpoint has no vocab.json — text input unavailable.");
-  // Model variant dropdown: which checkpoint the page serves (moe = the
-  // router + top-k + shared-expert architecture; dense = plain SwiGLU).
+  // Model variant dropdown: which checkpoint the page serves. Two
+  // controlled comparisons: *-rl vs * (RL's delta; the RL run started
+  // from exactly the SFT-final checkpoint) and moe vs dense (the FFN
+  // geometry, at both levels).
   const vSel = $("variant");
   const variants = MODEL.variants || [];
+  const LABELS = {
+    "moe-rl": "moe-rl — full pipeline: SFT + GRPO (param-matched MoE)",
+    "dense-rl": "dense-rl — full pipeline: SFT + GRPO (dense FFN)",
+    moe: "moe — SFT-final (the RL run's exact starting point)",
+    dense: "dense — SFT-final (the RL run's exact starting point)",
+  };
+  const training = new Set(MODEL.training_variants || []);
   if (variants.length > 1) {
     vSel.innerHTML = variants
       .map((v) => {
-        const label = v === "moe" ? "moe — router + top-k + shared expert" : v === "dense" ? "dense — plain SwiGLU FFN" : v;
-        return `<option value="${v}">${label}</option>`;
+        const label = LABELS[v] || v;
+        const suffix = training.has(v) ? " (training…)" : "";
+        return `<option value="${v}">${label}${suffix}</option>`;
       })
       .join("");
-    vSel.value = MODEL.variant || MODEL.default_variant || "moe";
+    vSel.value = MODEL.variant || MODEL.default_variant || "moe-rl";
     vSel.parentElement.style.display = "";
   } else {
     vSel.parentElement.style.display = "none"; // single variant: hide the dropdown

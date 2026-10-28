@@ -46,33 +46,44 @@ Finished task specs are deleted — the git history is the record.
 
 ## The learning-mode example model
 
-`scripts/learning.py` serves the **`learning_moe` checkpoint by default** —
-and both page variants are REAL end-to-end language models: a **BPE-512
-tokenizer** trained on the actual mixed corpus (so text splits into sub-word
-tokens like `Ġonce`, ` the`, `fu`, not single ASCII letters), trained by
-[`scripts/train_demo_model_v2.py`](scripts/train_demo_model_v2.py) in three
-stages — pre-train on TinyStories, fine-tune on code instructions, fine-tune
-on tool-call JSON. The two variants differ by ONE config knob:
+`scripts/learning.py` serves the **`learning_moe_rl` checkpoint by
+default** — and all four page variants are REAL end-to-end language
+models: a **BPE-512 tokenizer** (with the thinking-section specials
+`<|think|>` / `<|answer|>`) trained on the actual mixed corpus (so text
+splits into sub-word tokens like `Ġonce`, ` the`, `fu`, not single ASCII
+letters), trained by
+[`scripts/train_demo_model_v3.py`](scripts/train_demo_model_v3.py) in
+five stages — pre-train on TinyStories → code SFT → tool-call SFT →
+**thinking SFT** (reasoning distillation: GSM8K gold rationales +
+synthetic arithmetic, each row `question <|think|> rationale
+<|answer|> number`) → **GRPO RL** (reward = 1.0·correctness +
+0.2·format, group-relative advantage, KL to the frozen SFT model) —
+then the drafter sidecars are re-distilled from the RL target (ADR
+0003). Two families, four variants:
 
-- **dense** (`learning_tool`, 262,592 params) — plain SwiGLU FFN.
-- **moe** (`learning_moe`, 705,536 params, the default) — the FFN swapped
-  for a router + top-k experts + an always-on shared expert (E=3+1 shared,
-  `--variant moe`).
+- **dense** (`learning_think`, 262,592 params) — plain SwiGLU FFN, SFT-final.
+- **moe** (`learning_moe_think`) — the param-matched MoE of ADR 0005
+  (E=8 routed + 1 always-on shared expert at `expert_dim=32`, top-1:
+  282,560 total but only 153,536 active per token), SFT-final.
+- **dense-rl** (`learning_rl`) / **moe-rl** (`learning_moe_rl`, the
+  default) — the same two models after the GRPO RL stage.
 
-Same tokenizer, same corpus, same seed — so the page's dense-vs-MoE
-dropdown is a controlled experiment. Below is the shared **tokenizer +
-architecture** card (the `n_experts` row is what the variant dropdown
-switches).
+Same tokenizer, same corpus, same seed per family — so BOTH page
+comparisons are controlled: `moe-rl` vs `dense-rl` isolates the FFN
+geometry at the final level; `*-rl` vs `*` isolates RL's delta (the RL
+run started from exactly the shown SFT checkpoint). Below is the shared
+**tokenizer + architecture** card (the `n_experts` row is what the
+variant dropdown switches).
 
 | Hyperparameter | Value | Choice & why |
 | --- | --- | --- |
-| `vocab_size` | 512 | Byte-level BPE, case preserved, with 8 special tokens (`<|tool_call|>`, ` ```input `, …) so SFT can teach chat/tool shapes. Small enough that the full softmax fits on screen. |
+| `vocab_size` | 512 | Byte-level BPE, case preserved, with 10 special tokens (`<|tool_call|>`, `<|think|>`, `<|answer|>`, …) so SFT can teach chat/tool/reasoning shapes. Small enough that the full softmax fits on screen. |
 | `context_length` | 128 | Sequences are truncated/padded to 128; every (S, …) tensor in the record has ≤129 rows — inspectable by eye. |
 | `embed_dim` D | 64 | Model width. Small enough that every attention score, expert weight, and residual value can be printed in full. |
 | `n_layers` L | 3 | Three repeated decoder blocks — deep enough to show how the residual stream accumulates, shallow enough to follow end to end. |
 | `n_heads` H | 4 (`n_groups=4`) | Head dim = 16. `n_groups == n_heads` → every head has its own K/V (plain MHA); set `n_groups < n_heads` in config and the same code runs GQA. |
 | `rope_dim` | 0 | 0 rotates the full head dim (standard RoPE); no learned position embedding anywhere. |
-| `n_experts` | 1 (dense) / 3+1 shared (moe) | The FFN slot: 1 → dense SwiGLU (`expert_dim = 256 = 4·D`); the MoE variant trains `n_experts=3` routed + `n_shared_experts=1` always-on shared (`--variant moe`). |
+| `n_experts` | 1 (dense) / 8+1 shared (moe) | The FFN slot: 1 → dense SwiGLU (`expert_dim = 256 = 4·D`); the MoE variant trains `n_experts=8` routed + `n_shared_experts=1` always-on shared at `expert_dim=32` (`--variant moe`) — total-matched to the dense model (282,560 vs 262,592) at ~54% active params/token, the Qwen-A3B trade at toy scale (ADR 0005). |
 | biases / weight tying | none | LLaMA convention: RMSNorm has only γ, all projections are bias-free, `lm_head` is its own matrix (not the tied embedding). |
 
 ### Architecture diagrams
@@ -259,11 +270,11 @@ uv run python -m scripts.infer --model resource/models/learning_tool/ --backend 
 ### Learning mode (web page)
 
 ```bash
-# Serves http://0.0.0.0:8080 by default; a first run bootstraps the
-# target via scripts.train_demo_model_v2 AND the drafter sidecars via
-# scripts.train_drafters. The page starts in MTP mode when sidecars exist
-# (the trained demo ships speculative); --spec plain|mtp|dspark picks the
-# startup mode.
+# Serves http://0.0.0.0:8080 by default. A first run bootstraps the
+# default family via scripts.train_demo_model_v3 AND the drafter sidecars
+# via scripts.train_drafters; the OTHER family trains in a background
+# thread (switching to it mid-training shows "training, retry shortly").
+# The page starts in MTP mode when sidecars exist; --spec picks otherwise.
 uv run python -m scripts.learning
 uv run python -m scripts.learning --spec dspark
 
@@ -272,14 +283,17 @@ uv run python -m scripts.learning --spec dspark
 uv run python -m scripts.learning --backend torch
 uv run python -m scripts.learning --port 9000 --model resource/models/torch_real
 
-# Rebuild the default served checkpoints (learning_base/_sft/_tool:
-# 3-stage pretrain→SFT→tool pipeline, BPE-512, D=64, L=3, H=4 — see
-# "The learning-mode example model" above)
-uv run python -m scripts.train_demo_model_v2
+# Rebuild a family end-to-end (BPE-512 with think tags → pretrain →
+# code SFT → tool SFT → thinking SFT → GRPO RL → drafter sidecars; see
+# "The learning-mode example model" above). The MoE family is the page
+# default: E=8 routed + 1 shared expert at dim 32, param-matched to the
+# dense model (ADR 0005).
+uv run python -m scripts.train_demo_model_v3 --variant moe    # learning_moe_rl (default variant)
+uv run python -m scripts.train_demo_model_v3                  # learning_rl (dense twin)
 
-# Build the MoE twin of the pipeline (learning_moe: same tokenizer/corpus/
-# stages, E=3 routed + 1 shared expert) — the page's default variant
-uv run python -m scripts.train_demo_model_v2 --variant moe
+# The RL stage alone, on any backend (the GRPO loop; --backend numpy is
+# the readable math reference):
+uv run python -m scripts.rl --backend numpy --model resource/models/learning_think
 ```
 
 ### Training
@@ -315,10 +329,10 @@ The TinyStories dataset itself lives in `resource/` (also git-ignored):
 ### Equivalence verification
 
 ```bash
-# 9 scenarios: dense_np_torch, gqa_np_torch, moe_np_torch,
+# 11 scenarios: dense_np_torch, gqa_np_torch, moe_np_torch,
 # moe_shared_experts_np_torch, gqa_torch_triton, spec_mtp_np_torch,
-# spec_dspark_np_torch, cuda_shared_weights, all_four_backends
-uv run python -m scripts.verify_equivalence
+# spec_dspark_np_torch, moe_param_matched_np_torch, rl_dense_np_torch,
+# cuda_shared_weights, all_four_backends
 
 # Quick mode / single scenario
 uv run python -m scripts.verify_equivalence --fast
@@ -384,15 +398,17 @@ docs/
 scripts/
 ├── train.py               # Training loop (all backends)
 ├── infer.py               # Inference (all backends; --spec plain|mtp|dspark)
-├── verify_equivalence.py  # 9-scenario parity check (incl. 2 speculative)
+├── verify_equivalence.py  # 11-scenario parity check (incl. speculative + RL gradient)
 ├── learning.py            # learning-mode web page server (--spec startup mode)
 ├── train_drafters.py      # drafter distillation from the frozen target
 ├── sft.py                 # SFT entry point (pre/post/prepost stages)
+├── rl.py                  # GRPO RL entry point (all backends; ADR 0004)
+├── train_demo_model_v3.py # the demo pipeline: pre → SFT-code → SFT-tool → SFT-think → RL → drafters
 ├── train_tokenizer.py     # BPE tokenizer trainer
 ├── download_sft_data.py   # SFT dataset fetcher
+├── download_gsm8k.py      # GSM8K fetcher (thinking-SFT/RL prompts; ADR 0004)
 ├── train_real_tinystories.py
-├── train_demo_model.py    # legacy char-level trainer (superseded by --variant moe)
-├── train_demo_model_v2.py # learning_base/_sft/_tool pipeline
+├── train_demo_model.py    # legacy char-level trainer (superseded by the v3 pipeline)
 ├── download_tinystories.py
 └── check_docs.py          # doc-vs-code alignment check (paths + counts)
 tests/
