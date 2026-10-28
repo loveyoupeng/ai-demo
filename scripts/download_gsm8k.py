@@ -18,11 +18,11 @@ pipeline stays dead simple):
    they are supervision artifacts for GSM8K's verifiers, not text a
    language model should learn to emit.
 2. Split out the gold answer from the ``####`` marker.
-3. Keep only problems that FIT THE TOY CONTEXT: after tokenizing with the
-   project's BPE tokenizer, question + rationale + think/answer tags must
-   fit 100 tokens (ctx is 128). At D=64/L=3 this filter keeps a few
-   hundred of the shortest problems — the honest lesson that reasoning
-   length is a budget, the same constraint real systems budget for.
+3. Keep the rows that FIT THE TOY CONTEXT: every scanned row is
+   tokenized with the project's BPE tokenizer and the SHORTEST-N win
+   (a raw GSM8K row is ~300 tokens median, ctx is 128) — the on-disk
+   slice is the short tail of the real distribution, the honest lesson
+   that reasoning length is a budget.
 4. If ``resource/bpe_tokenizer.json`` is missing (fresh clone), write the
    raw cleaned rows instead and let the pipeline re-filter after it trains
    the tokenizer.

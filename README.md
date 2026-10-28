@@ -61,10 +61,12 @@ synthetic arithmetic, each row `question <|think|> rationale
 then the drafter sidecars are re-distilled from the RL target (ADR
 0003). Two families, four variants:
 
-- **dense** (`learning_think`, 262,592 params) — plain SwiGLU FFN, SFT-final.
-- **moe** (`learning_moe_think`) — the param-matched MoE of ADR 0005
-  (E=8 routed + 1 always-on shared expert at `expert_dim=32`, top-1:
-  282,560 total but only 153,536 active per token), SFT-final.
+- **dense** (`learning_think`) — 6 layers, thin SwiGLU FFN (dim 96),
+  275,264 params — the DEPTH twin (the Qwen3-32B shape), SFT-final.
+- **moe** (`learning_moe_think`) — the param-matched MoE of ADR 0005:
+  3 layers, E=8 routed + 1 always-on shared expert at `expert_dim=32`,
+  top-1 — 282,560 total (1.03× dense) but only 153,536 active per token
+  (~54%), SFT-final.
 - **dense-rl** (`learning_rl`) / **moe-rl** (`learning_moe_rl`, the
   default) — the same two models after the GRPO RL stage.
 
@@ -83,7 +85,7 @@ variant dropdown switches).
 | `n_layers` L | 3 | Three repeated decoder blocks — deep enough to show how the residual stream accumulates, shallow enough to follow end to end. |
 | `n_heads` H | 4 (`n_groups=4`) | Head dim = 16. `n_groups == n_heads` → every head has its own K/V (plain MHA); set `n_groups < n_heads` in config and the same code runs GQA. |
 | `rope_dim` | 0 | 0 rotates the full head dim (standard RoPE); no learned position embedding anywhere. |
-| `n_experts` | 1 (dense) / 8+1 shared (moe) | The FFN slot: 1 → dense SwiGLU (`expert_dim = 256 = 4·D`); the MoE variant trains `n_experts=8` routed + `n_shared_experts=1` always-on shared at `expert_dim=32` (`--variant moe`) — total-matched to the dense model (282,560 vs 262,592) at ~54% active params/token, the Qwen-A3B trade at toy scale (ADR 0005). |
+| FFN / `n_experts` | dense: SwiGLU `expert_dim=96` (= 1.5·D) / moe: E=8 routed + 1 always-on shared at `expert_dim=32`, top-1 | The FFN slot — where the two families diverge (ADR 0005). Totals match: dense 275,264 all-active vs moe 282,560 (1.03×) with only 153,536 active/token (~54%) — the total-vs-active trade at toy scale. |
 | biases / weight tying | none | LLaMA convention: RMSNorm has only γ, all projections are bias-free, `lm_head` is its own matrix (not the tied embedding). |
 
 ### Architecture diagrams

@@ -173,13 +173,19 @@ class TextGenerator:
 
         for step in range(self.max_new_tokens):
             guarded = next_logits.clone()
-            for b in range(batch_size):
-                if emitted.shape[1] > 0:
-                    seen = emitted[b].unique()
-                    for tid in seen.tolist():
-                        v = guarded[b, tid]
-                        guarded[b, tid] = v / REP_PENALTY if v > 0 else v * REP_PENALTY
-                    guarded[b, int(emitted[b, -1].item())] = -float("inf")  # never immediately repeat
+            if emitted.shape[1] > 0:
+                # Vectorized repetition guard — SAME rule as before (penalty
+                # on every token already emitted in the row, then a hard
+                # block on the immediate repeat), but as batched tensor ops.
+                # The previous double loop over (row, token id) wrote scalars
+                # one at a time, so every write was a device sync: ~B·T syncs
+                # per decode step made a G=8 × 80-token rollout take ~21 s
+                # on the Jetson (the RL stage's whole runtime).
+                seen = torch.zeros_like(guarded, dtype=torch.bool)
+                seen.scatter_(1, emitted, True)  # (B, V) — 1 at every emitted id
+                penalized = torch.where(guarded > 0, guarded / REP_PENALTY, guarded * REP_PENALTY)
+                guarded = torch.where(seen, penalized, guarded)
+                guarded.scatter_(1, emitted[:, -1:], float("-inf"))  # never immediately repeat
 
             if temperature == 0.0:
                 # Greedy: argmax picks the highest-logit token
@@ -195,9 +201,9 @@ class TextGenerator:
                 logits_max = torch.max(scaled, dim=-1, keepdim=True).values
                 exp_logits = torch.exp(scaled - logits_max)
                 probs = exp_logits / torch.sum(exp_logits, dim=-1, keepdim=True)  # (B, V)
-                next_token = torch.stack(
-                    [torch.multinomial(probs[b].float(), num_samples=1) for b in range(batch_size)]
-                ).squeeze(-1)  # (B,)
+                # One batched draw (rows are independent) instead of B
+                # per-row calls — same distribution, B fewer launches.
+                next_token = torch.multinomial(probs.float(), num_samples=1).squeeze(-1)  # (B,)
             emitted = torch.cat([emitted, next_token.reshape(batch_size, 1)], dim=1)
 
             # Educational logging (first/last step, or short generations)

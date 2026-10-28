@@ -112,20 +112,23 @@ interchangeably. `impl/_np/learning_server.py` serves the web page
 `/api/record`) via stdlib `http.server`, listening on `0.0.0.0:8080` by
 default; the CLI `--backend` (`numpy`|`torch`) only picks which track the
 *startup* load materializes. The default served checkpoint is
-`learning_moe_rl` — the MoE family's FULL v3 pipeline model (BPE-512
-vocab with the `<|think|>`/`<|answer|>` specials, `D=64, L=3, H=4`;
-built by `scripts/train_demo_model_v3.py --variant moe`: pretrain →
-code SFT → tool SFT → thinking SFT (reasoning distillation, ADR 0004) →
-GRPO RL (ADR 0004) → drafter distillation). The page's Model dropdown
-carries four variants — `moe-rl` (default), `dense-rl`, `moe`, `dense` —
-giving TWO controlled comparisons: `*-rl` vs `*` isolates RL's delta
-(the RL run started from exactly the shown SFT checkpoint), and
-`moe-rl` vs `dense-rl` isolates the FFN geometry — the param-matched
-MoE of ADR 0005 (E=8 routed + 1 shared at `expert_dim=32`: ~1.08× the
-dense total at ~54% active/token). Missing/stale checkpoints (the
-`"pipeline": 3` config.json marker) bootstrap: the default family at
-startup, the other family in a background thread after the server is
-up (a still-training variant answers "training, retry shortly").
+`learning_moe_rl` — the MoE family's FULL pipeline model (BPE-512
+vocab with the `<|think|>`/`<|answer|>` specials, `D=64, H=4`; built by
+`scripts/train_demo_model_v3.py --variant moe`: pretrain → code SFT →
+tool SFT → thinking SFT (reasoning distillation, ADR 0004) → GRPO RL
+(ADR 0004) → drafter distillation). The page's Model dropdown carries
+four variants — `moe-rl` (default), `dense-rl`, `moe`, `dense` — giving
+TWO controlled comparisons: `*-rl` vs `*` isolates RL's delta (the RL
+run started from exactly the shown SFT checkpoint), and `moe-rl` vs
+`dense-rl` isolates the ARCHITECTURE split of ADR 0005 at matched total
+budget (~1.03×): the dense twin is 6 layers with a thin FFN
+(`expert_dim=96` = 1.5·D, 275,264 params — the Qwen3-32B shape); the
+MoE is 3 layers with E=8 routed + 1 shared at `expert_dim=32`
+(282,560 total, 153,536 active/token ~54% — the 30B-A3B shape).
+Missing/stale checkpoints (the `"pipeline": 4` config.json marker)
+bootstrap: the default family at startup, the other family in a
+background thread after the server is up (a still-training variant
+answers "training, retry shortly").
 
 The full directory tree lives in [README.md](README.md) → "Project
 structure" (one owner, kept aligned by `scripts/check_docs.py`).

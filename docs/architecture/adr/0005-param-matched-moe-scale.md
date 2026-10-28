@@ -1,6 +1,8 @@
-# ADR 0005: Parameter-matched MoE — 8 routed experts + 1 shared at dim 32
+# ADR 0005: Parameter-matched dense-vs-MoE — depth vs expert bank
 
-- Status: accepted
+- Status: accepted (revised 2026-10-28 — the first version matched only
+  the FFN scale, leaving both models at 3 layers; the revision makes the
+  TOTAL budgets match and splits them the way production pairs do)
 - Date: 2026-10-25
 - Supersedes: the **scale choice** in ADR 0002 (E=3 routed + 1 shared at
   the dense model's FFN width). ADR 0002's *decision* — an always-on
@@ -29,31 +31,35 @@ whatever config `/api/model` returns (the diagram interpolates
 `n_experts`), so a geometry change is a config change plus a params
 line, not a page rewrite.
 
-Dense reference at the toy scale (D=64, L=3, H=4, FFN=256): 262,592
-parameters, all active.
-
 ## Decision
 
-1. **MoE geometry becomes E=8 routed + 1 shared expert, expert_dim=32,
-   top_k=1** (one config change: `n_experts=8, n_shared_experts=1,
-   expert_dim=32, top_k=1`).
-   - Total: 282,560 (1.08× dense) — capacity-matched.
-   - Active per token: 153,536 (0.59× dense) — the routed slice is
-     1-of-8 experts (32-wide) + the shared expert (32-wide), so ~54% of
-     the MoE's own parameters and well under the dense model's FFN
-     budget stand behind any single token. The total-vs-active contrast
-     IS the lesson, at a scale the page can render.
+The two families get **the same total budget, spent differently** — the
+production pairing's shape (Qwen3-32B dense is DEEPER — 64 layers —
+than the 30B-A3B MoE's 48; the dense model buys depth, the MoE buys the
+expert bank):
+
+1. **Dense: 6 layers, thin FFN** (`expert_dim=96` = 1.5·D):
+   275,264 total = 275,264 active. Depth is the dense model's edge.
+2. **MoE: 3 layers, wide expert bank** (E=8 routed + 1 always-on shared
+   at expert_dim=32, top_k=1): 282,560 total (1.03× dense) but only
+   153,536 ACTIVE per token (~54% of its own parameters) — the
+   routed slice is 1-of-8 experts (32-wide) + the shared expert. The
+   total-vs-active contrast IS the lesson, at a scale the page renders.
    - 16-dim experts (a 15-expert alternative) would have been more
-     A3B-like in ratio but too degenerate to learn at D=64; 3 wide
-     experts (the status quo) shows no contrast. 8×32 is the middle
-     that keeps both models trainable.
-2. **The page shows the trade explicitly**: `/api/model` gains
+     A3B-like in ratio but too degenerate to learn at D=64; 8×32 is the
+     middle that keeps both models trainable.
+3. **The page shows the trade explicitly**: `/api/model` gains
    `n_params_active` next to `n_params`, and the badge line renders
    "total X · active Y/token" — the two numbers the A3B story lives on.
-3. **ADR 0002's shared-expert decision is unchanged**: the shared expert
-   remains always-on and ungated; only its width follows the new
-   expert_dim (32), so the routed+shared contrast stays visible in the
-   diagram.
+4. **ADR 0002's shared-expert decision is unchanged**: the shared expert
+   remains always-on and ungated; only its width follows expert_dim (32),
+   so the routed+shared contrast stays visible in the diagram.
+5. **First revision's flaw (why this is revised)**: the initial cut
+   matched only the FFN scale and left both models at 3 layers — the MoE
+   held 1.08× the dense TOTAL, so the comparison was not budget-matched
+   and both diagrams showed the same depth. Splitting depth (6 dense vs
+   3 MoE) fixes both: budgets match to 3%, and the page visibly shows
+   the two ways to spend the same budget.
 
 ## Alternatives considered
 
@@ -68,13 +74,13 @@ parameters, all active.
 
 ## Consequences
 
-- The MoE twin re-trains (v3 pipeline trains both families anyway); the
-  registry/schema are untouched (`expert_dim` is already a config knob
-  honored by all four tracks).
-- Router scores become (S, 8) — still small enough to render per cell.
-- The diagram auto-adjusts (expert count is read from config), but the
-  page's model-info line must add the active-param count or the
-  redesign is invisible.
-- `learning_moe*` checkpoints are stale on disk until retrained — the
-  `"pipeline": 3` marker in `config.json` (ADR 0004) drives the
-  staleness check.
+- BOTH families re-train (the dense geometry changed too — its
+  checkpoints carry `"pipeline": 3` and go stale; the marker is now 4);
+  the registry/schema are untouched (`expert_dim`/`n_layers` are already
+  config knobs honored by all four tracks).
+- Router scores stay (S, 8) — small enough to render per cell; the
+  dense diagram now shows 6 blocks vs the MoE's 3, which is itself half
+  the lesson (the same budget, two shapes).
+- The diagram auto-adjusts (layer and expert counts are read from
+  config), and `/api/model`'s `n_params_active` makes the trade visible
+  in the badge line.

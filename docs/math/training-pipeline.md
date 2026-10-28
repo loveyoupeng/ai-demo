@@ -180,16 +180,19 @@ distillation of ADR 0003 — lives in
   the thinking specials) → pre-train → code SFT → tool SFT → thinking
   SFT → GRPO RL → drafter sidecars, producing `learning_base` /
   `learning_sft` / `learning_tool` / `learning_think` / `learning_rl`.
+  The dense geometry is DEPTH: 6 layers, thin FFN (`expert_dim=96` =
+  1.5·D — 275,264 params, the Qwen3-32B shape).
 - `scripts/train_demo_model_v3.py --variant moe` — the MoE twin: the
-  same tokenizer, corpus, stages, and seed with the FFN swapped for the
-  PARAM-MATCHED MoE of ADR 0005 (E=8 routed + 1 always-on shared
-  expert at dim 32, top-1: ~1.08× the dense model's total parameters,
-  ~54% active per token — the total-vs-active trade the page renders),
-  producing `learning_moe_*` … `learning_moe_rl`.
+  same tokenizer, corpus, stages, and seed with 3 layers and the FFN
+  swapped for the PARAM-MATCHED MoE of ADR 0005 (E=8 routed + 1
+  always-on shared expert at dim 32, top-1: 282,560 total ≈ 1.03× the
+  dense budget, ~54% active per token — the total-vs-active trade the
+  page renders; the 30B-A3B shape), producing `learning_moe_*` …
+  `learning_moe_rl`.
 
-Every checkpoint's `config.json` carries `"pipeline": 3` — the
+Every checkpoint's `config.json` carries `"pipeline": 4` — the
 staleness marker `scripts/learning.py` checks (a missing/older marker
-retrains).
+retrains; the bump 3→4 marks the depth-parity revision of ADR 0005).
 
 ## Common Pitfalls This Repository Avoids
 

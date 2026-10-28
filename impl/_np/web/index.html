@@ -191,7 +191,7 @@
       <div class="row">
         <div><label>Tokens to generate</label><input type="number" id="ntokens" value="8" min="1" max="32"></div>
         <div><label>Model — which checkpoint runs (architecture variant)</label>
-          <select id="variant"><option value="moe-rl" selected>moe-rl — full pipeline: SFT + GRPO</option></select>
+          <select id="variant"><option value="moe-rl" selected>moe-rl — 3L + MoE bank, SFT + GRPO</option></select>
         </div>
         <div><label>Backend — which implementation computes the forward pass</label>
           <select id="backend">
@@ -626,15 +626,15 @@ async function init(prefetched) {
   if (!MODEL.has_vocab) setStatus("This checkpoint has no vocab.json — text input unavailable.");
   // Model variant dropdown: which checkpoint the page serves. Two
   // controlled comparisons: *-rl vs * (RL's delta; the RL run started
-  // from exactly the SFT-final checkpoint) and moe vs dense (the FFN
-  // geometry, at both levels).
+  // from exactly the SFT-final checkpoint) and moe vs dense (the
+  // ARCHITECTURE split — depth vs expert bank at matched budget).
   const vSel = $("variant");
   const variants = MODEL.variants || [];
   const LABELS = {
-    "moe-rl": "moe-rl — full pipeline: SFT + GRPO (param-matched MoE)",
-    "dense-rl": "dense-rl — full pipeline: SFT + GRPO (dense FFN)",
-    moe: "moe — SFT-final (the RL run's exact starting point)",
-    dense: "dense — SFT-final (the RL run's exact starting point)",
+    "moe-rl": "moe-rl — 3L + MoE bank (E=8+1), full pipeline: SFT + GRPO",
+    "dense-rl": "dense-rl — 6L thin FFN, full pipeline: SFT + GRPO",
+    moe: "moe — 3L + MoE bank, SFT-final (the RL run's exact starting point)",
+    dense: "dense — 6L thin FFN, SFT-final (the RL run's exact starting point)",
   };
   const training = new Set(MODEL.training_variants || []);
   if (variants.length > 1) {

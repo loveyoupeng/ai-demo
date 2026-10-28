@@ -79,14 +79,15 @@ class TorchGRPOTrainer:
     def rollout(self, prompt: torch.Tensor, generator=None) -> torch.Tensor:
         """Sample ``group_size`` completions for one (1, S) prompt.
 
+        ONE batched decode over G rows (the generator's KV-step path is
+        batched already — the rows never interact), not G sequential
+        decodes: same distribution, a fraction of the launch overhead.
+
         Returns: (G, S+T) — the G full streams (prompt + sampled tokens).
         """
         gen = generator or self._gen
-        streams = []
-        for _ in range(self.group_size):
-            out = gen.generate(prompt)
-            streams.append(out)
-        return torch.cat(streams, dim=0)  # (G, S+T)
+        rows = prompt.expand(self.group_size, -1)  # (G, S) — a read-only view
+        return gen.generate(rows)  # (G, S+T)
 
     def grpo_loss(
         self,

@@ -19,12 +19,14 @@ backend). Four variants, two controlled comparisons:
 
 - **moe-rl** (default) — ``learning_moe_rl``: the full v3 pipeline
   (pre-train → code SFT → tool SFT → thinking SFT → GRPO RL → drafter
-  distillation, ADR 0004) on the param-matched MoE of ADR 0005 (E=8
-  routed + 1 always-on shared expert at dim 32 — ~1.08× the dense
-  model's total parameters, ~54% active per token; the router scores,
-  top-1 selection, and shared branch render per block).
-- **dense-rl** — ``learning_rl``: the same five stages, dense SwiGLU
-  FFN. moe-rl vs dense-rl is dense-vs-moe at the FINAL level.
+  distillation, ADR 0004) on the param-matched MoE of ADR 0005: 3 layers
+  with E=8 routed + 1 always-on shared expert at dim 32 (282,560 total
+  params, 153,536 active/token — the router scores, top-1 selection,
+  and shared branch render per block).
+- **dense-rl** — ``learning_rl``: the same five stages on the dense
+  TWIN: 6 layers with a thin FFN (dim 96) — total-matched to the MoE
+  (275,264 vs 282,560, the Qwen3-32B-deeper-than-30B-A3B shape), so
+  moe-rl vs dense-rl compares the FFN geometry at matched budget.
 - **moe** — ``learning_moe_think``: the MoE family's SFT-final
   checkpoint (everything except RL), so *-rl vs * isolates RL's delta
   (RL started from exactly this model — the comparison is controlled).
@@ -33,11 +35,13 @@ backend). Four variants, two controlled comparisons:
 Either checkpoint runs on any backend selected in-page.
 
 Bootstrap: the DEFAULT family (moe) trains at startup if missing or
-stale (``"pipeline": 3`` marker in config.json — v2-era checkpoints
-retrain); the dense family trains in a BACKGROUND thread started right
-after the server comes up, so the first run stays "a few minutes" —
-switching to a still-training variant answers "training, retry shortly"
-instead of hanging the page.
+stale (``"pipeline": 4`` marker in config.json — older checkpoints,
+including the 3-layer dense pair, retrain); the dense family trains in
+a BACKGROUND thread started right after the server comes up, so the
+page is usable while the second family builds — switching to a
+still-training variant answers "training, retry shortly" instead of
+hanging the page. One family is six stages (~10-15 min on the Jetson:
+the GRPO stage dominates).
 """
 
 from __future__ import annotations
@@ -58,9 +62,9 @@ from shared.utils.logger_setup import setup_logging  # noqa: E402
 
 DEFAULT_MODEL = "resource/models/learning_moe_rl"
 
-# The v3 pipeline marker (ADR 0004): checkpoints whose config.json lacks
-# this (or carries an older one) are stale and retrain.
-PIPELINE_MARKER = 3
+# The demo-pipeline marker (ADRs 0004/0005): checkpoints whose
+# config.json lacks this (or carries an older one) are stale and retrain.
+PIPELINE_MARKER = 4
 
 # Model variants the page can switch between (the in-page Model dropdown):
 #   moe-rl   — learning_moe_rl: the FULL pipeline (pre → SFT-code →
@@ -72,7 +76,8 @@ PIPELINE_MARKER = 3
 #              the exact starting point of the moe-rl GRPO run.
 #   dense    — learning_think: the dense family at SFT-final.
 # The two comparisons are both controlled: *-rl vs * isolates RL (same
-# start), moe vs dense isolates the FFN geometry at BOTH levels.
+# start), moe vs dense isolates the ARCHITECTURE split (depth vs expert
+# bank, same total budget) at BOTH levels.
 VARIANTS = {
     "moe-rl": "resource/models/learning_moe_rl",
     "dense-rl": "resource/models/learning_rl",
@@ -93,11 +98,11 @@ def _port_free(host: str, port: int) -> bool:
 
 
 def _checkpoint_stale(model_dir: str) -> bool:
-    """True when the checkpoint is missing or pre-v3 (no/older marker).
+    """True when the checkpoint is missing or pre-v4 (no/older marker).
 
-    The v2-era checkpoints on disk do not know the think tags and carry
-    the old MoE geometry — serving one silently would break the page's
-    reasoning demo, so staleness retrains instead."""
+    Older checkpoints (the 3-layer dense pair, the v2-era geometry)
+    break the param-parity story the page tells — serving one silently
+    would show two SAME-SHAPE models, so staleness retrains instead."""
     cfg_path = Path(model_dir) / "config.json"
     if not (Path(model_dir) / "model.npz").is_file() or not cfg_path.is_file():
         return True
@@ -180,7 +185,10 @@ def main() -> int:
 
     if args.model == DEFAULT_MODEL:
         if _checkpoint_stale(args.model) and not args.no_bootstrap:
-            print(f"checkpoint {args.model} missing or stale — training the moe family first (a few minutes)...")
+            print(
+                f"checkpoint {args.model} missing or stale — training the moe family first "
+                f"(6 stages: pre → code → tool → think → GRPO RL → drafters; ~10-15 min on the Jetson)..."
+            )
             _train_family(DEFAULT_VARIANT)
         elif _checkpoint_stale(args.model):
             print(f"error: checkpoint {args.model} missing/stale and --no-bootstrap given", file=sys.stderr)
@@ -196,10 +204,14 @@ def main() -> int:
     if variant_dirs and not args.no_bootstrap:
         _start_background_bootstrap(variant_dirs)
 
-    # Drafters for every ready variant (a variant without sidecars falls
-    # back to plain decoding with a warning — never a hard failure).
-    for vdir in variant_dirs.values():
-        if not _checkpoint_stale(vdir):
+    # Drafters for the SERVE-ready variants the pipeline actually distills
+    # for (the *-rl checkpoints — ADR 0003's per-target contract). The
+    # SFT-final variants (moe / dense) ship without sidecars on purpose:
+    # they exist to show RL's delta, not decoding speed, and the page
+    # falls back to plain decoding for them with a warning (never a hard
+    # failure). This loop is the safety net for a deleted sidecar.
+    for label, vdir in variant_dirs.items():
+        if not _checkpoint_stale(vdir) and label.endswith("-rl"):
             _ensure_drafters(vdir)
 
     model, vocab, _cfg, _tok = learning_server.load_learning_model(args.model, backend=args.backend)

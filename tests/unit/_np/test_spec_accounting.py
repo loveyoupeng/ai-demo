@@ -82,16 +82,16 @@ class _HandlerHarness:
     """
 
     def __init__(self, backend: str = "numpy"):
-        model, vocab, _cfg, tok = load_learning_model("resource/models/learning_tool", backend="numpy")
+        model, vocab, _cfg, tok = load_learning_model("resource/models/learning_rl", backend="numpy")
         Handler = make_handler(
-            model, vocab, backend="numpy", model_dir="resource/models/learning_tool", default_spec="mtp"
+            model, vocab, backend="numpy", model_dir="resource/models/learning_rl", default_spec="mtp"
         )
         self._inst: Any = Handler.__new__(Handler)
         self._inst.model = model
         self._inst.vocab = vocab
         self._inst.tokenizer = tok
         self._inst.backend = backend
-        self._inst.model_dir = "resource/models/learning_tool"
+        self._inst.model_dir = "resource/models/learning_rl"
         self._inst._drafter_cache = {}
 
     def _decode_spec_params(self, body: dict) -> tuple[str, int | None]:
@@ -129,7 +129,7 @@ class TestEndpointValidation:
         """The silent-greedy hole: /api/record with temperature + spec on a
         torch-family model must raise (same answer as /api/inference)."""
         inst = _HandlerHarness()
-        tm, *_ = load_learning_model("resource/models/learning_tool", backend="torch")
+        tm, *_ = load_learning_model("resource/models/learning_rl", backend="torch")
         inst._inst.model = tm
         with pytest.raises(ValueError, match="NumPy track only"):
             inst._run_record({"text": "Once upon a time", "n_tokens": 6, "temperature": 0.8, "spec": "mtp", "k": 4})

@@ -27,16 +27,20 @@ documented pipeline order (docs/math/training-pipeline.md):
 7. Drafter sidecars: re-distilled from the RL targets
    (``scripts/train_drafters`` — ADR 0003's per-target contract).
 
-The MoE twin (``--variant moe``) runs the same stages with the FFN
-swapped for the param-matched MoE of ADR 0005: E=8 routed + 1
-always-on shared expert, expert_dim=32, top-k=1 — ~1.08× the dense
-model's TOTAL parameters but only ~54% ACTIVE per token, the
+The two families are TOTAL-PARAM-MATCHED but spend the budget
+differently (ADR 0005; the production pairing — Qwen3-32B dense is
+DEEPER than the 30B-A3B MoE): the dense model runs **6 layers** with a
+thin FFN (`expert_dim=96` = 1.5·D — 275,264 params, all active); the
+MoE twin (`--variant moe`) runs **3 layers** with the wide expert bank
+(E=8 routed + 1 always-on shared expert at dim 32, top-k=1 — 282,560
+total ≈ 1.03× dense, but only 153,536 ACTIVE per token, ~54%) — the
 total-vs-active trade the page renders.
 
-Every checkpoint config.json carries ``"pipeline": 3`` — the staleness
-marker ``scripts/learning.py`` checks (a missing/older marker retrains).
+Every checkpoint config.json carries ``"pipeline": 4`` — the staleness
+marker ``scripts/learning.py`` checks (a missing/older marker retrains;
+the bump 3→4 marks the depth parity change).
 
-Everything stays tiny: 512-token vocab, 3-layer model, a few thousand
+Everything stays tiny: 512-token vocab, a few thousand
 sequences — minutes per stage on the Jetson. Outputs under
 ``resource/models/`` each carry model.npz + config.json + vocab.json +
 tokenizer.json (+ rl_log.json for the RL stages).
@@ -71,7 +75,7 @@ RESOURCE = _project_root / "resource"
 N_STORIES = 4000
 BATCH = 32
 VOCAB = 512
-PIPELINE_MARKER = 3  # the config.json staleness marker (ADR 0004)
+PIPELINE_MARKER = 4  # the config.json staleness marker (ADRs 0004/0005; 4 = depth parity)
 CTX = 128
 
 # Stage order; ``--stage`` resumes AT a named stage (all later stages run).
@@ -343,19 +347,21 @@ def main() -> int:
     tok = train_tokenizer()
     stories, code, tool = load_corpus(tok)
 
+    # The param-matched pair of ADR 0005 — same total budget (~275-283k),
+    # SPENT differently: dense = DEPTH (6 layers, thin FFN 96 = 1.5·D —
+    # the Qwen3-32B shape), MoE = the wide expert bank (3 layers, E=8
+    # routed + 1 always-on shared at dim 32, top-1 — the 30B-A3B shape).
     cfg = TransformerConfig.from_dict(
         {
             "vocab_size": VOCAB,
             "embed_dim": 64,
-            "n_layers": 3,
+            "n_layers": 3 if moe else 6,  # depth vs bank: the budget split
             "n_heads": 4,
             "context_length": CTX,
             "seed": 42,
-            # the ONE knob that differs between the variants — the
-            # param-matched geometry of ADR 0005 (E=8+1 shared @ dim 32):
             "n_experts": 8 if moe else 1,
             "n_shared_experts": 1 if moe else 0,
-            "expert_dim": 32 if moe else 0,  # 0 → 4*D = dense FFN 256
+            "expert_dim": 32 if moe else 96,  # dense FFN 96 = 1.5·D (thin)
             "top_k": 1,
         }
     )

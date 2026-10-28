@@ -567,10 +567,15 @@ class _LearningHandler(BaseHTTPRequestHandler):
         raw_k = body.get("k")
         k: int | None = None if raw_k is None else int(raw_k)
         if k is not None and spec != "plain":
-            caps = self._spec_block_sizes()
-            cap = caps.get(spec)
-            if not (1 <= k <= (cap or k)):
-                raise ValueError(f"k must be in [1, {cap or 'the trained block size'}] for spec={spec!r}, got {k}")
+            cap = self._spec_block_sizes().get(spec)
+            if cap is None:
+                # No trained drafter for this checkpoint: every k is
+                # unverifiable, so reject the request instead of silently
+                # accepting an arbitrary one (the validation must not
+                # depend on which sidecars happen to exist on disk).
+                raise ValueError(f"spec={spec!r} has no trained drafter for this checkpoint (k must be omitted)")
+            if not 1 <= k <= cap:
+                raise ValueError(f"k must be in [1, {cap}] for spec={spec!r}, got {k}")
         return spec, k
 
     def _api_inference(self, body: dict) -> dict:
