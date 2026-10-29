@@ -354,7 +354,12 @@ class NumPyModel:
         Returns (logits (B, S, V), cache) where the cache holds the K/V of
         every position, ready for per-token steps. The cache is backfilled
         from the attention state the blocks capture during this very forward
-        pass (per-group, RoPE'd K / un-rotated V) — no second pass needed.
+        pass (per-group, RoPE’d K / un-rotated V) — no second pass needed.
+
+        Autoregressive flow: this is Stage 1. The next-token logits
+        (logits[:, -1, :]) feed the sampler which picks token S+1; that
+        token is then fed back through ``forward_step`` — see that
+        method's docstring for the step-by-step decode flow.
         """
         B, S = input_ids.shape
         if cache is None:
@@ -407,6 +412,19 @@ class NumPyModel:
     ) -> np.ndarray:
         """Process ONE token per batch row against the cached K/V.
 
+        **Stage 2+ of autoregressive decoding.** After ``forward_prefill``
+        has run the prompt and backfilled the cache, each new token is
+        produced by a single ``forward_step`` call — the rest of the
+        sequence never re-enters the model:
+
+        .. code-block:: text
+
+            forward_prefill(prompt)        → (logits, cache)
+            forward_step(tok_1, cache)     → logits  → sampler → tok_2
+            forward_step(tok_2, cache)     → logits  → sampler → tok_3
+            forward_step(tok_3, cache)     → logits  → sampler → tok_4
+            …
+
         input_ids: (B, 1) int token IDs — ONE new position per sequence.
             The KV cache holds every past position, so the step forwards
             only the newest token; the context is never re-fed as tokens.
@@ -415,26 +433,24 @@ class NumPyModel:
             layer's cache before attention runs.
         quantize: if True, append the new K/V to the cache in 1-bit
             TurboQuant form (bits + one scalar scale per (batch, head) per
-            token-write) and dequantize the
-            full cached tensor before attention, so the step attends against
-            the (lossy) quantized cache. If False, append the full-precision
-            K/V (the default naive path).
+            token-write) and dequantize the full cached tensor before
+            attention, so the step attends against the (lossy) quantized
+            cache. If False, append the full-precision K/V (the default
+            naive path).
 
         record: optional dict filled with the step's intermediates (same
             keys as the chunk/trace records — the learning-mode path).
 
         Returns: logits (B, 1, V).
 
-        Usage:
-          - **Prefill:** call with the *last* token of the sequence after
-            ``forward_prefill`` (or after threading all but the last token),
-            to recompute the last position's logits against the full cache.
-          - **Generate:** call with each *new* token (position = current
-            sequence length), to extend the sequence by one.
-
-        This is the O(1)-per-token inference path: only the new token's K/V
-        are computed; attention runs against the cached (B, G, t, hd) K/V
-        (naive) or the dequantized (B, H, t, hd) K/V (TurboQuant).
+        Relationship to other methods:
+          - This is Stage 2+ of decoding. ``forward_prefill`` runs once
+            for the prompt and fills the cache; every subsequent token is
+            produced here.
+          - ``forward_chunk`` is the batched counterpart used for
+            speculative-decoding *verification*: it appends c tokens and
+            scores every drafted position in parallel, whereas this
+            method appends exactly one token per call.
         """
         x = self.embedding.forward(input_ids)  # (B, 1, D)
         blocks_rec = [{} for _ in self.stack.layers] if record is not None else None
