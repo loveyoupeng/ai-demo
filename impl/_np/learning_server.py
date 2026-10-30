@@ -110,7 +110,12 @@ def load_learning_model(
     elif backend == "torch":
         from impl._torch.layers import TorchModel as _TorchModel
 
-        model = _TorchModel(cfg, params).double()
+        model = _TorchModel(cfg, params)
+        # Cast to float32 for display compatibility (the learning page
+        # converts torch tensors to numpy for display; numpy doesn't
+        # support bfloat16). The checkpoint itself is stored in float32;
+        # BF16 compute happens during training, not serving.
+        model = model.float()
         model.eval()
     elif backend == "triton":
         from impl._triton.model import TritonModel

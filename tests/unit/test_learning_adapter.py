@@ -77,17 +77,17 @@ class TestLoadBackend:
     """load_learning_model materializes the same checkpoint in either track."""
 
     @pytest.mark.timeout(120)
-    def test_numpy_is_default_and_torch_is_float64(self):
+    def test_numpy_is_default_and_torch_is_float32(self):
         np_model, vocab = _load_numpy()
         assert isinstance(np_model, NumPyModel)
         assert len(vocab) > 0
 
         torch_model, _ = _load_torch()
         assert isinstance(torch_model, TorchModel)
-        # The torch adapter serializes records in float64 — the model is
-        # materialized in double precision so the two tracks agree.
-        assert torch_model.lm_head.weight.dtype == torch.float64
-        assert torch_model.embedding.weight.dtype == torch.float64
+        # The torch track casts to float32 for serving (numpy display
+        # compatibility); BF16 is used during training only.
+        assert torch_model.lm_head.weight.dtype == torch.float32
+        assert torch_model.embedding.weight.dtype == torch.float32
 
     @pytest.mark.timeout(120)
     def test_invalid_backend_raises(self):
