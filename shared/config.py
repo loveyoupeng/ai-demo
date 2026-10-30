@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+import torch
+
 
 @dataclass(frozen=True)
 class TransformerConfig:
@@ -103,9 +105,16 @@ class TransformerConfig:
         return self.n_experts > 1
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize, excluding derived fields head_dim/k_dim/v_dim."""
+        """Serialize, excluding derived fields head_dim/k_dim/v_dim.
+
+        dtype is converted to a string name (e.g. "torch.bfloat16") for
+        JSON serialization; from_dict converts it back to the type."""
         skip = {"head_dim", "k_dim", "v_dim"}
-        return {k: v for k, v in asdict(self).items() if k not in skip}
+        d = {k: v for k, v in asdict(self).items() if k not in skip}
+        # torch.dtype objects are not JSON serializable — store as string name
+        if d.get("dtype") is not None and isinstance(d["dtype"], torch.dtype):
+            d["dtype"] = str(d["dtype"]).split(".")[-1]  # "bfloat16"
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TransformerConfig:
@@ -127,4 +136,13 @@ class TransformerConfig:
             "load_balance_loss",
         }
         filtered = {k: v for k, v in data.items() if k not in skip}
+        # Convert dtype string back to the actual dtype type
+        if filtered.get("dtype") is not None and isinstance(filtered["dtype"], str):
+            if filtered["dtype"] == "bfloat16":
+                filtered["dtype"] = torch.bfloat16
+            elif filtered["dtype"] == "float16":
+                filtered["dtype"] = torch.float16
+            elif filtered["dtype"] == "float32":
+                filtered["dtype"] = torch.float32
+            # else leave as string (unsupported dtype will fail validation)
         return cls(**filtered)

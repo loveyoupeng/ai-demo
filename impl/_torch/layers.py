@@ -1065,9 +1065,12 @@ class TorchModel(nn.Module):
         tensors = ParameterRegistry(self.config).bind(self._param_tensors())
         params: dict[str, Any] = {}
         for entry in ParameterRegistry(self.config).entries:
-            array = tensors[entry.key].detach().cpu().numpy()
+            array = tensors[entry.key].detach().cpu()
             # Checkpoint storage is float32 (np.bfloat16 doesn't exist).
-            params[entry.key] = array.T if entry.torch_transpose else array
+            if array.dtype == torch.bfloat16:
+                array = array.float()
+            arr = array.numpy()
+            params[entry.key] = arr.T if entry.torch_transpose else arr
         return params  # type: ignore[return-value]
 
     def get_all_parameters(self) -> dict[str, Any]:
