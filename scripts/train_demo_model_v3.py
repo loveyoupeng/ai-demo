@@ -363,6 +363,7 @@ def main() -> int:
             "n_shared_experts": 1 if moe else 0,
             "expert_dim": 32 if moe else 96,  # dense FFN 96 = 1.5·D (thin)
             "top_k": 1,
+            "dtype": torch.bfloat16,
         }
     )
     device = "cuda" if torch.cuda.is_available() else "cpu"

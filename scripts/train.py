@@ -27,6 +27,8 @@ import time
 from collections import deque
 from pathlib import Path
 
+import torch
+
 # Add project root to path for imports
 _project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_project_root))
@@ -184,6 +186,7 @@ def _config_from_dict(config: dict) -> TransformerConfig:
         top_k=config.get("top_k", 2),
         expert_dim=config.get("expert_dim", 0),
         seed=config.get("seed", 42),
+        dtype=torch.bfloat16,
     )
 
 

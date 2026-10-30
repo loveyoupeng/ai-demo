@@ -140,6 +140,32 @@ class CUDAModel:
         if p is not None:
             _copy_in_place(self.lm_head_weight, p[Keys.lm_head()])
 
+        # Cast model parameters to the configured dtype (AMP: BF16 compute with FP32 master weights)
+        if config.dtype is not None:
+            self.embedding_weights.data = self.embedding_weights.data.to(config.dtype)
+            self.final_norm_gamma.data = self.final_norm_gamma.data.to(config.dtype)
+            self.lm_head_weight.data = self.lm_head_weight.data.to(config.dtype)
+            for block in self.stacking.blocks:
+                for attr_name in ('q_proj', 'k_proj', 'v_proj', 'o_proj'):
+                    attr = getattr(block, attr_name)
+                    attr.data = attr.data.to(config.dtype)
+                for block in self.stacking.blocks:
+                    for attr_name in ('gate_proj', 'up_proj', 'down_proj'):
+                        attr = getattr(block, attr_name)
+                        attr.data = attr.data.to(config.dtype)
+                for block in self.stacking.blocks:
+                    if hasattr(block, 'router'):
+                        attr = block.router
+                        attr.data = attr.data.to(config.dtype)
+                    for e in range(cfg.n_experts):
+                        for attr_name in ('gate_proj', 'up_proj', 'down_proj'):
+                            attr = getattr(block.experts[e], attr_name)
+                            attr.data = attr.data.to(config.dtype)
+                    for s in range(cfg.n_shared_experts):
+                        for attr_name in ('gate_proj', 'up_proj', 'down_proj'):
+                            attr = getattr(block.shared_experts[s], attr_name)
+                            attr.data = attr.data.to(config.dtype)
+
     @classmethod
     def from_checkpoint(cls, checkpoint_dir: str | Path, device: str = "cuda") -> CUDAModel:
         """Construct a model from a checkpoint directory (the explicit

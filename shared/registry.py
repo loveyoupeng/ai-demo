@@ -47,6 +47,8 @@ class ParamEntry:
     key: str
     shape: tuple[int, ...]
     torch_transpose: bool = False
+    dtype: type | None = None  # checkpoint storage dtype (None = model config dtype)
+    dtype: type | None = None  # checkpoint storage dtype (None = model config dtype)
 
 
 class ParameterRegistry:
@@ -73,28 +75,28 @@ class ParameterRegistry:
             # SwiGLU: gate/up project D→FF, down projects FF→D.
             return (FF, D) if proj == Mlp.DOWN_PROJ else (D, FF)
 
-        entries: list[ParamEntry] = [ParamEntry(Keys.embed(), (V, D))]
+        entries: list[ParamEntry] = [ParamEntry(Keys.embed(), (V, D), dtype=cfg.dtype)]
         for i in range(cfg.n_layers):
-            entries.append(ParamEntry(Keys.ln(i, LayerNorm.INPUT), (D,)))
-            entries.append(ParamEntry(Keys.ln(i, LayerNorm.POST_ATTENTION), (D,)))
+            entries.append(ParamEntry(Keys.ln(i, LayerNorm.INPUT), (D,), dtype=cfg.dtype))
+            entries.append(ParamEntry(Keys.ln(i, LayerNorm.POST_ATTENTION), (D,), dtype=cfg.dtype))
             # Attention projections are nn.Linear in the PyTorch track → transposed there.
-            entries.append(ParamEntry(Keys.attn(i, Attn.Q_PROJ), (D, H * hd), torch_transpose=True))
-            entries.append(ParamEntry(Keys.attn(i, Attn.K_PROJ), (D, G * hd), torch_transpose=True))
-            entries.append(ParamEntry(Keys.attn(i, Attn.V_PROJ), (D, G * hd), torch_transpose=True))
-            entries.append(ParamEntry(Keys.attn(i, Attn.O_PROJ), (H * hd, D), torch_transpose=True))
+            entries.append(ParamEntry(Keys.attn(i, Attn.Q_PROJ), (D, H * hd), torch_transpose=True, dtype=cfg.dtype))
+            entries.append(ParamEntry(Keys.attn(i, Attn.K_PROJ), (D, G * hd), torch_transpose=True, dtype=cfg.dtype))
+            entries.append(ParamEntry(Keys.attn(i, Attn.V_PROJ), (D, G * hd), torch_transpose=True, dtype=cfg.dtype))
+            entries.append(ParamEntry(Keys.attn(i, Attn.O_PROJ), (H * hd, D), torch_transpose=True, dtype=cfg.dtype))
             if cfg.has_moe():
-                entries.append(ParamEntry(Keys.moe_gate(i), (D, E), torch_transpose=True))
+                entries.append(ParamEntry(Keys.moe_gate(i), (D, E), torch_transpose=True, dtype=cfg.dtype))
                 for j in range(E):
                     for proj in FFN_PROJS:
-                        entries.append(ParamEntry(Keys.moe_expert(i, j, proj), ffn_shape(proj)))
+                        entries.append(ParamEntry(Keys.moe_expert(i, j, proj), ffn_shape(proj), dtype=cfg.dtype))
                 for s in range(cfg.n_shared_experts):
                     for proj in FFN_PROJS:
-                        entries.append(ParamEntry(Keys.moe_shared_expert(i, s, proj), ffn_shape(proj)))
+                        entries.append(ParamEntry(Keys.moe_shared_expert(i, s, proj), ffn_shape(proj), dtype=cfg.dtype))
             else:
                 for proj in FFN_PROJS:
-                    entries.append(ParamEntry(Keys.ffn(i, proj), ffn_shape(proj)))
-        entries.append(ParamEntry(Keys.final_norm(), (D,)))
-        entries.append(ParamEntry(Keys.lm_head(), (D, V), torch_transpose=True))
+                    entries.append(ParamEntry(Keys.ffn(i, proj), ffn_shape(proj), dtype=cfg.dtype))
+        entries.append(ParamEntry(Keys.final_norm(), (D,), dtype=cfg.dtype))
+        entries.append(ParamEntry(Keys.lm_head(), (D, V), torch_transpose=True, dtype=cfg.dtype))
         return entries
 
     @property

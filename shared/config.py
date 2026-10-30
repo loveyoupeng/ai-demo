@@ -45,10 +45,11 @@ class TransformerConfig:
     n_experts: int = 1
     top_k: int = 1  # Top-k experts per token (1 <= top_k <= n_experts)
     expert_dim: int = 0  # FFN hidden dimension; 0 = 4 * embed_dim (standard)
-    # n_shared_experts > 0 (MoE only) → DeepSeek-style always-on ungated
-    # experts: out = mean(E_shared(x)) + Σ wⱼ·E_j(x). See docs/architecture/adr/0002-shared-expert-moe.md.
-    n_shared_experts: int = 0
+    n_shared_experts: int = 0  # always-on ungated shared experts (MoE only)
+    # Runtime dtype (None = backend default: NumPy float32, torch/triton/cuda torch.bfloat16)
+    dtype: type | None = None
 
+    # Runtime dtype (None = backend default: NumPy float32, torch/triton/cuda torch.bfloat16)
     # Training
     seed: int = 42
     norm_eps: float = 1e-6  # Epsilon for RMSNorm (one value for all tracks)

@@ -26,6 +26,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import torch
 from tokenizers import Tokenizer
 
 from shared.config import TransformerConfig
@@ -96,6 +97,7 @@ def main() -> None:
             "n_heads": 4,
             "context_length": args.max_len,
             "seed": 42,
+            "dtype": torch.bfloat16,
         }
     )
     loader = SFTLoader(tokenizer, max_len=args.max_len)

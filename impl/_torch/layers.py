@@ -866,6 +866,10 @@ class TorchModel(nn.Module):
         if p is not None:
             _copy_checkpoint(self.lm_head.weight, p[Keys.lm_head()], transpose=True)
 
+        # Cast model parameters to the configured dtype (AMP: BF16 compute with FP32 master weights)
+        if config.dtype is not None:
+            self.to(dtype=config.dtype)
+
     @classmethod
     def from_checkpoint(cls, checkpoint_dir: str | Path, dtype: torch.dtype | None = None) -> TorchModel:
         """Construct a model from a checkpoint directory (the explicit
@@ -1052,6 +1056,7 @@ class TorchModel(nn.Module):
         params: dict[str, Any] = {}
         for entry in ParameterRegistry(self.config).entries:
             array = tensors[entry.key].detach().cpu().numpy()
+            # Checkpoint storage is float32 (np.bfloat16 doesn't exist).
             params[entry.key] = array.T if entry.torch_transpose else array
         return params  # type: ignore[return-value]
 

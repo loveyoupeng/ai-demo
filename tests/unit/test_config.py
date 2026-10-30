@@ -168,6 +168,7 @@ class TestSerialization:
             "top_k",
             "expert_dim",
             "n_shared_experts",
+            "dtype",
             "seed",
             "norm_eps",
         }

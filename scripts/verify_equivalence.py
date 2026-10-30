@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
 
 # ─── Scenario model ────────────────────────────────────────────────────────────
 
@@ -399,13 +400,22 @@ def _compare_results(  # noqa: C901 - one comparison pass per metric keeps the r
         if wd > _WDIFF_TOL:
             passed = False
 
-    # Logit parity vs the reference, tiered by track precision.
+    # Logit parity vs the reference, tiered by track dtype.
+    # NumPy reference is always float32; torch/triton/cuda may be BF16.
+    # BF16 has ~3 decimal digits precision, so use the FP32 tolerance tier
+    # (torch float32 tracks use tighter float64 tolerance).
     for b, r in results.items():
         if b == "numpy" or r["error"] or ref_logits is None:
             continue
         ld = _logit_diff(ref_logits, r["logits"])
         details[f"ref_vs_{b}_logit_diff"] = round(ld, 8)
-        tol = _LOGIT_TOL_FLOAT64 if b == "torch" else _LOGIT_TOL_FP32
+        # NumPy reference is FP32; non-Numpy backends may be BF16. Use FP32
+        # tolerance (~1e-2) for BF16, float64 tolerance only for true float64 tracks.
+        torch_dtype = r.get("dtype", "float32")
+        if torch_dtype == torch.float64:
+            tol = _LOGIT_TOL_FLOAT64
+        else:
+            tol = _LOGIT_TOL_FP32
         if ld > tol:
             passed = False
 
@@ -572,7 +582,7 @@ def _rl_gradient_check(kwargs: dict[str, Any], details: dict[str, Any]) -> None:
     adv = rng.normal(size=(B,))
 
     tm = TorchModel(cfg)
-    params_np = dict(tm.get_all_parameters())
+    params_np = {k: np.asarray(v.detach().cpu().numpy() if isinstance(v, torch.Tensor) else v) for k, v in tm.get_all_parameters().items()}
     tr = TorchGRPOTrainer(tm, TorchModel(cfg), device="cpu", lr=1e-4, kl_beta=0.0)
     loss_t, _ = tr.grpo_loss(th.from_numpy(batch), th.from_numpy(rmask.astype(np.int64)), th.from_numpy(adv))
     loss_t.backward()

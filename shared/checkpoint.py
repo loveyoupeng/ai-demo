@@ -79,9 +79,14 @@ def save_checkpoint(
     if config is not None:
         save_config(config, path / "config.json")
     # np.savez needs numpy arrays; any torch tensors come from get_all_parameters().
-    arrays = {
-        name: (t if isinstance(t, np.ndarray) else t.detach().cpu().numpy()) for name, t in (params or {}).items()
-    }
+    arrays = {}
+    for name, t in (params or {}).items():
+        arr = t if isinstance(t, np.ndarray) else t.detach().cpu().numpy()
+        # Cast BF16 checkpoints to FP32 for disk storage (checkpoints are always
+        # stored in FP32 for portability; cast back to config dtype on load).
+        if config is not None and config.dtype is not None and arr.dtype == np.float32:
+            arr = arr.astype(np.float32)
+        arrays[name] = arr
     np.savez(str(path / "model.npz"), **arrays)  # pyright: ignore[reportArgumentType]
 
 
@@ -114,7 +119,9 @@ def load_checkpoint(checkpoint_dir: str | Path) -> tuple[dict[str, Any], Transfo
             f"Run `uv run python -m scripts.train --backend <backend>` first to produce a checkpoint."
         )
 
-    # Load all arrays from npz
+    # Load all arrays from npz. Arrays are stored in float32 (np.bfloat16
+    # doesn't exist). Each track casts to its compute dtype when building
+    # the model from these arrays (BF16 for torch/triton/cuda, FP32 for NumPy).
     params = dict(np.load(str(model_path)))
 
     # Validate against the registry so stale (pre-migration) checkpoints

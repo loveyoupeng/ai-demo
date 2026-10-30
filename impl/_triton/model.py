@@ -92,6 +92,10 @@ class TritonModel(nn.Module):
         if p is not None:
             copy_in_place(self.lm_head.weight, p[Keys.lm_head()], transpose=True)
 
+        # Cast model parameters to the configured dtype
+        if config.dtype is not None:
+            self.to(dtype=config.dtype)
+
     @classmethod
     def from_checkpoint(cls, checkpoint_dir: str | Path, device: torch.device | str | None = None) -> TritonModel:
         """Construct a model from a checkpoint directory (the explicit
