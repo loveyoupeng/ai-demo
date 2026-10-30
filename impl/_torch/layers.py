@@ -152,10 +152,20 @@ class RoPE(nn.Module):
     """
 
     def forward(self, x: torch.Tensor, position: int = 0, rope_dim: int = 0) -> torch.Tensor:
-        """Apply RoPE to q or k. x: (B, S, H, D); position: the pass's
-        first absolute token index (RoPE builds arange(position, position+S))."""
+        """Apply RoPE to q or k. x: (B, S, H, D); position: the first absolute
+        token index (RoPE builds arange(position, position+S))."""
+        # Compute in float32 for numerical stability, then cast back to
+        # the input dtype (important when dtype=torch.bfloat16).
+        dtype = x.dtype
+        x_f = x.float()
         # Split rotated prefix from pass-through suffix.
-        d = x.shape[-1]
+        d = x_f.shape[-1]
+        if rope_dim > 0 and rope_dim < d:
+            x_rot = x_f[..., :rope_dim]
+            x_pass = x_f[..., rope_dim:]
+        else:
+            x_rot = x_f
+            x_pass = None
         if rope_dim > 0 and rope_dim < d:
             x_rot = x[..., :rope_dim]
             x_pass = x[..., rope_dim:]
@@ -193,7 +203,7 @@ class RoPE(nn.Module):
 
         if x_pass is not None:
             return torch.cat([rotated, x_pass], dim=-1)  # (B, S, H, D)
-        return rotated
+        return rotated.to(dtype) if x_pass is None else torch.cat([rotated, x_pass], dim=-1).to(dtype)
 
 
 class MultiHeadAttention(nn.Module):
