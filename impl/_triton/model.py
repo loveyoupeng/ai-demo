@@ -92,7 +92,10 @@ class TritonModel(nn.Module):
         if p is not None:
             copy_in_place(self.lm_head.weight, p[Keys.lm_head()], transpose=True)
 
-        # Cast model parameters to the configured dtype
+        # Cast model parameters to the configured dtype — BF16 AMP: the Triton
+        # kernels' matmuls then run on the GPU tensor cores in BF16 (~2x FP32 on
+        # Ampere+); the checkpoint itself stays FP32 (see design.md
+        # "Precision & tensor cores"; serving casts back to float32).
         if config.dtype is not None:
             self.to(dtype=config.dtype)
 

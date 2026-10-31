@@ -231,6 +231,11 @@ the dev loop.
 
 - `uv` only (the repo `.venv`); Python 3.10; `torch==2.13.0+cu132` from the
   pinned `pytorch-cu132` uv index — do not re-resolve torch from PyPI.
+- **Dtype contract**: GPU tracks (torch/triton/cuda) train in BF16
+  (`TransformerConfig.dtype = torch.bfloat16`) so matmuls run on tensor cores
+  (~2x FP32 on Ampere+); checkpoints store FP32 and serving casts to float32
+  (`load_learning_model`). NumPy track = float64/float32 reference, never BF16.
+  See `docs/architecture/design.md` → "Precision & tensor cores".
   Optional extras: `triton`, `cuda` (`cuda-python`).
 - Ruff: `line-length = 120`, rules `E, W, F, I, UP, B, SIM, C90` (E501
   ignored — the formatter owns line length); `__init__.py` ignores F401.

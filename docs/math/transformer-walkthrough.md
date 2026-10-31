@@ -380,3 +380,8 @@ actually runs (verified by a counting-stub test).
   `impl/_torch/learning.py`) does not re-implement the model: it calls each
   track's own `forward_state` hooks and serializes the intermediates those paths
   already compute, so the page's numbers are the track's actual forward pass.
+- **BF16 on the GPU tracks.** The forward-pass math above is dtype-agnostic;
+  on torch/triton/cuda the matmuls run in bfloat16 on the GPU tensor cores
+  (RoPE upcasts to FP32 for stability), while NumPy computes the same formulas
+  in float64. Checkpoints store FP32 either way. See
+  [design.md](../architecture/design.md) → "Precision & tensor cores".

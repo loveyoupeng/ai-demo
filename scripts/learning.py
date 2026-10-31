@@ -41,6 +41,16 @@ This is a PURE SERVING script - it loads pre-trained checkpoints and
 serves them. Training happens separately via scripts.train_demo_model_v3
 (run before serving). Missing checkpoints cause a clear error telling
 the user to run the training pipeline first.
+
+Dtype note: the served checkpoints carry ``dtype: bfloat16`` in config.json
+because the GPU tracks (torch/triton/cuda) TRAIN in BF16 — AMP matmuls on the
+GPU tensor cores (~2x FP32 throughput on Ampere+). The weights themselves are
+stored FP32 in model.npz, and this page SERVES every backend in float32
+(load_learning_model casts torch/triton/cuda models to float32), so the
+in-page records (float64 display path) and the float32 drafter sidecars all
+share one dtype. The NumPy backend computes the reference math in
+float64/float32 and never uses BF16. The page header shows a dtype badge
+explaining exactly this.
 """
 
 from __future__ import annotations

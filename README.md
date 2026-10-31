@@ -200,6 +200,11 @@ the equation, the *why*, and the code anchor) lives in one place:
   across tracks), GPU parity, and a 3-way equivalence demo;
   `scripts.verify_equivalence` runs 9 end-to-end scenarios (incl.
   `spec_mtp_np_torch` / `spec_dspark_np_torch`).
+- **BF16 AMP training on the GPU tracks**: torch/triton/cuda train in
+  bfloat16 (`TransformerConfig.dtype`) so matmuls run on the GPU **tensor
+  cores** (~2x FP32 throughput on Ampere+); checkpoints store FP32 and the
+  learning page serves float32. NumPy stays float64/float32 (the math
+  reference). See `docs/architecture/design.md` → "Precision & tensor cores".
 - **Checkpoint interchange**: one flat-dict key scheme
   (`shared.constants.Keys`, HF-Llama naming) + a parameter registry
   (`shared/registry.py`) that validates shape and key-set on load

@@ -79,6 +79,45 @@ flowchart TD
 - **Batch size**: Context-length chunks for next-token prediction (e.g., 32×256)
 - **Data pipeline**: Tokenizer → TokenizedDataset → DataLoader → forward → loss → step
 
+#### Precision & tensor cores (BF16 AMP on the GPU tracks)
+
+The GPU tracks (torch / triton / cuda) train in **bfloat16 (BF16)** — set via
+`TransformerConfig.dtype` (see `shared/config.py`). BF16 keeps FP32's 8-bit
+exponent with a 7-bit mantissa, so the *range* is FP32's while the matmuls
+run on the GPU's **tensor cores** in BF16, roughly 2x the FP32 throughput on
+Ampere+ (CC >= 8.0). That is the whole point of the flag: on the Jetson's
+~20 TFLOPS FP32 CUDA cores, BF16 tensor-core matmuls are what make the
+demo pipeline train in minutes instead of hours.
+
+The AMP contract in this repo is deliberately simple and honest:
+
+- **Compute in BF16, store in FP32.** The checkpoint (`model.npz`) is always
+  float32 — `npz` has no bf16 dtype, and `save_as_numpy()` casts BF16 weights
+  back to float32 on save (`impl/_torch/layers.py`). Optimizer state (AdamW
+  moments) stays FP32. So BF16 affects only training speed and numeric
+  range — never the stored weights, never the cross-backend parity.
+- **Serving casts back to float32.** `load_learning_model` (the learning
+  page's loader) casts torch/triton/cuda serving models to float32, so the
+  page's records (which display in float64) and the drafter sidecars (float32)
+  all agree on one dtype. A BF16 target beside float32 drafters is exactly the
+  mixed-dtype matmul the page must never hit.
+- **Stability-critical ops upcast to FP32 even in BF16 training.** RoPE
+  computes in float32 and casts back (`impl/_torch/layers.py` `RoPE.forward`);
+  RMSNorm's mean-of-squares is accumulated in the input dtype but the division
+  is exact enough at BF16 range; the softmax in attention subtracts the row max
+  first (numerically stable in BF16).
+- **The NumPy track stays float64/float32** — it is the teaching reference
+  (analytic backward + finite-difference gradcheck at ~1e-10), so it never
+  uses BF16; parity tests run everything in float64.
+
+The CUDA track additionally compiles its kernels per-device to PTX via NVRTC
+(see "Platform Target" below), and its `swiglu_ffn` / attention matmuls run
+through cuBLAS, which dispatches to tensor-core BF16 GEMMs automatically when
+the operands are BF16 — no explicit `torch.amp.autocast` context is needed
+because the *weights themselves* are BF16 (the model's storage dtype), not an
+autocast region.
+
+
 ### Inference
 
 - **Greedy decoding**: `argmax(logits)` → deterministic, best for testing

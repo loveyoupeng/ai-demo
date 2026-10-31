@@ -48,10 +48,16 @@ class TransformerConfig:
     top_k: int = 1  # Top-k experts per token (1 <= top_k <= n_experts)
     expert_dim: int = 0  # FFN hidden dimension; 0 = 4 * embed_dim (standard)
     n_shared_experts: int = 0  # always-on ungated shared experts (MoE only)
-    # Runtime dtype (None = backend default: NumPy float32, torch/triton/cuda torch.bfloat16)
+    # Runtime dtype. None = backend default: NumPy float32 (the teaching
+    # reference), torch/triton/cuda bfloat16. BF16 (Brain Float 16: the
+    # FP32 8-bit exponent with a 7-bit mantissa) is the AMP training dtype
+    # on the GPU tracks — matmuls run on the GPU's TENSOR CORES in BF16
+    # (~2x FP32 throughput on Ampere+), while optimizer state and the
+    # checkpoint stay FP32 (npz has no bf16; serving casts back to float32
+    # in learning_server.load_learning_model). So BF16 changes training
+    # speed and numeric range, never the stored weights or the page records.
     dtype: type | None = None
 
-    # Runtime dtype (None = backend default: NumPy float32, torch/triton/cuda torch.bfloat16)
     # Training
     seed: int = 42
     norm_eps: float = 1e-6  # Epsilon for RMSNorm (one value for all tracks)

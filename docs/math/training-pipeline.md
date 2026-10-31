@@ -206,3 +206,16 @@ instead of the tool call.
 What they do *not* model is RoPE + GQA and why they're required to make
 the response logits cross the sequence boundary at pocket scale. See
 `docs/architecture/design.md`.
+
+### Precision note (BF16 training on the GPU tracks)
+
+The pipeline's GPU stages (torch/triton/cuda) train in **bfloat16** —
+`TransformerConfig.dtype = torch.bfloat16` — so the FFN/attention matmuls hit
+the GPU **tensor cores** at ~2x FP32 throughput (Ampere+). The weights are
+stored FP32 in `model.npz` (npz has no bf16); only the live compute is BF16,
+with RoPE upcasting to FP32 for stability. The NumPy track stays float64 — it
+is the math reference, and every cross-backend parity test runs in float64, so
+BF16's reduced mantissa never leaks into a correctness comparison. Serving
+(the learning page) always casts back to float32. See
+`docs/architecture/design.md` → "Precision & tensor cores" for the full
+contract.

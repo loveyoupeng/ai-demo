@@ -160,6 +160,14 @@ letters. Where each value comes from:
 - **Gradient clipping**: scale the gradients so their global L2 norm is at
   most `max_norm`. Prevents exploding gradients.
 
+- **BF16 / tensor cores (GPU tracks)**: the torch/triton/cuda tracks train in
+  **bfloat16** (`TransformerConfig.dtype = torch.bfloat16`). BF16 keeps FP32's
+  8-bit exponent with a 7-bit mantissa, so matmuls run on the GPU's **tensor
+  cores** at ~2x FP32 throughput (Ampere+, CC >= 8.0) while keeping FP32's
+  range. Checkpoints store FP32 (`model.npz` has no bf16); serving casts back
+  to float32; the NumPy reference track stays float64/float32. See
+  `docs/architecture/design.md` → "Precision & tensor cores".
+
 - **Cross-entropy loss**: the standard language-modeling loss. Compares the
   logits to the target token IDs; ignores `ignore_index` positions.
 

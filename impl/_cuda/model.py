@@ -152,8 +152,11 @@ class CUDAModel:
         if p is not None:
             _copy_in_place(self.lm_head_weight, p[Keys.lm_head()])
 
-        # Cast model parameters to the configured dtype (AMP: BF16 compute with
-        # FP32 master weights). Walk the registry binding — the track's single
+        # Cast model parameters to the configured dtype — BF16 AMP: matmuls hit
+        # the GPU tensor cores in BF16 (~2x FP32 on Ampere+), while the
+        # checkpoint/optimizer stay FP32 (see docs/architecture/design.md
+        # "Precision & tensor cores"; serving casts back to float32).
+        # Walk the registry binding — the track's single
         # storage traversal — instead of a per-attribute list (a manual list
         # silently misses tensors; the registry cannot). Registry values may be
         # VIEWS into stacked tensors (``expert_gate_proj[e]``): rebinding

@@ -363,6 +363,8 @@ def main() -> int:
             "n_shared_experts": 1 if moe else 0,
             "expert_dim": 32 if moe else 96,  # dense FFN 96 = 1.5·D (thin)
             "top_k": 1,
+            # BF16 AMP: GPU matmuls hit the tensor cores (~2x FP32 on Ampere+);
+            # the checkpoint stores FP32 either way (npz has no bf16).
             "dtype": torch.bfloat16,
         }
     )

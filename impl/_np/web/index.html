@@ -201,6 +201,7 @@
             <option value="cuda">cuda</option>
           </select>
         </div>
+        <div class="note" id="dtype-note" style="grid-column: 1 / -1; font-size: 0.8rem; color: var(--dim);"></div>
         <div><button id="btn-gen">Generate</button></div>
         <div><button id="btn-rec" class="secondary">Generate + record</button></div>
         <div><button id="btn-dl" class="secondary" disabled>Download record JSON</button></div>
@@ -622,7 +623,21 @@ async function init(prefetched) {
     ? "parameters (all active — dense)"
     : "parameters total · the per-token active slice (routed top-" + c.top_k + " + shared)";
   badges.push([`${MODEL.n_params.toLocaleString()} · ${active.toLocaleString()}/tok`, paramTitle]);
+  // Serving dtype badge: what the checkpoint's `dtype` marker means here.
+  // The GPU tracks TRAIN in BF16 (tensor-core matmuls, ~2x FP32 on Ampere+),
+  // but the checkpoint stores FP32 and this page SERVES in float32 — so the
+  // badge shows the serving dtype, with the training dtype in the tooltip.
+  const ckptDtype = c.dtype || "float32";
+  const servingDtype = "float32";
+  const dtypeTitle = ckptDtype === "bfloat16"
+    ? `checkpoint trained in BF16 (tensor-core AMP, ~2x FP32 matmul throughput on Ampere+); stored as FP32 in model.npz; this page serves in ${servingDtype} for display + drafter-dtype parity`
+    : `serving dtype ${servingDtype} (NumPy reference computes in float64/float32; no BF16)`;
+  badges.push([`dtype ${servingDtype}`, dtypeTitle]);
   $("badges").innerHTML = badges.map(([v, t]) => `<span class="badge" title="${t}"><b>${v}</b> ${t}</span>`).join("");
+  const note = $("dtype-note");
+  if (note) note.textContent = ckptDtype === "bfloat16"
+    ? `dtype: checkpoint trained in BF16 (AMP on GPU tensor cores, ~2x FP32 matmul throughput on Ampere+) — stored FP32 in model.npz; served here as float32 on every backend (${MODEL.backend}) so records and drafter sidecars share one dtype. NumPy track computes the reference math in float64.`
+    : `dtype: float32 serving on every backend (${MODEL.backend}); the NumPy reference computes in float64. No BF16 in the checkpoint.`;
   if (!MODEL.has_vocab) setStatus("This checkpoint has no vocab.json — text input unavailable.");
   // Model variant dropdown: which checkpoint the page serves. Two
   // controlled comparisons: *-rl vs * (RL's delta; the RL run started
