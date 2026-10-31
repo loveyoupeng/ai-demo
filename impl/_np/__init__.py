@@ -14,6 +14,7 @@ One module per operator (each with forward + analytic backward):
 - ``model``       — NumPyModel (embedding + stack + final norm + lm head)
 - ``cross_entropy`` — loss with optional shift / padding mask
 - ``gradcheck``   — finite-difference gradient checker (test reference)
+- ``softmax``     — the one stable softmax shared by every operator
 """
 
 __all__ = []

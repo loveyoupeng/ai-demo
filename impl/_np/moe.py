@@ -20,6 +20,7 @@ import numpy as np
 
 from impl._np.ffn import SwiGLUFFN
 from impl._np.init import xavier_uniform
+from impl._np.softmax import stable_softmax
 from shared.constants import Keys, Mlp
 from shared.result import Result
 
@@ -168,9 +169,7 @@ class MixtureOfExperts:
 
         # Router scores and softmax over all experts: (B, S, E)
         scores = x @ self.gate  # (B, S, E)
-        scores = scores - np.max(scores, axis=-1, keepdims=True)
-        exp_scores = np.exp(scores)
-        probs = exp_scores / np.sum(exp_scores, axis=-1, keepdims=True)  # (B, S, E)
+        probs = stable_softmax(scores, axis=-1)  # (B, S, E)
 
         # Top-k selection (tie-safe: the threshold is the k-th largest value.)
         if self.top_k < E:
@@ -228,9 +227,7 @@ class MixtureOfExperts:
 
         # --- Recompute router internals (same math as forward) ---
         scores = x @ self.gate  # (B, S, E)
-        scores = scores - np.max(scores, axis=-1, keepdims=True)
-        exp_scores = np.exp(scores)
-        probs = exp_scores / np.sum(exp_scores, axis=-1, keepdims=True)  # (B, S, E)
+        probs = stable_softmax(scores, axis=-1)  # (B, S, E)
         mask = np.ones_like(probs, dtype=bool)  # support A (default: all experts)
         if self.top_k < E:
             order = np.argsort(probs, axis=-1)[:, :, ::-1]  # (B, S, E) descending

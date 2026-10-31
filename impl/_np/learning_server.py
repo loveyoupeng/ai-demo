@@ -38,6 +38,7 @@ from tokenizers import Tokenizer
 
 from impl._np.learning import generate_with_records
 from impl._np.model import NumPyModel
+from impl._np.softmax import stable_softmax
 from shared.checkpoint import load_checkpoint
 from shared.config import TransformerConfig
 from shared.constants import REP_PENALTY
@@ -231,9 +232,7 @@ def _sample(
     if top_k is not None:
         kth = np.partition(z, -top_k)[-1]
         z = np.where(z < kth, -np.inf, z)
-    z = z - z.max()
-    p = np.exp(z)
-    p /= p.sum()
+    p = stable_softmax(z)
     return int(rng.choice(len(p), p=p))
 
 
@@ -743,9 +742,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
             # nests logits inside steps[-1]["forward"], not at the top level)
             last_step_rec = record["steps"][-1]["forward"]
             last = np.array(last_step_rec["logits"][0][-1], dtype=np.float64)
-        z = last - last.max()
-        p = np.exp(z)
-        p /= p.sum()
+        p = stable_softmax(last)
         top = np.argsort(p)[::-1][:10]
         return {
             "prompt": {

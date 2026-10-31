@@ -88,15 +88,14 @@ import numpy as np
 from impl._np.attention import MultiHeadAttention
 from impl._np.init import xavier_uniform
 from impl._np.layernorm import RMSNorm
+from impl._np.softmax import stable_softmax
 from shared.config import TransformerConfig
 from shared.draft import DSHARK, MTP, DrafterMeta
 
 
 def _stable_probs(logits: np.ndarray) -> np.ndarray:
-    """Stable softmax over the last axis: logits (…, V) → probs (…, V)."""
-    z = logits - np.max(logits, axis=-1, keepdims=True)
-    e = np.exp(z)
-    return e / np.sum(e, axis=-1, keepdims=True)
+    """Softmax over the last axis: logits (…, V) → probs (…, V) (shared helper)."""
+    return stable_softmax(logits, axis=-1)
 
 
 class _DrafterBlock:

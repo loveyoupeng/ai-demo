@@ -17,6 +17,7 @@ import numpy as np
 
 from impl._np.init import xavier_uniform
 from impl._np.rope import RoPE
+from impl._np.softmax import stable_softmax
 from shared.result import Result
 
 
@@ -268,11 +269,9 @@ class MultiHeadAttention:
             causal_mask = np.zeros((seq_len, seq_len), dtype=bool)
             scores_masked = scores
 
-        # Numerically stable softmax over the key axis: subtract the row max
-        # before exponentiating so exp() never overflows.
-        scores_stable = scores_masked - np.max(scores_masked, axis=-1, keepdims=True)  # (B, H, S, S)
-        exp_scores = np.exp(scores_stable)  # (B, H, S, S)
-        attn = exp_scores / np.sum(exp_scores, axis=-1, keepdims=True)  # (B, H, S, S)
+        # Softmax over the key axis → attention weights (one shared helper;
+        # the -inf mask entries become exactly 0).
+        attn = stable_softmax(scores_masked, axis=-1)  # (B, H, S, S)
 
         # Weighted sum of values: (B, H, S, S) @ (B, H, S, hd) → (B, H, S, hd)
         ctx = attn @ v  # (B, H, S, hd)
@@ -436,9 +435,7 @@ class MultiHeadAttention:
         scores = (q @ k_r.transpose(0, 1, 3, 2)) / scale  # (B, H, 1, t+1)
         # Nothing is masked in decode: every cached row is in the past of the
         # new token, so the causal mask is all zeros over the whole cache.
-        scores_stable = scores - np.max(scores, axis=-1, keepdims=True)
-        exp_scores = np.exp(scores_stable)
-        attn = exp_scores / np.sum(exp_scores, axis=-1, keepdims=True)  # (B, H, 1, t+1)
+        attn = stable_softmax(scores, axis=-1)  # (B, H, 1, t+1) — no mask needed in decode
 
         ctx = attn @ v_r  # (B, H, 1, hd)
         ctx = ctx.transpose(0, 2, 1, 3).reshape(batch_size, 1, H * hd)  # (B, 1, H*hd)
@@ -559,10 +556,8 @@ class MultiHeadAttention:
         mask[:, t:] = causal
         scores_masked = np.where(mask, -np.inf, scores)  # (B, H, c, t+c)
 
-        # Numerically stable softmax over the key axis.
-        scores_stable = scores_masked - np.max(scores_masked, axis=-1, keepdims=True)
-        exp_scores = np.exp(scores_stable)
-        attn = exp_scores / np.sum(exp_scores, axis=-1, keepdims=True)  # (B, H, c, t+c)
+        # Softmax over the key axis → attention weights.
+        attn = stable_softmax(scores_masked, axis=-1)  # (B, H, c, t+c)
 
         ctx = attn @ v_r  # (B, H, c, t+c) @ (B, H, t+c, hd) → (B, H, c, hd)
         ctx = ctx.transpose(0, 2, 1, 3).reshape(B, c, H * hd)  # (B, c, H*hd)

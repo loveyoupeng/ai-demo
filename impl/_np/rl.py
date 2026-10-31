@@ -64,6 +64,7 @@ import numpy as np
 
 from impl._np.model import NumPyModel
 from impl._np.optimizer import AdamW
+from impl._np.softmax import stable_softmax
 from impl._np.training import clip_gradients
 from shared.thinking import reward as score_reward
 
@@ -115,9 +116,7 @@ def _sample(logits: np.ndarray, temperature: float, top_k: int, rng: np.random.G
     if 0 < top_k < scaled.shape[-1]:
         kth = np.sort(scaled, axis=-1)[:, -top_k]  # (G,) the k-th best logit
         scaled = np.where(scaled < kth[:, None], -np.inf, scaled)
-    scaled = scaled - scaled.max(axis=-1, keepdims=True)  # stable softmax
-    probs = np.exp(scaled)
-    probs /= probs.sum(axis=-1, keepdims=True)
+    probs = stable_softmax(scaled, axis=-1)
     cdf = np.cumsum(probs, axis=-1)
     cdf /= cdf[:, -1:]
     u = rng.random((probs.shape[0], 1))

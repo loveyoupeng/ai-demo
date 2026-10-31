@@ -28,6 +28,7 @@ from impl._np.block import TransformerBlock
 from impl._np.drafters import DSparkDrafter, MTPDrafter
 from impl._np.model import NumPyModel
 from impl._np.moe import MixtureOfExperts
+from impl._np.softmax import stable_softmax
 from shared.constants import REP_PENALTY
 
 # ---------------------------------------------------------------------------
@@ -281,9 +282,7 @@ def _forward_record(model: NumPyModel, raw: dict, input_ids: np.ndarray) -> Forw
     """
     logits = raw["logits"]
     # Display extras: the softmax distribution + top tokens at the last position.
-    z = logits.astype(np.float64) - np.max(logits, axis=-1, keepdims=True)
-    p = np.exp(z)
-    p /= np.sum(p, axis=-1, keepdims=True)  # (B, S, V)
+    p = stable_softmax(logits.astype(np.float64), axis=-1)  # (B, S, V)
     V = p.shape[-1]
     top_n = min(10, V)
     top_idx = np.argsort(p[0, -1])[::-1][:top_n]  # top-10 at the last position

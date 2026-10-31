@@ -95,6 +95,7 @@ import time
 import numpy as np
 
 from impl._np.drafters import DSparkDrafter, MTPDrafter
+from impl._np.softmax import stable_softmax
 from shared.draft import DSHARK
 
 logger = logging.getLogger(__name__)
@@ -105,10 +106,8 @@ estimated survival probability of the prefix drops below this."""
 
 
 def _softmax(z: np.ndarray) -> np.ndarray:
-    """Stable softmax over the last axis."""
-    z = z - np.max(z, axis=-1, keepdims=True)
-    e = np.exp(z)
-    return e / np.sum(e, axis=-1, keepdims=True)
+    """Stable softmax over the last axis (shared helper, re-exported)."""
+    return stable_softmax(z, axis=-1)
 
 
 def _scaled(probs_or_logits: np.ndarray, temperature: float, *, is_logits: bool) -> np.ndarray:
