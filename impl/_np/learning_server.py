@@ -120,7 +120,7 @@ def load_learning_model(
     elif backend == "triton":
         from impl._triton.model import TritonModel
 
-        model = TritonModel(cfg, params).cuda()
+        model = TritonModel(cfg, params).cuda().float()
         model.eval()
     elif backend == "cuda":
         from impl._cuda.model import CUDAModel as _CUDAModel
