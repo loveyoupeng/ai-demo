@@ -613,7 +613,11 @@ class _LearningHandler(BaseHTTPRequestHandler):
         return spec, k
 
     def _api_inference(self, body: dict) -> dict:
-        with self._per_backend(body.get("backend")):
+        # _per_variant FIRST: the Model dropdown must switch the checkpoint for
+        # BOTH buttons (record already had it; without it "Generate" silently
+        # answered with the startup variant while "Generate + Record" answered
+        # with the selected one — same prompt, different model, divergent text).
+        with self._per_variant(body.get("variant")), self._per_backend(body.get("backend")):
             return self._run_inference(body)
 
     def _run_inference(self, body: dict) -> dict:

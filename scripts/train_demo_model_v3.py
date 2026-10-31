@@ -417,9 +417,13 @@ def main() -> int:
     if start <= 4:
         run_rl_stage(RESOURCE / "models" / names["think"], RESOURCE / "models" / names["rl"], tok, args)
 
-    # ── stage 6: drafter sidecars from the RL target ────────────────────
+    # ── stage 6: drafter sidecars from EVERY served checkpoint ─────────
+    # ADR 0003: each served variant needs its OWN sidecars (the page's
+    # Model dropdown serves think AND rl checkpoints, and both must offer
+    # mtp/dspark), so distill from the think target too, not only the RL one.
     if start <= 5:
         run_drafter_stage(RESOURCE / "models" / names["rl"])
+        run_drafter_stage(RESOURCE / "models" / names["think"])
 
     # ── generation probes ───────────────────────────────────────────────
     for name, m in (("base", base), ("sft", sft), ("tool", tool_m), ("think", think_m)):

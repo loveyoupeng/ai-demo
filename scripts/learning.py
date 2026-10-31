@@ -32,13 +32,17 @@ backend). Four variants, two controlled comparisons:
   (RL started from exactly this model — the comparison is controlled).
 - **dense** — ``learning_think``: the dense family's SFT-final.
 
-Either checkpoint runs on any backend selected in-page.
+Either checkpoint runs on any backend selected in-page, and every
+variant ships its own drafter sidecars (distilled per checkpoint in
+stage 6 of the v3 pipeline), so mtp/dspark speculative decoding works
+on RL-trained AND SFT-trained models of both geometries.
 
 This is a PURE SERVING script - it loads pre-trained checkpoints and
 serves them. Training happens separately via scripts.train_demo_model_v3
 (run before serving). Missing checkpoints cause a clear error telling
 the user to run the training pipeline first.
 """
+
 from __future__ import annotations
 
 import argparse
