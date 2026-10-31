@@ -2,12 +2,11 @@
 """GRPO RL for the CUDA track — NVRTC kernels + torch autograd glue.
 
 Same GRPO objective as the torch trainer (``impl/_torch/rl.py``; the
-derivations live in ``impl/_np/rl.py``). The CUDA track's constraint
-(inherited from ``impl/_cuda/sft.py``): ``CUDAModel`` is not an
+derivations live in ``impl/_np/rl.py``). The CUDA track's constraint:
+``CUDAModel`` is not an
 ``nn.Module`` — the forward runs NVRTC kernels that return plain
 tensors, so the optimizer and the autograd attachments are built from
-the model's registry binding (``_param_tensors``), exactly like the
-CUDA SFT trainer.
+the model's registry binding (``_param_tensors``).
 
 The loss is assembled here with the same tensor ops as the torch
 trainer (gather on log_softmax, ε-clipped ratio, k3 estimator); only
@@ -51,7 +50,7 @@ class CudaGRPOTrainer:
         self.reference = reference  # frozen by construction: never in an optimizer
         self.clip_eps = clip_eps
         self.kl_beta = kl_beta
-        # CUDA convention (sft.py): collect the parameter tensors from the
+        # CUDA convention: collect the parameter tensors from the
         # registry binding and attach autograd — that is the trainer's
         # parameter set. The reference's tensors simply never get grads.
         params = model._param_tensors()

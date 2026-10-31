@@ -159,12 +159,12 @@ class TestKeySchemeConsistency:
     """All backends expose identical Keys-scheme parameter key sets."""
 
     def test_numpy_keys_match_keys_scheme(self):
-        """NumPy key set equals the Keys-scheme key list for the config."""
-        from shared.constants import all_param_keys
+        """NumPy key set equals the registry's Keys-scheme key list for the config."""
+        from shared.registry import ParameterRegistry
 
         cfg = MODEL_CONFIG_1L
         np_keys = set(create_numpy_model(cfg).get_all_parameters())
-        expected = set(all_param_keys(cfg["n_layers"], has_moe=cfg["n_experts"] > 1, n_experts=cfg["n_experts"]))
+        expected = set(ParameterRegistry(_to_config(cfg)).keys())
         assert np_keys == expected, f"NumPy keys deviate from Keys scheme: {np_keys ^ expected}"
 
     def test_numpy_vs_triton_vs_cuda_key_sets(self):

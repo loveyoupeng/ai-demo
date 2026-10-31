@@ -1,7 +1,7 @@
 # Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Test constants.py — the checkpoint key scheme (HF Llama/Mixtral naming).
 
-Covers the name constants, the Keys builders, and all_param_keys().
+Covers the name constants and the Keys builders.
 """
 
 from shared.constants import (
@@ -11,7 +11,6 @@ from shared.constants import (
     Keys,
     LayerNorm,
     Mlp,
-    all_param_keys,
 )
 
 # --------------------------------------------------------------------------- #
@@ -78,48 +77,3 @@ def test_keys_moe_gate() -> None:
 
 def test_keys_moe_expert() -> None:
     assert Keys.moe_expert(0, 1, Mlp.UP_PROJ) == "model.layers.0.mlp.experts.1.up_proj.weight"
-
-
-# --------------------------------------------------------------------------- #
-#  all_param_keys()                                                            #
-# --------------------------------------------------------------------------- #
-
-
-def test_all_param_keys_dense() -> None:
-    keys = all_param_keys(num_layers=2, has_moe=False, n_experts=1)
-    # model-level: embed, final norm, lm_head
-    assert Keys.embed() in keys
-    assert Keys.final_norm() in keys
-    assert Keys.lm_head() in keys
-    # per layer: 2 norms + 4 attn + 3 ffn
-    assert len(keys) == 3 + 2 * (2 + 4 + 3)
-    assert Keys.attn(1, Attn.K_PROJ) in keys
-    assert Keys.ffn(1, Mlp.UP_PROJ) in keys
-    # dense: no router, no expert keys
-    assert Keys.moe_gate(0) not in keys
-    assert Keys.moe_expert(0, 0, Mlp.GATE_PROJ) not in keys
-
-
-def test_all_param_keys_moe() -> None:
-    n_experts = 4
-    keys = all_param_keys(num_layers=1, has_moe=True, n_experts=n_experts)
-    # per layer: 2 norms + 4 attn + 1 router + 3*E expert projs
-    assert len(keys) == 3 + (2 + 4 + 1 + 3 * n_experts)
-    assert Keys.moe_gate(0) in keys
-    for j in range(n_experts):
-        for proj in FFN_PROJS:
-            assert Keys.moe_expert(0, j, proj) in keys
-    # MoE layer has no dense ffn keys
-    assert Keys.ffn(0, Mlp.GATE_PROJ) not in keys
-
-
-def test_all_param_keys_no_duplicates() -> None:
-    keys = all_param_keys(num_layers=3, has_moe=True, n_experts=2)
-    assert len(keys) == len(set(keys))
-
-
-def test_all_param_keys_all_strings() -> None:
-    keys = all_param_keys(num_layers=1, has_moe=False, n_experts=1)
-    for key in keys:
-        assert isinstance(key, str)
-        assert key.startswith("model.")

@@ -5,8 +5,8 @@ Provides the GPT-2 BPE tokenizer used by the real-data training pipeline
 (``scripts/train_real_tinystories.py``). Tracks receive an
 ``AutoTokenizer`` and call its ``encode``/``decode`` directly — there are
 no wrapper helpers here on purpose: the transformers API is already the
-stable interface, and SFT/tool pipelines train their own BPE vocabularies
-(see ``scripts/train_tokenizer.py``).
+stable interface, and the demo pipeline trains its own BPE vocabulary
+(``scripts/train_demo_model_v3.py``).
 """
 
 from __future__ import annotations

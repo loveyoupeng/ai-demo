@@ -20,6 +20,12 @@ from impl._np.init import xavier_uniform
 from shared.result import Result
 
 
+def _silu_deriv(x: np.ndarray) -> np.ndarray:
+    """Derivative of SiLU: silu'(x) = sigmoid(x) * (1 + x * (1 - sigmoid(x)))."""
+    sigma = 1.0 / (1.0 + np.exp(-x))  # (..., FF)
+    return sigma * (1.0 + x * (1.0 - sigma))  # (..., FF)
+
+
 def silu(x: np.ndarray) -> np.ndarray:
     """SiLU / Swish activation: x * sigmoid(x) (Elfwing et al., 2017).
 
@@ -29,18 +35,6 @@ def silu(x: np.ndarray) -> np.ndarray:
     x: (..., FF) → out: (..., FF)
     """
     return x / (1.0 + np.exp(-x))  # (..., FF)
-
-
-def silu_backward(dout: np.ndarray, x: np.ndarray) -> np.ndarray:
-    """Derivative of SiLU: silu'(x) = sigmoid(x) * (1 + x * (1 - sigmoid(x))).
-
-    dout: (..., FF) upstream gradient.
-    x: (..., FF) the pre-activation input.
-
-    Returns: dx (..., FF).
-    """
-    sigma = 1.0 / (1.0 + np.exp(-x))  # (..., FF)
-    return dout * sigma * (1.0 + x * (1.0 - sigma))  # (..., FF)
 
 
 class SwiGLUFFN:
@@ -64,7 +58,7 @@ class SwiGLUFFN:
         dgated   = dout @ W_down^T         (..., FF)
         dup      = dgated * gate           (element-wise: out = gate * up)
         dgate    = dgated * up
-        dpre     = silu_backward(dgate, pre_gate)   where pre_gate = x @ W_gate
+        dpre     = dgate * _silu_deriv(pre_gate)   where pre_gate = x @ W_gate
         dW_gate  = x^T @ dpre              (D, FF)
         dW_up    = x^T @ dup               (D, FF)
         dx       = dpre @ W_gate^T + dup @ W_up^T   (..., D)
@@ -158,7 +152,7 @@ class SwiGLUFFN:
         dgate = dgated * up  # (..., FF)
 
         # Back through SiLU.
-        dpre = silu_backward(dgate, pre_gate)  # (..., FF)
+        dpre = dgate * _silu_deriv(pre_gate)  # (..., FF)
 
         # Linear-layer backwards: dW = x^T @ d(out), dx = d(out) @ W^T.
         x_flat = x.reshape(-1, x.shape[-1])  # (T, D)

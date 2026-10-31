@@ -250,8 +250,8 @@ class MultiHeadAttention:
 
         # Scaled dot-product attention.
         scale = float(np.sqrt(hd))
-        # PROD: production uses an online-softmax flash kernel that never materializes
-        #       the (B, H, S, S) score matrix — see impl/_triton/flash_attn.py
+        # PROD: production uses an online-softmax flash-attention kernel that never
+        #       materializes the (B, H, S, S) score matrix (Dao et al. 2022)
         scores = (q @ k.transpose(0, 1, 3, 2)) / scale  # (B, H, S, S)
 
         # Causal mask: position i may attend only to positions j <= i.

@@ -4,8 +4,6 @@
 ``NumPyModel.backward`` is analytic (and O(forward)); this module keeps the
 old finite-difference machinery as a *test reference* only:
 
-- ``finite_difference_gradient`` — central difference of the loss w.r.t. one
-  flat element of one parameter array.
 - ``check_model_gradients`` — runs the analytic backward once and compares it
   against finite differences on a small random sample of elements per
   parameter, reporting the worst relative error per parameter.
@@ -29,7 +27,7 @@ from impl._np.cross_entropy import CrossEntropyLoss
 from impl._np.model import NumPyModel
 from impl._np.moe import MixtureOfExperts
 
-__all__ = ["finite_difference_gradient", "check_model_gradients"]
+__all__ = ["check_model_gradients"]
 
 
 def _loss(model: NumPyModel, input_ids: np.ndarray, targets: np.ndarray) -> float:
@@ -40,29 +38,6 @@ def _loss(model: NumPyModel, input_ids: np.ndarray, targets: np.ndarray) -> floa
     """
     logits = model.forward(input_ids)
     return float(CrossEntropyLoss(shift=False).forward(logits, targets))
-
-
-def finite_difference_gradient(
-    model: NumPyModel,
-    input_ids: np.ndarray,
-    targets: np.ndarray,
-    param: np.ndarray,
-    flat_idx: int,
-    eps: float = 1e-6,
-) -> float:
-    """Central finite difference of the loss w.r.t. ``param.reshape(-1)[flat_idx]``.
-
-    ``param`` must be a *live* view of the model storage (e.g. from
-    ``model._param_arrays()``) so the perturbation is seen by ``forward``.
-    """
-    flat = param.reshape(-1)
-    original = flat[flat_idx]
-    flat[flat_idx] = original + eps
-    loss_plus = _loss(model, input_ids, targets)
-    flat[flat_idx] = original - eps
-    loss_minus = _loss(model, input_ids, targets)
-    flat[flat_idx] = original
-    return (loss_plus - loss_minus) / (2.0 * eps)
 
 
 def check_model_gradients(
@@ -106,7 +81,13 @@ def check_model_gradients(
                 if flips:
                     continue
             analytic = grads[key].reshape(-1)[j]
-            numeric = finite_difference_gradient(model, input_ids, targets, flat, j, eps)
+            original = flat[j]
+            flat[j] = original + eps
+            loss_plus = _loss(model, input_ids, targets)
+            flat[j] = original - eps
+            loss_minus = _loss(model, input_ids, targets)
+            flat[j] = original
+            numeric = (loss_plus - loss_minus) / (2.0 * eps)
             denom = max(1.0, abs(analytic), abs(numeric))
             worst = float(max(worst, abs(analytic - numeric) / denom))
         result[key] = worst

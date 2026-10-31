@@ -2,8 +2,8 @@
 # Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Download a small GSM8K slice for the thinking-SFT and RL stages.
 
-Mirrors ``scripts/download_sft_data.py`` — same streaming-download-to-JSON
-pattern. GSM8K (Cobbe et al., "Training Verifiers to Solve Math Word
+Same streaming-download-to-JSON pattern as ``scripts/download_tinystories.py``.
+GSM8K (Cobbe et al., "Training Verifiers to Solve Math Word
 Problems") is the classic reasoning dataset: every row carries a
 **step-by-step rationale** plus a final numeric answer, which is exactly the
 shape the thinking stage needs (the "teacher traces" the model imitates;

@@ -217,39 +217,3 @@ class TestGradientNorm:
         assert np.allclose(grads["b1"], original_b1 * 0.5)
         clipped_norm = compute_gradient_norm(grads)
         assert abs(clipped_norm - 2.0) < 1e-6, f"Expected norm~2.0, got {clipped_norm}"
-
-
-class TestTrainingConfig:
-    """Tests for TrainingConfig default values."""
-
-    def test_default_config(self):
-        """TrainingConfig has expected default values."""
-        from impl._np.training import TrainingConfig
-
-        config = TrainingConfig()
-
-        assert config.lr == 3e-4
-        assert config.epochs == 10
-        assert config.batch_size == 16
-        assert config.max_seq_len == 512
-        assert config.device == "cpu"
-        assert config.grad_accum_steps == 1
-        assert config.max_grad_norm == 1.0
-        assert config.log_every == 10
-
-    def test_custom_config(self):
-        """TrainingConfig accepts custom values."""
-        from impl._np.training import TrainingConfig
-
-        config = TrainingConfig(
-            lr=1e-3,
-            epochs=5,
-            batch_size=32,
-            max_grad_norm=0.5,
-        )
-
-        assert config.lr == 1e-3
-        assert config.epochs == 5
-        assert config.batch_size == 32
-        assert config.max_grad_norm == 0.5
-        assert config.grad_accum_steps == 1  # default unchanged

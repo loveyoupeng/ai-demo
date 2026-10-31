@@ -370,10 +370,10 @@ uv run pytest tests/ -q -m "not gpu"
 
 ```text
 impl/
-├── _np/         # NumPy track (math reference; analytic backward; sft.py; learning mode + web/)
-├── _torch/      # PyTorch track (production idiom; autograd + SDPA; sft.py; learning.py)
-├── _triton/     # Triton track (kernels over a PyTorch model; attn.py, flash_attn.py, ffn.py, moe.py)
-├── _cuda/       # CUDA track (NVRTC kernels; sft.py; learning.py)
+├── _np/         # NumPy track (math reference; analytic backward; learning mode + web/)
+├── _torch/      # PyTorch track (production idiom; autograd + SDPA; learning.py)
+├── _triton/     # Triton track (kernels over a PyTorch model; attn.py, ffn.py)
+├── _cuda/       # CUDA track (NVRTC kernels; learning.py)
 shared/
 ├── config.py    # TransformerConfig (single source of truth)
 ├── constants.py # Keys scheme + Attn/LayerNorm/Mlp constants
@@ -403,14 +403,10 @@ scripts/
 ├── verify_equivalence.py  # 11-scenario parity check (incl. speculative + RL gradient)
 ├── learning.py            # learning-mode web page server (--spec startup mode)
 ├── train_drafters.py      # drafter distillation from the frozen target
-├── sft.py                 # SFT entry point (pre/post/prepost stages)
 ├── rl.py                  # GRPO RL entry point (all backends; ADR 0004)
 ├── train_demo_model_v3.py # the demo pipeline: pre → SFT-code → SFT-tool → SFT-think → RL → drafters
-├── train_tokenizer.py     # BPE tokenizer trainer
-├── download_sft_data.py   # SFT dataset fetcher
 ├── download_gsm8k.py      # GSM8K fetcher (thinking-SFT/RL prompts; ADR 0004)
 ├── train_real_tinystories.py
-├── train_demo_model.py    # legacy char-level trainer (superseded by the v3 pipeline)
 ├── download_tinystories.py
 └── check_docs.py          # doc-vs-code alignment check (paths + counts)
 tests/

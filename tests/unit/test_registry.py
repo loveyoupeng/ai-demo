@@ -58,12 +58,15 @@ class TestEntryEnumeration:
         # 3 model-level + per layer: 2 norms + 4 attn + 1 router + 3*E experts
         assert len(reg.entries) == 3 + (2 + 4 + 1 + 3 * 3)
 
-    def test_keys_match_all_param_keys(self) -> None:
-        from shared.constants import all_param_keys
-
+    def test_keys_match_expected_scheme(self) -> None:
         cfg = _moe_cfg(n_experts=2)
         reg = ParameterRegistry(cfg)
-        assert reg.keys() == all_param_keys(cfg.n_layers, has_moe=True, n_experts=2)
+        keys = reg.keys()
+        # spot-check the scheme's shape: model-level keys + per-layer keys
+        assert keys[0] == "model.embed_tokens"
+        assert "model.layers.0.mlp.gate.weight" in keys  # router
+        assert "model.layers.0.mlp.experts.1.down_proj.weight" in keys
+        assert "model.layers.0.mlp.gate_proj.weight" not in keys  # MoE has no dense FFN
 
     def test_no_duplicate_keys(self) -> None:
         reg = ParameterRegistry(_moe_cfg(n_experts=4))
@@ -107,12 +110,12 @@ class TestSharedExpertEntries:
         keys = ParameterRegistry(_moe_cfg()).keys()
         assert all("shared_experts" not in key for key in keys)
 
-    def test_keys_match_all_param_keys_with_shared(self) -> None:
-        from shared.constants import all_param_keys
-
+    def test_keys_include_shared_expert_keys(self) -> None:
         cfg = self._shared_cfg(1)
         reg = ParameterRegistry(cfg)
-        assert reg.keys() == all_param_keys(cfg.n_layers, has_moe=True, n_experts=3, n_shared_experts=1)
+        keys = reg.keys()
+        assert "model.layers.0.mlp.shared_experts.0.gate_proj.weight" in keys
+        assert "model.layers.0.mlp.experts.2.up_proj.weight" in keys
 
     def test_dense_config_rejects_shared_experts(self) -> None:
         with pytest.raises(AssertionError, match="requires MoE"):

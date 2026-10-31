@@ -16,9 +16,9 @@ family" tracks share the same model skeleton so they cannot drift.
 
 That is the *only* runtime cross-track import. Everything else in the Triton
 track is either Triton kernels (`attn.py`, `rope.py`, `layernorm.py`,
-`ffn.py`, `moe.py`, `flash_attn.py`) or plain
+`ffn.py`, `attn.py`) or plain
 PyTorch wiring (`transformer.py`, `model.py`, `inference.py`, `training.py`,
-`sft.py`, `learning.py`, `cli.py`).
+`learning.py`, `cli.py`).
 
 **Documentation-only carve-out:** `impl/_triton/learning.py` has type-only
 (`TYPE_CHECKING`) imports of the NumPy track's record TypedDicts

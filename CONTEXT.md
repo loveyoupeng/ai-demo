@@ -124,7 +124,8 @@ letters. Where each value comes from:
 - **Online softmax** (FlashAttention): a single-pass algorithm that computes
   softmax without materializing the full score matrix. Updates a running
   max/sum/accumulator per key block. Peak memory is O(BLOCK_M*D +
-  BLOCK_N*D) instead of O(Sk*D). See `impl/_triton/flash_attn.py`.
+  BLOCK_N*D) instead of O(Sk*D). The Triton track's attention kernel
+  (`impl/_triton/attn.py`) is the wired-in version of this idea.
 
 - **Two-pass attention**: the standard algorithm that (1) computes the full
   score matrix, (2) softmaxes it, (3) multiplies by V. Materializes the

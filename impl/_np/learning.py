@@ -150,13 +150,6 @@ class StepRecord(TypedDict):
     text: str
 
 
-class TokenSpan(TypedDict):
-    """A token sequence + its decoded text (prompt / generated)."""
-
-    tokens: list
-    text: str
-
-
 class GenerationRecord(TypedDict):
     """The complete inference record the page displays and exports.
 
@@ -168,9 +161,9 @@ class GenerationRecord(TypedDict):
 
     config: dict
     vocab: list
-    prompt: TokenSpan
+    prompt: dict  # {"tokens": list[int], "text": str}
     steps: list
-    generated: TokenSpan
+    generated: dict  # {"tokens": list[int], "text": str}
     spec: dict
 
 

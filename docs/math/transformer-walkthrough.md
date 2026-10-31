@@ -187,8 +187,9 @@ The context is projected back to width `D`: `out = ctx W_o`.
 - Code: `impl/_np/attention.py` → `MultiHeadAttention` (scores, mask, stable softmax, `ctx @ W_o`)
 - Paper: Vaswani et al., *Attention Is All You Need* (2017) §3.2.1 (attention), §3.2.2 (multi-head), §3.2.3 (position, replaced here by RoPE).
 - PROD note: the NumPy path materializes the full `(B, H, S, S)` score matrix.
-  Production uses a flash-attention kernel that never materializes it —
-  `impl/_triton/flash_attn.py` → `flash_attention` (Dao et al. 2022, arXiv:2205.14135).
+  Production uses a flash-attention kernel that never materializes it
+  (Dao et al. 2022, arXiv:2205.14135); the Triton track's attention kernel
+  (`impl/_triton/attn.py`) is the wired-in approximation of that.
 
 ## 5. FFN — where the "knowledge" sits
 
@@ -363,7 +364,7 @@ actually runs (verified by a counting-stub test).
 | RoPE | Su et al. 2021 | `impl/_np/rope.py` |
 | GQA | Ainslie et al. 2023 | `impl/_np/attention.py` (group repeat) |
 | Switch-style MoE | Fedus et al. 2022 / Mixtral 2023 | `impl/_np/moe.py` |
-| Flash attention (PROD) | Dao et al. 2022 | `impl/_triton/flash_attn.py` |
+| Flash attention (PROD) | Dao et al. 2022 | `impl/_triton/attn.py` (FlashAttention-style kernel) |
 | Speculative decoding (lossless) | Leviathan et al., ICML 2023 | `impl/_np/spec.py` (rejection sampling), `shared/spec_engine.py` (greedy verify) |
 | MTP head | DeepSeek-V3 | `impl/_np/drafters.py` `MTPDrafter`, `impl/_torch/drafters.py` `TorchMTPDrafter` |
 | DSpark (semi-AR + scheduled verify) | arXiv 2607.05147 | `impl/_np/drafters.py` `DSparkDrafter`, `_SurvivalSchedule` |

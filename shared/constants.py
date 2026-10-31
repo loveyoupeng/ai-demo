@@ -136,35 +136,6 @@ class Keys:
         return f"model.layers.{layer_idx}.mlp.shared_experts.{shared_idx}.{proj}.weight"
 
 
-def all_param_keys(num_layers: int, has_moe: bool, n_experts: int, n_shared_experts: int = 0) -> list[str]:
-    """Every parameter key for a model with ``num_layers`` blocks.
-
-    Dense layers contribute the three SwiGLU projections; MoE layers
-    contribute the router plus the three projections per expert, plus three
-    more per shared expert (ADR 0002).
-    """
-    keys: list[str] = [Keys.embed()]
-    for i in range(num_layers):
-        keys.append(Keys.ln(i, LayerNorm.INPUT))
-        keys.append(Keys.ln(i, LayerNorm.POST_ATTENTION))
-        for proj in ATTN_PROJS:
-            keys.append(Keys.attn(i, proj))
-        if has_moe:
-            keys.append(Keys.moe_gate(i))
-            for j in range(n_experts):
-                for proj in FFN_PROJS:
-                    keys.append(Keys.moe_expert(i, j, proj))
-            for s in range(n_shared_experts):
-                for proj in FFN_PROJS:
-                    keys.append(Keys.moe_shared_expert(i, s, proj))
-        else:
-            for proj in FFN_PROJS:
-                keys.append(Keys.ffn(i, proj))
-    keys.append(Keys.final_norm())
-    keys.append(Keys.lm_head())
-    return keys
-
-
 # ── Generation / decoding ─────────────────────────────────────────────────────
 
 REP_PENALTY: float = 1.3

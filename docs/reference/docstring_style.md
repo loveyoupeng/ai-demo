@@ -116,8 +116,8 @@ Where the teaching implementation deliberately takes the *readable* path
 instead of the *production* one, mark the spot with a single-line comment:
 
 ```python
-# PROD: production uses an online-softmax flash kernel that never materializes
-#       the (B, H, S, S) score matrix — see impl/_triton/flash_attn.py
+# PROD: production uses an online-softmax flash-attention kernel that never
+#       materializes the (B, H, S, S) score matrix (Dao et al. 2022)
 scores = (q @ k.T) / scale  # (B, H, S, S)
 ```
 

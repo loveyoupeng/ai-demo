@@ -54,8 +54,9 @@ presents "continue the text." SFT presents "given this input, produce this
 learning the *task shift*. The model learns to *follow* the instruction, not
 just continue the prompt.
 
-**Where it lives:** `scripts/sft.py` (per-track trainers:
-`impl/_np/sft.py` = teaching baseline, torch/triton/cuda = production shape).
+**Where it lives:** the SFT stages of `scripts/train_demo_model_v3.py`
+(torch-track training loop; the NumPy track's `impl/_np/training.py`
+`train_step` is the teaching baseline for the same loop).
 
 ## Stage 3 — Tool Calling (SFT)
 
@@ -170,8 +171,8 @@ engine, which also proves the cross-track round trip every build).
 
 ## The Contract
 
-The user-visible entries: `scripts/sft.py` (pre/SFT stages),
-`scripts/rl.py` (the RL stage, all four backends). The full demo
+The user-visible entries: `scripts/rl.py` (the RL stage, all four
+backends). The full demo
 pipeline — the six stages in the order above plus the drafter
 distillation of ADR 0003 — lives in
 `scripts/train_demo_model_v3.py` (supersedes v2, deleted):
