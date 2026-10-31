@@ -649,21 +649,44 @@ class _LearningHandler(BaseHTTPRequestHandler):
             last = model.forward_step(np.array([seq[-1:]], dtype=np.int32), len(seq) - 1, cache)
             last = last[0, 0].astype(np.float64)
         else:
-            import torch
+            # Non-Numpy backends: use the track's OWN generate_with_records
+            # (the same path _run_record uses) so "generate" and "generate +
+            # record" produce IDENTICAL tokens — the old inline loop used
+            # the real CUDA/torch forward while _run_record used the
+            # float64 display path, producing different results.
+            from impl._np import learning as np_learning
 
-            from shared.device_util import compute_device
+            cls_name = type(model).__name__
+            if cls_name == "TorchModel":
+                from impl._torch import learning as torch_learning
 
-            def _window_logits(window: list[int]) -> np.ndarray:
-                with torch.no_grad():
-                    out = model(torch.tensor([window], dtype=torch.int64, device=compute_device(model)))
-                return out[0, -1].double().detach().cpu().numpy().astype(np.float64)
+                record = torch_learning.generate_with_records(
+                    model, vocab or [], list(ids), n, temp=t, top_k=k, seed=seed,
+                    spec="plain", k=None, drafter=None,
+                )
+            elif cls_name == "TritonModel":
+                from impl._triton import learning as triton_learning
 
-            logits = _window_logits(seq[-ctx:])
-            for _ in range(n):
-                tok = _sample(logits, t, k, rng, recent=seq[len(ids) :])
-                seq.append(tok)
-                logits = _window_logits(seq[-ctx:])
-            last = _window_logits(seq[-ctx:])
+                record = triton_learning.generate_with_records(
+                    model, vocab or [], list(ids), n, temp=t, top_k=k, seed=seed,
+                    spec="plain", k=None, drafter=None,
+                )
+            elif cls_name == "CUDAModel":
+                from impl._cuda import learning as cuda_learning
+
+                record = cuda_learning.generate_with_records(
+                    model, vocab or [], list(ids), n, temp=t, top_k=k, seed=seed,
+                    spec="plain", k=None, drafter=None,
+                )
+            else:
+                raise ValueError(f"no inference path for backend {cls_name!r}")
+
+            gen = record["generated"]
+            seq[len(ids) :] = gen["tokens"]
+            # last_step: reuse the last step's forward logits (the record
+            # nests logits inside steps[-1]["forward"], not at the top level)
+            last_step_rec = record["steps"][-1]["forward"]
+            last = np.array(last_step_rec["logits"][0][-1], dtype=np.float64)
         z = last - last.max()
         p = np.exp(z)
         p /= p.sum()

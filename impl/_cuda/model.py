@@ -149,22 +149,21 @@ class CUDAModel:
                 for attr_name in ('q_proj', 'k_proj', 'v_proj', 'o_proj'):
                     attr = getattr(block, attr_name)
                     attr.data = attr.data.to(config.dtype)
-                for block in self.stacking.blocks:
+                if hasattr(block, 'router'):
+                    block.router.data = block.router.data.to(config.dtype)
+                if config.has_moe():
+                    for e in range(config.n_experts):
+                        for attr_name in ('expert_gate_proj', 'expert_up_proj', 'expert_down_proj'):
+                            t = getattr(block, attr_name)
+                            t[e].data = t[e].data.to(config.dtype)
+                    for s in range(config.n_shared_experts):
+                        for attr_name in ('shared_gate_proj', 'shared_up_proj', 'shared_down_proj'):
+                            t = getattr(block, attr_name)
+                            t[s].data = t[s].data.to(config.dtype)
+                else:
                     for attr_name in ('gate_proj', 'up_proj', 'down_proj'):
                         attr = getattr(block, attr_name)
                         attr.data = attr.data.to(config.dtype)
-                for block in self.stacking.blocks:
-                    if hasattr(block, 'router'):
-                        attr = block.router
-                        attr.data = attr.data.to(config.dtype)
-                    for e in range(cfg.n_experts):
-                        for attr_name in ('gate_proj', 'up_proj', 'down_proj'):
-                            attr = getattr(block.experts[e], attr_name)
-                            attr.data = attr.data.to(config.dtype)
-                    for s in range(cfg.n_shared_experts):
-                        for attr_name in ('gate_proj', 'up_proj', 'down_proj'):
-                            attr = getattr(block.shared_experts[s], attr_name)
-                            attr.data = attr.data.to(config.dtype)
 
     @classmethod
     def from_checkpoint(cls, checkpoint_dir: str | Path, device: str = "cuda") -> CUDAModel:
