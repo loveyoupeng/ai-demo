@@ -582,7 +582,10 @@ def _rl_gradient_check(kwargs: dict[str, Any], details: dict[str, Any]) -> None:
     adv = rng.normal(size=(B,))
 
     tm = TorchModel(cfg)
-    params_np = {k: np.asarray(v.detach().cpu().numpy() if isinstance(v, torch.Tensor) else v) for k, v in tm.get_all_parameters().items()}
+    params_np = {
+        k: np.asarray(v.detach().cpu().numpy() if isinstance(v, torch.Tensor) else v)
+        for k, v in tm.get_all_parameters().items()
+    }
     tr = TorchGRPOTrainer(tm, TorchModel(cfg), device="cpu", lr=1e-4, kl_beta=0.0)
     loss_t, _ = tr.grpo_loss(th.from_numpy(batch), th.from_numpy(rmask.astype(np.int64)), th.from_numpy(adv))
     loss_t.backward()

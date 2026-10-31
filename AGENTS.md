@@ -122,9 +122,9 @@ TWO controlled comparisons: `*-rl` vs `*` isolates RL's delta (the RL
 run started from exactly the shown SFT checkpoint), and `moe-rl` vs
 `dense-rl` isolates the ARCHITECTURE split of ADR 0005 at matched total
 budget (~1.03×): the dense twin is 6 layers with a thin FFN
-(`expert_dim=96` = 1.5·D, 275,264 params — the Qwen3-32B shape); the
+(`expert_dim=96` = 1.5·D, 275K = 275,264 params — the Qwen3-32B shape); the
 MoE is 3 layers with E=8 routed + 1 shared at `expert_dim=32`
-(282,560 total, 153,536 active/token ~54% — the 30B-A3B shape).
+(283K-A154K: 282,560 total, 153,536 active/token ~54% — the 30B-A3B shape).
 Missing/stale checkpoints (the `"pipeline": 4` config.json marker)
 bootstrap: the default family at startup, the other family in a
 background thread after the server is up (a still-training variant

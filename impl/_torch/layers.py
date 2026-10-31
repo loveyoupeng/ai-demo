@@ -37,6 +37,7 @@ from shared.config import TransformerConfig
 from shared.constants import Attn, Keys, LayerNorm, Mlp
 from shared.registry import ParameterRegistry
 from shared.result import Result
+from shared.torch_softmax import stable_softmax_t
 
 logger = logging.getLogger(__name__)
 
@@ -580,7 +581,7 @@ class MixtureOfExperts(nn.Module):
 
         # Router scores and softmax over all experts: (B, S, E)
         scores = self.gate(x)  # (B, S, E)
-        probs = F.softmax(scores, dim=-1)  # (B, S, E)
+        probs = stable_softmax_t(scores, dim=-1)  # (B, S, E)
 
         # Top-k mask: keep the k largest probs per token, zero the rest.
         if self.top_k < E:

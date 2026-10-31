@@ -59,13 +59,12 @@ from torch.nn import functional as F
 from impl._torch.layers import RMSNorm
 from shared.config import TransformerConfig
 from shared.draft import DSHARK, MTP, DrafterMeta, expected_drafter_params
+from shared.torch_softmax import stable_softmax_t
 
 
 def _stable_probs(logits: torch.Tensor) -> torch.Tensor:
-    """Stable softmax over the last axis: logits (..., V) → probs (..., V)."""
-    z = logits - torch.max(logits, dim=-1, keepdim=True).values
-    e = torch.exp(z)
-    return e / torch.sum(e, dim=-1, keepdim=True)
+    """Softmax over the last axis: logits (..., V) → probs (..., V) (shared helper)."""
+    return stable_softmax_t(logits, dim=-1)
 
 
 def _rope_apply(x: torch.Tensor, position: int = 0, rope_dim: int = 0) -> torch.Tensor:

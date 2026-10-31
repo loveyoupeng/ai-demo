@@ -20,17 +20,18 @@ backend). Four variants, two controlled comparisons:
 - **moe-rl** (default) — ``learning_moe_rl``: the full v3 pipeline
   (pre-train → code SFT → tool SFT → thinking SFT → GRPO RL → drafter
   distillation, ADR 0004) on the param-matched MoE of ADR 0005: 3 layers
-  with E=8 routed + 1 always-on shared expert at dim 32 (282,560 total
-  params, 153,536 active/token — the router scores, top-1 selection,
-  and shared branch render per block).
+  with E=8 routed + 1 always-on shared expert at dim 32 — **283K-A154K**
+  (282,560 total params, 153,536 active/token in HF naming; the router
+  scores, top-1 selection, and shared branch render per block).
 - **dense-rl** — ``learning_rl``: the same five stages on the dense
-  TWIN: 6 layers with a thin FFN (dim 96) — total-matched to the MoE
-  (275,264 vs 282,560, the Qwen3-32B-deeper-than-30B-A3B shape), so
-  moe-rl vs dense-rl compares the FFN geometry at matched budget.
+  TWIN: 6 layers with a thin FFN (dim 96) — **275K** all-active,
+  total-matched to the MoE (275,264 vs 282,560, the
+  Qwen3-32B-deeper-than-30B-A3B shape), so moe-rl vs dense-rl compares
+  the FFN geometry at matched budget.
 - **moe** — ``learning_moe_think``: the MoE family's SFT-final
-  checkpoint (everything except RL), so *-rl vs * isolates RL's delta
-  (RL started from exactly this model — the comparison is controlled).
-- **dense** — ``learning_think``: the dense family's SFT-final.
+  checkpoint (283K-A154K, everything except RL), so *-rl vs * isolates
+  RL's delta (RL started from exactly this model — controlled).
+- **dense** — ``learning_think``: the dense family's SFT-final (275K).
 
 Either checkpoint runs on any backend selected in-page, and every
 variant ships its own drafter sidecars (distilled per checkpoint in

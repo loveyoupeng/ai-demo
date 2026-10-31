@@ -622,7 +622,11 @@ async function init(prefetched) {
   const paramTitle = active === MODEL.n_params
     ? "parameters (all active — dense)"
     : "parameters total · the per-token active slice (routed top-" + c.top_k + " + shared)";
-  badges.push([`${MODEL.n_params.toLocaleString()} · ${active.toLocaleString()}/tok`, paramTitle]);
+  // Human-readable size label in the HF convention: 275K for dense,
+  // 283K-A154K for the MoE (total, then active per token after the dash).
+  const fmtK = (n) => (n >= 1000 ? (n / 1000).toFixed(n % 1000 === 0 ? 0 : 1).replace(/\.0$/, "") + "K" : String(n));
+  const sizeLabel = active === MODEL.n_params ? fmtK(MODEL.n_params) : `${fmtK(MODEL.n_params)}-A${fmtK(active)}`;
+  badges.push([`${sizeLabel}  (${MODEL.n_params.toLocaleString()} · ${active.toLocaleString()}/tok)`, paramTitle]);
   // Serving dtype badge: what the checkpoint's `dtype` marker means here.
   // The GPU tracks TRAIN in BF16 (tensor-core matmuls, ~2x FP32 on Ampere+),
   // but the checkpoint stores FP32 and this page SERVES in float32 — so the

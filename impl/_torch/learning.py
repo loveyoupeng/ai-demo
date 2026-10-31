@@ -30,6 +30,7 @@ import torch.nn.functional as F
 
 from impl._torch.layers import MixtureOfExperts, MultiHeadAttention, SwiGLUFFN
 from shared.constants import REP_PENALTY
+from shared.torch_softmax import stable_softmax_np, stable_softmax_t
 
 if TYPE_CHECKING:
     # Record shape contract: the JSON shapes are owned by the NumPy track.
@@ -133,9 +134,7 @@ def _attn_record(attn: MultiHeadAttention, ln1_out: torch.Tensor, position: int)
     neg = torch.tensor(-1e4, dtype=ln1_out.dtype, device=ln1_out.device)
     scores_masked = torch.where(mask, neg, scores)  # (B, H, S, S)
 
-    z = scores_masked - scores_masked.max(dim=-1, keepdim=True).values
-    attn_w = torch.exp(z)
-    attn_w = attn_w / attn_w.sum(dim=-1, keepdim=True)  # (B, H, S, S)
+    attn_w = stable_softmax_t(scores_masked, dim=-1)  # (B, H, S, S)
     ctx = (attn_w @ v).permute(0, 2, 1, 3).reshape(B, S, H * hd)  # (B, S, H·hd)
     attn_out = attn.o_proj(ctx)  # (B, S, D)
 
@@ -220,9 +219,7 @@ def _attn_step_record(
     scale = math.sqrt(hd)
     scores = (q @ k_r.transpose(-1, -2)) / scale  # (B, H, 1, t) over the WHOLE cache
     mask = torch.zeros(1, t, dtype=torch.bool, device=x.device)  # nothing masked in decode
-    z = scores - scores.max(dim=-1, keepdim=True).values
-    attn_w = torch.exp(z)
-    attn_w = attn_w / attn_w.sum(dim=-1, keepdim=True)  # (B, H, 1, t)
+    attn_w = stable_softmax_t(scores, dim=-1)  # (B, H, 1, t) — nothing masked in decode
     ctx = (attn_w @ v_r).permute(0, 2, 1, 3).reshape(B, 1, H * hd)  # (B, 1, H·hd)
     out = attn.o_proj(ctx)  # (B, 1, D)
 
@@ -269,7 +266,7 @@ def _moe_record(mlp: MixtureOfExperts, x: torch.Tensor, out: torch.Tensor) -> Mo
     E = mlp.n_experts
     scores = mlp.gate(x)  # (B, S, E)
     scores_stable = scores - scores.max(dim=-1, keepdim=True).values  # (B, S, E)
-    probs = torch.softmax(scores, dim=-1)  # (B, S, E)
+    probs = stable_softmax_t(scores, dim=-1)  # (B, S, E)
     if mlp.top_k < E:
         order = torch.argsort(probs, dim=-1, descending=True)  # (B, S, E) descending
         topk_idx = order[..., : mlp.top_k]  # (B, S, k)
@@ -345,9 +342,7 @@ def instrumented_forward(model: TorchModel, input_ids: torch.Tensor) -> tuple[Fo
     logits = model.lm_head(normed)
 
     # Display extras: the softmax distribution + top tokens at the last position.
-    z = logits - logits.max(dim=-1, keepdim=True).values
-    p = torch.exp(z)
-    p = p / p.sum(dim=-1, keepdim=True)  # (B, S, V)
+    p = stable_softmax_t(logits, dim=-1)  # (B, S, V)
     p = p.detach()
     V = p.shape[-1]
     top_n = min(10, V)
@@ -457,9 +452,7 @@ def generate_with_records(
         if top_k is not None:
             kth = np.partition(z, -top_k)[-1]
             z = np.where(z < kth, -np.inf, z)
-        z = z - z.max()
-        pk = np.exp(z)
-        pk /= pk.sum()
+        pk = stable_softmax_np(z)
         return int(rng.choice(len(pk), p=pk))
 
     # ---- Step 0: prefill the prompt (full forward, initializes the caches)
@@ -523,9 +516,7 @@ def generate_with_records(
 
         normed = model.final_norm(stream)  # (1, 1, D)
         logits = model.lm_head(normed)  # (1, 1, V)
-        z = logits - logits.max(dim=-1, keepdim=True).values
-        p = torch.exp(z)
-        p = p / p.sum(dim=-1, keepdim=True)  # (1, 1, V)
+        p = stable_softmax_t(logits, dim=-1)  # (1, 1, V)
         p = p.detach()
         V = p.shape[-1]
         top_n = min(10, V)

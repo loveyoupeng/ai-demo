@@ -38,6 +38,7 @@ import torch.nn.functional as F
 
 from impl._torch.learning import _generate_with_spec_records  # shared-seam: torch-family logic consumed by this track
 from shared.constants import REP_PENALTY
+from shared.torch_softmax import stable_softmax_np, stable_softmax_t
 
 if TYPE_CHECKING:
     # Record shape contract: the JSON shapes are owned by the NumPy track.
@@ -219,9 +220,7 @@ def _attention_forward(
         mask = torch.zeros(S, t, dtype=torch.bool)  # nothing masked in decode
         scores_masked = scores  # (B, H, S, t)
 
-    z = scores_masked - scores_masked.max(dim=-1, keepdim=True).values
-    attn_w = torch.exp(z)
-    attn_w = attn_w / attn_w.sum(dim=-1, keepdim=True)  # (B, H, S, t)
+    attn_w = stable_softmax_t(scores_masked, dim=-1)  # (B, H, S, t)
     ctx = (attn_w @ v_r).permute(0, 2, 1, 3).reshape(B, S, H * hd)  # (B, S, H·hd)
     attn_out = ctx @ Wo  # (B, S, D)
 
@@ -302,8 +301,7 @@ def _moe_record(block: CuTransformerBlock, x: torch.Tensor) -> tuple[torch.Tenso
     E = block.n_experts
     top_k = block.config.top_k
     scores = x @ _w(block.router)  # (B, S, E)
-    scores_stable = scores - scores.max(dim=-1, keepdim=True).values  # (B, S, E)
-    probs = torch.softmax(scores, dim=-1)  # (B, S, E)
+    probs = stable_softmax_t(scores, dim=-1)  # (B, S, E)
     if top_k < E:
         order = torch.argsort(probs, dim=-1, descending=True)  # (B, S, E) descending
         topk_idx = order[..., :top_k]  # (B, S, k)
@@ -345,10 +343,8 @@ def _moe_record(block: CuTransformerBlock, x: torch.Tensor) -> tuple[torch.Tenso
 
 
 def _softmax64(logits: torch.Tensor) -> torch.Tensor:
-    """Row-wise softmax in float64 (the record's display distribution)."""
-    z = logits - logits.max(dim=-1, keepdim=True).values
-    p = torch.exp(z)
-    return p / p.sum(dim=-1, keepdim=True)
+    """Row-wise softmax in float64 (the record's display distribution) — shared helper."""
+    return stable_softmax_t(logits.double(), dim=-1)
 
 
 def _top_tokens(p_last: torch.Tensor, top_n: int = 10) -> list[list]:
@@ -546,9 +542,7 @@ def generate_with_records(
         if top_k is not None:
             kth = np.partition(z, -top_k)[-1]
             z = np.where(z < kth, -np.inf, z)
-        z = z - z.max()
-        pk = np.exp(z)
-        pk /= pk.sum()
+        pk = stable_softmax_np(z)
         return int(rng.choice(len(pk), p=pk))
 
     # ---- Step 0: prefill the prompt (full forward, initializes the caches)

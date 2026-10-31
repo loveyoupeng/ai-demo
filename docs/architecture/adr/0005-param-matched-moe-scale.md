@@ -41,8 +41,8 @@ expert bank):
 1. **Dense: 6 layers, thin FFN** (`expert_dim=96` = 1.5·D):
    275,264 total = 275,264 active. Depth is the dense model's edge.
 2. **MoE: 3 layers, wide expert bank** (E=8 routed + 1 always-on shared
-   at expert_dim=32, top_k=1): 282,560 total (1.03× dense) but only
-   153,536 ACTIVE per token (~54% of its own parameters) — the
+   at expert_dim=32, top_k=1): 283K-A154K — 282,560 total (1.03× dense)
+   but only 153,536 ACTIVE per token (~54% of its own parameters) — the
    routed slice is 1-of-8 experts (32-wide) + the shared expert. The
    total-vs-active contrast IS the lesson, at a scale the page renders.
    - 16-dim experts (a 15-expert alternative) would have been more

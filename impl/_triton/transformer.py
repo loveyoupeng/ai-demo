@@ -28,6 +28,7 @@ from impl._triton.ffn import swiglu_ffn
 from shared.config import TransformerConfig
 from shared.constants import Attn, Keys, LayerNorm, Mlp
 from shared.result import Result  # shared-seam: torch building block reused by triton
+from shared.torch_softmax import stable_softmax_t
 
 logger = logging.getLogger(__name__)
 
@@ -508,9 +509,7 @@ class TritonMixtureOfExperts(nn.Module):
 
         # Router scores and softmax over all experts: (B, S, E)
         scores = self.gate(x)  # (B, S, E)
-        scores = scores - scores.max(dim=-1, keepdim=True).values
-        exp_scores = torch.exp(scores)
-        probs = exp_scores / exp_scores.sum(dim=-1, keepdim=True)  # (B, S, E)
+        probs = stable_softmax_t(scores, dim=-1)  # (B, S, E)
 
         # Top-k mask: keep the k largest probs per token, zero the rest.
         if self.top_k < E:

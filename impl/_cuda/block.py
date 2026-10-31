@@ -52,6 +52,7 @@ from impl._cuda.rope import apply_rope
 from shared.config import TransformerConfig
 from shared.constants import Attn, Keys, LayerNorm, Mlp
 from shared.result import Result
+from shared.torch_softmax import stable_softmax_t
 
 logger = logging.getLogger(__name__)
 
@@ -528,9 +529,7 @@ class CuTransformerBlock:
 
         # Router scores and softmax over all experts: (B, S, E)
         scores = x @ router  # (B, S, E)
-        scores = scores - scores.max(dim=-1, keepdim=True).values
-        exp_scores = torch.exp(scores)
-        probs = exp_scores / exp_scores.sum(dim=-1, keepdim=True)  # (B, S, E)
+        probs = stable_softmax_t(scores, dim=-1)  # (B, S, E)
 
         # Top-k mask: keep the k largest probs per token, zero the rest.
         if self.config.top_k < E:
