@@ -123,9 +123,20 @@ def load_learning_model(
         model = TritonModel(cfg, params).cuda().float()
         model.eval()
     elif backend == "cuda":
+        import torch
+
         from impl._cuda.model import CUDAModel as _CUDAModel
+        from impl._cuda.model import _cuda_to_device, _cuda_to_dtype
 
         model = _CUDAModel(cfg, params)
+        # Same serving convention as the torch/triton tracks: float32.
+        # The checkpoint's BF16 dtype marker is a TRAINING (AMP) property;
+        # serving (and the drafter sidecars beside it, which load as
+        # float32 and align to the target via ``drafter_from_sidecar``)
+        # computes in float32 — a BF16 target against float32 drafter
+        # weights is exactly the mixed-dtype matmul the page hit.
+        _cuda_to_dtype(model, torch.float32)  # in place
+        _cuda_to_device(model, torch.device("cuda" if torch.cuda.is_available() else "cpu"))  # in place
     else:
         raise ValueError(f"backend must be 'numpy'|'torch'|'triton'|'cuda', got {backend!r}")
 
@@ -654,29 +665,52 @@ class _LearningHandler(BaseHTTPRequestHandler):
             # record" produce IDENTICAL tokens — the old inline loop used
             # the real CUDA/torch forward while _run_record used the
             # float64 display path, producing different results.
-            from impl._np import learning as np_learning
 
             cls_name = type(model).__name__
             if cls_name == "TorchModel":
                 from impl._torch import learning as torch_learning
 
                 record = torch_learning.generate_with_records(
-                    model, vocab or [], list(ids), n, temp=t, top_k=k, seed=seed,
-                    spec="plain", k=None, drafter=None,
+                    model,
+                    vocab or [],
+                    list(ids),
+                    n,
+                    temp=t,
+                    top_k=k,
+                    seed=seed,
+                    spec="plain",
+                    k=None,
+                    drafter=None,
                 )
             elif cls_name == "TritonModel":
                 from impl._triton import learning as triton_learning
 
                 record = triton_learning.generate_with_records(
-                    model, vocab or [], list(ids), n, temp=t, top_k=k, seed=seed,
-                    spec="plain", k=None, drafter=None,
+                    model,
+                    vocab or [],
+                    list(ids),
+                    n,
+                    temp=t,
+                    top_k=k,
+                    seed=seed,
+                    spec="plain",
+                    k=None,
+                    drafter=None,
                 )
             elif cls_name == "CUDAModel":
                 from impl._cuda import learning as cuda_learning
 
                 record = cuda_learning.generate_with_records(
-                    model, vocab or [], list(ids), n, temp=t, top_k=k, seed=seed,
-                    spec="plain", k=None, drafter=None,
+                    model,
+                    vocab or [],
+                    list(ids),
+                    n,
+                    temp=t,
+                    top_k=k,
+                    seed=seed,
+                    spec="plain",
+                    k=None,
+                    drafter=None,
                 )
             else:
                 raise ValueError(f"no inference path for backend {cls_name!r}")

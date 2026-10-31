@@ -63,6 +63,18 @@ def _cuda_to_device(model: CUDAModel, device: torch.device | str) -> None:
                 attr.data = attr.data.to(device)
 
 
+def _cuda_to_dtype(model: CUDAModel, dtype: torch.dtype) -> None:
+    """Cast every CUDAModel tensor to ``dtype`` (storage relocation, same
+    idiom as :func:`_cuda_to_device` — the block's ``__dict__`` traversal
+    catches the stacked expert tensors a per-attribute list would miss)."""
+    for name in ("embedding_weights", "final_norm_gamma", "lm_head_weight"):
+        getattr(model, name).data = getattr(model, name).data.to(dtype)
+    for block in model.stacking.blocks:
+        for attr in list(block.__dict__.values()):
+            if isinstance(attr, torch.Tensor):
+                attr.data = attr.data.to(dtype)
+
+
 class CUDAModel:
     """CUDA decoder-only transformer — full model with embedding and lm_head.
 
@@ -140,30 +152,18 @@ class CUDAModel:
         if p is not None:
             _copy_in_place(self.lm_head_weight, p[Keys.lm_head()])
 
-        # Cast model parameters to the configured dtype (AMP: BF16 compute with FP32 master weights)
-        if config.dtype is not None:
-            self.embedding_weights.data = self.embedding_weights.data.to(config.dtype)
-            self.final_norm_gamma.data = self.final_norm_gamma.data.to(config.dtype)
-            self.lm_head_weight.data = self.lm_head_weight.data.to(config.dtype)
-            for block in self.stacking.blocks:
-                for attr_name in ('q_proj', 'k_proj', 'v_proj', 'o_proj'):
-                    attr = getattr(block, attr_name)
-                    attr.data = attr.data.to(config.dtype)
-                if hasattr(block, 'router'):
-                    block.router.data = block.router.data.to(config.dtype)
-                if config.has_moe():
-                    for e in range(config.n_experts):
-                        for attr_name in ('expert_gate_proj', 'expert_up_proj', 'expert_down_proj'):
-                            t = getattr(block, attr_name)
-                            t[e].data = t[e].data.to(config.dtype)
-                    for s in range(config.n_shared_experts):
-                        for attr_name in ('shared_gate_proj', 'shared_up_proj', 'shared_down_proj'):
-                            t = getattr(block, attr_name)
-                            t[s].data = t[s].data.to(config.dtype)
-                else:
-                    for attr_name in ('gate_proj', 'up_proj', 'down_proj'):
-                        attr = getattr(block, attr_name)
-                        attr.data = attr.data.to(config.dtype)
+        # Cast model parameters to the configured dtype (AMP: BF16 compute with
+        # FP32 master weights). Walk the registry binding — the track's single
+        # storage traversal — instead of a per-attribute list (a manual list
+        # silently misses tensors; the registry cannot). Registry values may be
+        # VIEWS into stacked tensors (``expert_gate_proj[e]``): rebinding
+        # ``.data`` on a view detaches it from the parent and changes nothing,
+        # so each cast targets the view's base storage when there is one.
+        dtype = config.dtype
+        if isinstance(dtype, torch.dtype):
+            for tensor in self._param_tensors().values():
+                owner = tensor._base if tensor._base is not None else tensor
+                owner.data = owner.data.to(dtype)
 
     @classmethod
     def from_checkpoint(cls, checkpoint_dir: str | Path, device: str = "cuda") -> CUDAModel:
