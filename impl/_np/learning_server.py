@@ -176,6 +176,24 @@ def tokenize_text(text: str, vocab: list[str], tok: Tokenizer | None = None) -> 
     return ids, skipped
 
 
+def _display_decode(tokenizer: Tokenizer | None, vocab: list[str], tokens: list[int]) -> str:
+    """Decode token IDs for the page's generated/prompt text.
+
+    The record adapters join the raw vocab strings ("".join(vocab[t])),
+    which keeps special tokens visible (<|answer|> shows as text). The
+    BPE tokenizer.decode strips specials by default, which made
+    /api/inference's generated text drop the <|answer|> tag that
+    /api/record showed — same tokens, different display. Both endpoints
+    must show the same string, so use the vocab join when a vocab exists
+    and fall back to the tokenizer (specials kept) only when it doesn't.
+    """
+    if vocab:
+        return "".join(vocab[t] for t in tokens)
+    if tokenizer is not None:
+        return tokenizer.decode(tokens, skip_special_tokens=False)
+    return "".join(str(t) for t in tokens)
+
+
 def _sample(
     logits: np.ndarray,
     temp: float | None,
@@ -728,14 +746,12 @@ class _LearningHandler(BaseHTTPRequestHandler):
         return {
             "prompt": {
                 "tokens": list(ids),
-                "text": self.tokenizer.decode(list(ids)) if self.tokenizer else "".join(vocab[i] for i in ids),
+                "text": _display_decode(self.tokenizer, vocab, list(ids)),
             },
             "skipped_chars": skipped,
             "generated": {
                 "tokens": seq[len(ids) :],
-                "text": self.tokenizer.decode(seq[len(ids) :])
-                if self.tokenizer
-                else "".join(vocab[i] for i in seq[len(ids) :]),
+                "text": _display_decode(self.tokenizer, vocab, seq[len(ids) :]),
             },
             "last_step": {
                 "logits": [round(float(v), 6) for v in last],
@@ -811,7 +827,10 @@ class _LearningHandler(BaseHTTPRequestHandler):
 
         n_gen = len(gen_ids)
         vocab = self.vocab or []
-        decode = self.tokenizer.decode if self.tokenizer else (lambda toks: "".join(vocab[i] for i in toks))
+
+        def decode(toks: list[int]) -> str:
+            return _display_decode(self.tokenizer, vocab, toks)
+
         return {
             "prompt": {"tokens": list(ids), "text": decode(list(ids))},
             "skipped_chars": skipped,
