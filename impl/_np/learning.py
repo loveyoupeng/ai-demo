@@ -407,15 +407,18 @@ def generate_with_records(
 
     emitted: list[int] = []  # generated tokens so far (repeat guard, cf. server _sample)
 
-    def _pick(p_last: np.ndarray) -> int:
+    def _pick(logits_last: np.ndarray) -> int:
         """Greedy argmax, or seeded temperature/top-k sampling.
 
-        Applies the same repetition guard as the server's ``_sample``:
+        Takes RAW LOGITS (not softmax probs): the repetition penalty must
+        divide the logit itself, not its log — the logsumexp offset breaks
+        log(p)/REP_PENALTY == log(p/REP_PENALTY), which made the record
+        path's guard weaker than the server's ``_sample`` and diverged
+        "generate" from "generate + record". Same guard as ``_sample``:
         penalty on already-emitted tokens + a hard block on the immediately
-        previous token, so the record path cannot lock into a "xx xx xx"
-        loop — before this, the compare tab showed `ĠlistĠlistĠlist`.
+        previous token.
         """
-        z = np.log(p_last + 1e-30)
+        z = logits_last.astype(np.float64)
         if temp is not None:
             z = z / temp
         if emitted:
@@ -441,7 +444,7 @@ def generate_with_records(
     raw: dict = {}
     _logits, cache = model.forward_prefill(x, None, position=P - P0, record=raw)
     rec = _forward_record(model, raw, x)
-    tok = _pick(np.asarray(rec["softmax"], dtype=np.float64)[0][-1])
+    tok = _pick(np.asarray(rec["logits"], dtype=np.float64)[0][-1])
     emitted.append(tok)
     steps.append(
         {
@@ -464,7 +467,7 @@ def generate_with_records(
         raw = {}
         model.forward_step(x1, t, cache, record=raw)
         rec = _forward_record(model, raw, x1)
-        tok = _pick(np.asarray(rec["softmax"], dtype=np.float64)[0][0])
+        tok = _pick(np.asarray(rec["logits"], dtype=np.float64)[0][0])
         emitted.append(tok)
         steps.append(
             {

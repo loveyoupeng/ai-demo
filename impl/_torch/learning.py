@@ -435,7 +435,7 @@ def generate_with_records(
 
     emitted: list[int] = []  # generated tokens so far (repeat guard, cf. NumPy track)
 
-    def _pick(p_last: np.ndarray) -> int:
+    def _pick(logits_last: np.ndarray) -> int:
         """Greedy argmax, or seeded temperature/top-k sampling.
 
         Identical formula AND identical repetition guard as the NumPy track's
@@ -444,7 +444,7 @@ def generate_with_records(
         token. The two record adapters must stay equivalent — the page
         consumes either backend's records interchangeably.
         """
-        z = np.log(p_last + 1e-30)
+        z = logits_last.astype(np.float64)  # raw logits — the guard divides the logit, not its log
         if temp is not None:
             z = z / temp
         if emitted:
@@ -465,7 +465,7 @@ def generate_with_records(
     # ---- Step 0: prefill the prompt (full forward, initializes the caches)
     x = torch.tensor([seq[-ctx:]], dtype=torch.int64)
     rec, _tensors = instrumented_forward(model, x)
-    tok = _pick(np.asarray(rec["softmax"], dtype=np.float64)[0][-1])
+    tok = _pick(np.asarray(rec["logits"], dtype=np.float64)[0][-1])
     emitted.append(tok)
     steps.append(
         {
@@ -542,7 +542,7 @@ def generate_with_records(
             "softmax": arr(p),
             "top_tokens": top_tokens,
         }
-        tok = _pick(p[0, 0].detach().cpu().numpy())
+        tok = _pick(logits[0, 0].detach().cpu().numpy().astype(np.float64))
         emitted.append(tok)
         steps.append(
             {
