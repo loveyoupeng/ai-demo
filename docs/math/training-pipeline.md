@@ -15,6 +15,13 @@ Shape letters used below (full definitions: [CONTEXT.md](../../CONTEXT.md) →
 sequence length (token positions in one pass), **D** = `embed_dim` (model
 width), **V** = `vocab_size`.
 
+## Architecture note — 3:1 Gated DeltaNet hybrid (ADR 0006)
+
+Every demo model now runs `layer_pattern = "dddF"`: 3 of every 4 layers are
+Gated DeltaNet (linear attention, recurrent `S` state), 1 is full RoPE
+attention. The pipeline stages below are unchanged — the hybrid only changes
+which mixing sublayer each layer runs. See the walkthrough §8b and ADR 0006.
+
 ## Stage 1 — Pre-Training (what it is)
 
 **Goal:** teach the model the *shape* of the data (syntax, repeated

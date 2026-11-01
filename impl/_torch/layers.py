@@ -34,7 +34,7 @@ import torch.nn.functional as F
 
 from shared.checkpoint import load_checkpoint
 from shared.config import TransformerConfig
-from shared.constants import Attn, Keys, LayerNorm, Mlp
+from shared.constants import Attn, DeltaNet, Keys, LayerNorm, Mlp
 from shared.registry import ParameterRegistry
 from shared.result import Result
 from shared.torch_softmax import stable_softmax_t
@@ -443,6 +443,142 @@ class MultiHeadAttention(nn.Module):
         return self.o_proj(ctx)  # (B, c, D)
 
 
+class GatedDeltaNet(nn.Module):
+    """Gated DeltaNet mixing sublayer (linear attention, recurrent state S).
+
+    Mirrors ``impl._np.deltanet.GatedDeltaNet`` exactly — autograd owns the
+    backward on this track, so no hand-written backward here.
+
+        q̂, k̂ = L2norm(q), L2norm(k)            per head, no RoPE
+        β_t   = sigmoid(a_proj(x_t) + dt_bias)  per head
+        S_t   = (1-β_t) S_{t-1} (I − k̂_t k̂_tᵀ) + β_t k̂_t v_tᵀ
+        o_t   = S_t q̂_t
+        out   = sigmoid(gate_proj(x_t)) ⊙ RMSNorm(o_t @ o_proj)
+
+    The forward scan is a Python loop over S (teaching scale: ctx ≤ 128,
+    D = 64 — the loop is fine and readable; PROD: a chunked WY /
+    Blelloch-style scan parallelizes it on GPU). ``forward_step`` updates
+    the recurrent state in O(hd²); ``forward_chunk`` scans the chunk
+    sequentially (chunk parity with ``forward``, pinned by tests).
+
+    Cache: {"s": (B,H,hd,hd), "s_hist": [...]} — same contract as the NumPy
+    track; ``make_cache`` picks the kind per layer.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        n_heads: int,
+        layer_index: int | None = None,
+        params: Mapping[str, np.ndarray] | None = None,
+    ) -> None:
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.n_heads = n_heads
+        self.head_dim = embed_dim // n_heads
+        D, H, hd = embed_dim, n_heads, self.head_dim
+        # nn.Linear stores (out, in); the checkpoint keeps (in, out) → transpose on inject.
+        self.q_proj = nn.Linear(D, H * hd, bias=False)
+        self.k_proj = nn.Linear(D, H * hd, bias=False)
+        self.v_proj = nn.Linear(D, H * hd, bias=False)
+        self.o_proj = nn.Linear(H * hd, D, bias=False)
+        self.a_proj = nn.Linear(D, H, bias=False)
+        self.dt_bias = nn.Parameter(torch.zeros(H))
+        self.gate_proj = nn.Linear(D, D, bias=False)
+        self.norm = RMSNorm(D)
+        if params is not None and layer_index is not None:
+            i = layer_index
+            _copy_checkpoint(self.q_proj.weight, params[Keys.deltanet(i, DeltaNet.Q_PROJ)], transpose=True)
+            _copy_checkpoint(self.k_proj.weight, params[Keys.deltanet(i, DeltaNet.K_PROJ)], transpose=True)
+            _copy_checkpoint(self.v_proj.weight, params[Keys.deltanet(i, DeltaNet.V_PROJ)], transpose=True)
+            _copy_checkpoint(self.o_proj.weight, params[Keys.deltanet(i, DeltaNet.O_PROJ)], transpose=True)
+            _copy_checkpoint(self.a_proj.weight, params[Keys.deltanet(i, DeltaNet.A_PROJ)], transpose=True)
+            _copy_checkpoint(self.dt_bias, params[Keys.deltanet(i, DeltaNet.DT_BIAS)])
+            _copy_checkpoint(self.gate_proj.weight, params[Keys.deltanet(i, DeltaNet.GATE_PROJ)], transpose=True)
+            _copy_checkpoint(self.norm.weight, params[Keys.deltanet(i, DeltaNet.NORM)])
+
+    @staticmethod
+    def _l2norm(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+        return x / torch.sqrt(torch.sum(x * x, dim=-1, keepdim=True) + eps)
+
+    def _scan(self, x: torch.Tensor, s_init: torch.Tensor, record: dict | None = None):
+        """Recurrent scan over S positions from state ``s_init``.
+
+        x: (B, S, D) → (out (B,S,D), s_final (B,H,hd,hd), intermediates).
+        """
+        B, S, _ = x.shape
+        H, hd = self.n_heads, self.head_dim
+        q = self.q_proj(x).view(B, S, H, hd).permute(0, 2, 1, 3)
+        k = self.k_proj(x).view(B, S, H, hd).permute(0, 2, 1, 3)
+        v = self.v_proj(x).view(B, S, H, hd).permute(0, 2, 1, 3)
+        qn = self._l2norm(q)
+        kn = self._l2norm(k)
+        beta = torch.sigmoid(self.a_proj(x).permute(0, 2, 1)[..., None] + self.dt_bias.view(1, H, 1, 1))  # (B,H,S,1)
+        alpha = torch.sigmoid(self.gate_proj(x))  # (B,S,D)
+
+        s = s_init
+        outs = []
+        betas = []
+        ss = []
+        for t in range(S):
+            kt, vt, qt = kn[:, :, t], v[:, :, t], qn[:, :, t]  # (B,H,hd)
+            bt = beta[:, :, t, :, None]  # (B,H,1,1)
+            kk = kt[..., None] * kt[..., None, :]
+            kv = kt[..., None] * vt[..., None, :]
+            s = (1.0 - bt) * (s - s @ kk) + bt * kv
+            outs.append(torch.einsum("bhij,bhj->bhi", s, qt))
+            betas.append(bt[..., 0])
+            ss.append(s)
+        o = torch.stack(outs, dim=2)  # (B,H,S,hd)
+        o_merged = o.permute(0, 2, 1, 3).reshape(B, S, H * hd)
+        pre_o = self.o_proj(o_merged)
+        out = alpha * self.norm(pre_o)
+        inter = {
+            "x": x,
+            "q": q,
+            "k": k,
+            "v": v,
+            "qn": qn,
+            "kn": kn,
+            "beta": torch.stack(betas, dim=2),
+            "alpha": alpha,
+            "o": o,
+            "pre_o": pre_o,
+            "s_hist": torch.stack(ss, dim=2),
+            "s_init": s_init,
+            "s_final": s,
+        }
+        if record is not None:
+            record.update(inter)
+        return out, s, inter
+
+    def forward_state(self, x: torch.Tensor, position: int = 0) -> Result[torch.Tensor, dict]:
+        """Full-sequence forward from a zero state; ``.ctx.display`` carries
+        ``s_final``/``s_hist`` for the prefill cache backfill."""
+        B = x.shape[0]
+        s0 = torch.zeros(B, self.n_heads, self.head_dim, self.head_dim, device=x.device, dtype=x.dtype)
+        out, s_final, inter = self._scan(x, s0)
+        return Result.capture(out, {}, {"s_final": s_final, "s_hist": inter["s_hist"]})
+
+    def forward(self, x: torch.Tensor, position: int = 0) -> torch.Tensor:
+        return self.forward_state(x, position).unwrap()
+
+    def forward_step(self, x: torch.Tensor, position: int, cache: dict[str, Any]) -> torch.Tensor:
+        """One new token against the recurrent state; cache mutated in place."""
+        out, s_new, inter = self._scan(x, cache["s"])
+        cache["s"] = s_new
+        cache["s_hist"].append(s_new)
+        return out
+
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: dict[str, Any]) -> torch.Tensor:
+        """A c-token chunk; sequential scan; one snapshot appended per position."""
+        out, s_new, inter = self._scan(x, cache["s"])
+        cache["s"] = s_new
+        for j in range(x.shape[1]):
+            cache["s_hist"].append(inter["s_hist"][:, :, j])
+        return out
+
+
 class SwiGLUFFN(nn.Module):
     """SwiGLU feed-forward network (GLU: Dauphin et al. 2016; SwiGLU: Shazeer 2020).
 
@@ -648,16 +784,27 @@ class TransformerBlock(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             D, eps=config.norm_eps, weight=None if p is None else p[Keys.ln(i, LayerNorm.POST_ATTENTION)]
         )
-        self.self_attn = MultiHeadAttention(
-            embed_dim=D,
-            n_heads=H,
-            n_groups=G,
-            rope_dim=config.rope_dim,
-            q_proj=None if p is None else p[Keys.attn(i, Attn.Q_PROJ)],
-            k_proj=None if p is None else p[Keys.attn(i, Attn.K_PROJ)],
-            v_proj=None if p is None else p[Keys.attn(i, Attn.V_PROJ)],
-            o_proj=None if p is None else p[Keys.attn(i, Attn.O_PROJ)],
-        )
+        # Mixing sublayer per layer kind (ADR 0006): 'd' → Gated DeltaNet,
+        # 'F' → full attention. Same forward/step/chunk interface; the cache
+        # dict shape differs ({"s","s_hist"} vs {"k","v"}).
+        if config.layer_kind(i) == "d":
+            self.self_attn: MultiHeadAttention | GatedDeltaNet = GatedDeltaNet(
+                embed_dim=D,
+                n_heads=H,
+                layer_index=i if p is not None else None,
+                params=p,
+            )
+        else:
+            self.self_attn = MultiHeadAttention(
+                embed_dim=D,
+                n_heads=H,
+                n_groups=G,
+                rope_dim=config.rope_dim,
+                q_proj=None if p is None else p[Keys.attn(i, Attn.Q_PROJ)],
+                k_proj=None if p is None else p[Keys.attn(i, Attn.K_PROJ)],
+                v_proj=None if p is None else p[Keys.attn(i, Attn.V_PROJ)],
+                o_proj=None if p is None else p[Keys.attn(i, Attn.O_PROJ)],
+            )
         if config.has_moe():
             self.mlp: SwiGLUFFN | MixtureOfExperts = MixtureOfExperts(
                 embed_dim=D,
@@ -920,16 +1067,23 @@ class TorchModel(nn.Module):
         """
         B = batch_size
         G = self.config.kv_heads
+        H = self.config.n_heads
         hd = self.embed_dim // self.config.n_heads
         device = self.embedding.weight.device
         dtype = self.embedding.weight.dtype
-        return [
-            {
-                "k": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
-                "v": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
-            }
-            for _ in range(self.config.n_layers)
-        ]
+        caches: list[dict[str, Any]] = []
+        for i in range(self.config.n_layers):
+            if self.config.layer_kind(i) == "d":
+                # DeltaNet layer (ADR 0006): recurrent state + rollback snapshots.
+                caches.append({"s": torch.zeros(B, H, hd, hd, device=device, dtype=dtype), "s_hist": []})
+            else:
+                caches.append(
+                    {
+                        "k": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+                        "v": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+                    }
+                )
+        return caches
 
     def forward_prefill(
         self, input_ids: torch.Tensor, cache: list[dict[str, torch.Tensor]] | None = None, position: int = 0
@@ -960,8 +1114,12 @@ class TorchModel(nn.Module):
         # Backfill each layer's cache from this pass's attention state:
         # K/V per group (GQA keeps it small), K already RoPE'd, V un-rotated.
         for i, attn_state in enumerate(states):
-            cache[i]["k"] = attn_state["k_group"]  # (B, G, S, hd)
-            cache[i]["v"] = attn_state["v_group"]  # (B, G, S, hd)
+            if self.config.layer_kind(i) == "d":
+                cache[i]["s"] = attn_state["s_final"]  # (B, H, hd, hd)
+                cache[i]["s_hist"] = [attn_state["s_hist"][:, :, j] for j in range(attn_state["s_hist"].shape[2])]  # type: ignore[index]
+            else:
+                cache[i]["k"] = attn_state["k_group"]  # (B, G, S, hd)
+                cache[i]["v"] = attn_state["v_group"]  # (B, G, S, hd)
         return logits, cache
 
     def forward_step(
@@ -1031,13 +1189,24 @@ class TorchModel(nn.Module):
         for layer_idx, block in enumerate(self.stack.blocks):
             t[Keys.ln(layer_idx, LayerNorm.INPUT)] = block.input_layernorm.weight
             t[Keys.ln(layer_idx, LayerNorm.POST_ATTENTION)] = block.post_attention_layernorm.weight
-            for proj, module in (
-                (Attn.Q_PROJ, block.self_attn.q_proj),
-                (Attn.K_PROJ, block.self_attn.k_proj),
-                (Attn.V_PROJ, block.self_attn.v_proj),
-                (Attn.O_PROJ, block.self_attn.o_proj),
-            ):
-                t[Keys.attn(layer_idx, proj)] = module.weight
+            if isinstance(block.self_attn, GatedDeltaNet):
+                attn = block.self_attn
+                t[Keys.deltanet(layer_idx, DeltaNet.Q_PROJ)] = attn.q_proj.weight
+                t[Keys.deltanet(layer_idx, DeltaNet.K_PROJ)] = attn.k_proj.weight
+                t[Keys.deltanet(layer_idx, DeltaNet.V_PROJ)] = attn.v_proj.weight
+                t[Keys.deltanet(layer_idx, DeltaNet.O_PROJ)] = attn.o_proj.weight
+                t[Keys.deltanet(layer_idx, DeltaNet.A_PROJ)] = attn.a_proj.weight
+                t[Keys.deltanet(layer_idx, DeltaNet.GATE_PROJ)] = attn.gate_proj.weight
+                t[Keys.deltanet(layer_idx, DeltaNet.DT_BIAS)] = attn.dt_bias
+                t[Keys.deltanet(layer_idx, DeltaNet.NORM)] = attn.norm.weight
+            else:
+                for proj, module in (
+                    (Attn.Q_PROJ, block.self_attn.q_proj),
+                    (Attn.K_PROJ, block.self_attn.k_proj),
+                    (Attn.V_PROJ, block.self_attn.v_proj),
+                    (Attn.O_PROJ, block.self_attn.o_proj),
+                ):
+                    t[Keys.attn(layer_idx, proj)] = module.weight
             mlp = block.mlp
             if isinstance(mlp, MixtureOfExperts):
                 t[Keys.moe_gate(layer_idx)] = mlp.gate.weight

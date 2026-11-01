@@ -172,6 +172,10 @@ the equation, the *why*, and the code anchor) lives in one place:
   reference), PyTorch (autograd + `F.scaled_dot_product_attention` +
   `torch.optim`), Triton (FlashAttention-style online-softmax kernel), CUDA
   (NVRTC kernels for RMSNorm, RoPE, attention, FFN).
+- **Hybrid 3:1 Gated DeltaNet** (ADR 0006): `layer_pattern="dddF"` — 3 linear-attention
+  (Gated DeltaNet, recurrent `S` state) layers per 1 full RoPE attention layer, on all
+  four backends; NumPy carries the analytic backward (BPTT), the page renders and
+  inspects every DeltaNet intermediate.
 - **Standard architecture**: pre-norm LLaMA block
   (`h = x + attn(ln1(x)); out = h + mlp(ln2(h))`), RMSNorm, GQA, RoPE,
   SwiGLU (dense by default; MoE is opt-in), causal mask, no weight tying, no
@@ -337,10 +341,10 @@ The TinyStories dataset itself lives in `resource/` (also git-ignored):
 ### Equivalence verification
 
 ```bash
-# 11 scenarios: dense_np_torch, gqa_np_torch, moe_np_torch,
+# 13 scenarios: dense_np_torch, gqa_np_torch, moe_np_torch,
 # moe_shared_experts_np_torch, gqa_torch_triton, spec_mtp_np_torch,
 # spec_dspark_np_torch, moe_param_matched_np_torch, rl_dense_np_torch,
-# cuda_shared_weights, all_four_backends
+# cuda_shared_weights, all_four_backends, deltanet_np_torch, deltanet_all_four
 
 # Quick mode / single scenario
 uv run python -m scripts.verify_equivalence --fast
@@ -406,7 +410,7 @@ docs/
 scripts/
 ├── train.py               # Training loop (all backends)
 ├── infer.py               # Inference (all backends; --spec plain|mtp|dspark)
-├── verify_equivalence.py  # 11-scenario parity check (incl. speculative + RL gradient)
+├── verify_equivalence.py  # 13-scenario parity check (incl. speculative + RL gradient)
 ├── learning.py            # learning-mode web page server (--spec startup mode)
 ├── train_drafters.py      # drafter distillation from the frozen target
 ├── rl.py                  # GRPO RL entry point (all backends; ADR 0004)

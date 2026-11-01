@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import TypeVar
 
 from shared.config import TransformerConfig
-from shared.constants import FFN_PROJS, Attn, Keys, LayerNorm, Mlp
+from shared.constants import FFN_PROJS, Attn, DeltaNet, Keys, LayerNorm, Mlp
 
 # The storage type varies per track (np.ndarray for NumPy, torch.Tensor for
 # the GPU tracks); the binding contract is storage-agnostic.
@@ -79,11 +79,44 @@ class ParameterRegistry:
         for i in range(cfg.n_layers):
             entries.append(ParamEntry(Keys.ln(i, LayerNorm.INPUT), (D,), dtype=cfg.dtype))
             entries.append(ParamEntry(Keys.ln(i, LayerNorm.POST_ATTENTION), (D,), dtype=cfg.dtype))
-            # Attention projections are nn.Linear in the PyTorch track → transposed there.
-            entries.append(ParamEntry(Keys.attn(i, Attn.Q_PROJ), (D, H * hd), torch_transpose=True, dtype=cfg.dtype))
-            entries.append(ParamEntry(Keys.attn(i, Attn.K_PROJ), (D, G * hd), torch_transpose=True, dtype=cfg.dtype))
-            entries.append(ParamEntry(Keys.attn(i, Attn.V_PROJ), (D, G * hd), torch_transpose=True, dtype=cfg.dtype))
-            entries.append(ParamEntry(Keys.attn(i, Attn.O_PROJ), (H * hd, D), torch_transpose=True, dtype=cfg.dtype))
+            # Mixing sublayer per layer kind (ADR 0006): 'd' → Gated DeltaNet
+            # (q/k/v/o + forget-gate a_proj D→H + dt_bias H, + output gate
+            # gate_proj D→D + output norm gain), 'F' → full attention.
+            # Matrix params carry the nn.Linear transpose rule like attention.
+            if cfg.layer_kind(i) == "d":
+                entries.append(
+                    ParamEntry(Keys.deltanet(i, DeltaNet.Q_PROJ), (D, H * hd), torch_transpose=True, dtype=cfg.dtype)
+                )
+                entries.append(
+                    ParamEntry(Keys.deltanet(i, DeltaNet.K_PROJ), (D, H * hd), torch_transpose=True, dtype=cfg.dtype)
+                )
+                entries.append(
+                    ParamEntry(Keys.deltanet(i, DeltaNet.V_PROJ), (D, H * hd), torch_transpose=True, dtype=cfg.dtype)
+                )
+                entries.append(
+                    ParamEntry(Keys.deltanet(i, DeltaNet.O_PROJ), (H * hd, D), torch_transpose=True, dtype=cfg.dtype)
+                )
+                entries.append(
+                    ParamEntry(Keys.deltanet(i, DeltaNet.A_PROJ), (D, H), torch_transpose=True, dtype=cfg.dtype)
+                )
+                entries.append(
+                    ParamEntry(Keys.deltanet(i, DeltaNet.GATE_PROJ), (D, D), torch_transpose=True, dtype=cfg.dtype)
+                )
+                entries.append(ParamEntry(Keys.deltanet(i, DeltaNet.DT_BIAS), (H,), dtype=cfg.dtype))
+                entries.append(ParamEntry(Keys.deltanet(i, DeltaNet.NORM), (D,), dtype=cfg.dtype))
+            else:
+                entries.append(
+                    ParamEntry(Keys.attn(i, Attn.Q_PROJ), (D, H * hd), torch_transpose=True, dtype=cfg.dtype)
+                )
+                entries.append(
+                    ParamEntry(Keys.attn(i, Attn.K_PROJ), (D, G * hd), torch_transpose=True, dtype=cfg.dtype)
+                )
+                entries.append(
+                    ParamEntry(Keys.attn(i, Attn.V_PROJ), (D, G * hd), torch_transpose=True, dtype=cfg.dtype)
+                )
+                entries.append(
+                    ParamEntry(Keys.attn(i, Attn.O_PROJ), (H * hd, D), torch_transpose=True, dtype=cfg.dtype)
+                )
             if cfg.has_moe():
                 entries.append(ParamEntry(Keys.moe_gate(i), (D, E), torch_transpose=True, dtype=cfg.dtype))
                 for j in range(E):

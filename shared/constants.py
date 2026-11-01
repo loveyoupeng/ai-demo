@@ -73,6 +73,37 @@ class LayerNorm:
     POST_ATTENTION: str = "post_attention_layernorm"  # norm before feed-forward
 
 
+class DeltaNet:
+    """Gated DeltaNet parameter names (ADR 0006), HF-ish convention.
+
+    Per DeltaNet layer: q/k/v/o projections (same roles as attention),
+    a per-head forget-gate projection ``a_proj`` (D → H) with a per-head
+    bias ``dt_bias`` (H,), an output gate ``gate_proj`` (D → D), and an
+    output RMSNorm gain ``norm`` (D,).
+    """
+
+    Q_PROJ: str = "q_proj"
+    K_PROJ: str = "k_proj"
+    V_PROJ: str = "v_proj"
+    O_PROJ: str = "o_proj"
+    A_PROJ: str = "a_proj"  # per-head forget-gate input projection (D → H)
+    DT_BIAS: str = "dt_bias"  # per-head forget-gate bias (H,)
+    GATE_PROJ: str = "gate_proj"  # output gate projection (D → D)
+    NORM: str = "norm"  # output RMSNorm gain (D,)
+
+
+# All DeltaNet projection-ish params, in q/k/v/o/a/gate order (dt_bias and
+# norm are vectors, listed separately).
+DELTANET_PROJS: tuple[str, str, str, str, str, str] = (
+    DeltaNet.Q_PROJ,
+    DeltaNet.K_PROJ,
+    DeltaNet.V_PROJ,
+    DeltaNet.O_PROJ,
+    DeltaNet.A_PROJ,
+    DeltaNet.GATE_PROJ,
+)
+
+
 class Keys:
     """Builders for the flat-dict checkpoint keys.
 
@@ -134,6 +165,12 @@ class Keys:
         """MoE shared-expert SwiGLU projection key →
         ``model.layers.{i}.mlp.shared_experts.{s}.gate_proj.weight``."""
         return f"model.layers.{layer_idx}.mlp.shared_experts.{shared_idx}.{proj}.weight"
+
+    @staticmethod
+    def deltanet(layer_idx: int, param: str) -> str:
+        """Gated DeltaNet parameter key, e.g. ``Keys.deltanet(0, DeltaNet.Q_PROJ)``
+        → ``model.layers.0.deltanet.q_proj.weight``."""
+        return f"model.layers.{layer_idx}.deltanet.{param}.weight"
 
 
 # ── Generation / decoding ─────────────────────────────────────────────────────

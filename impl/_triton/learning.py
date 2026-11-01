@@ -19,7 +19,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from impl._torch.learning import _generate_with_spec_records  # shared-seam: torch-family logic consumed by this track
+from impl._torch.learning import (
+    _deltanet_record,
+    _ffn_f64,
+    _generate_with_spec_records,
+)  # shared-seam: torch-family logic consumed by this track
 from impl._triton.transformer import TritonMixtureOfExperts, TritonMultiHeadAttention, TritonSwiGLUFFN
 from shared.constants import REP_PENALTY
 from shared.torch_softmax import stable_softmax_np, stable_softmax_t
@@ -51,7 +55,7 @@ def arr(t: torch.Tensor) -> list:
     All record values are float64, rounded to 8 decimals — identical to the
     NumPy record's ``arr`` so the backends serialize the same way.
     """
-    return np.round(t.detach().cpu().numpy().astype(np.float64), 8).tolist()
+    return np.round(t.detach().cpu().to(torch.float64).numpy(), 8).tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -104,9 +108,15 @@ def _attn_record(
     H, G, hd = attn.n_heads, attn.n_groups, attn.head_dim
 
     # Projections: (B, S, D) → (B, S, ·)
-    q_pre = attn.q_proj(ln1_out)  # (B, S, H·hd)
-    k_pre = attn.k_proj(ln1_out)  # (B, S, G·hd)
-    v_pre = attn.v_proj(ln1_out)  # (B, S, G·hd)
+    ln1_out = ln1_out.to(torch.float64)
+
+    def W(lin):
+
+        return lin.weight.detach().to(torch.float64).T
+
+    q_pre = ln1_out @ W(attn.q_proj)  # (B, S, H·hd)
+    k_pre = ln1_out @ W(attn.k_proj)  # (B, S, G·hd)
+    v_pre = ln1_out @ W(attn.v_proj)  # (B, S, G·hd)
     q_rope_in = q_pre.view(B, S, H, hd).permute(0, 2, 1, 3)  # (B, H, S, hd) pre-RoPE
     k_rope_in = k_pre.view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd) pre-RoPE
     v = v_pre.view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd)
@@ -130,7 +140,7 @@ def _attn_record(
 
     attn_w = stable_softmax_t(scores_masked, dim=-1)  # (B, H, S, S)
     ctx = (attn_w @ v).permute(0, 2, 1, 3).reshape(B, S, H * hd)  # (B, S, H·hd)
-    attn_out = attn.o_proj(ctx)  # (B, S, D)
+    attn_out = ctx @ W(attn.o_proj)  # (B, S, D)
 
     return attn_out, {
         "q_pre": arr(q_pre),  # (B, S, H·hd) — ln1_out @ Wq
@@ -189,9 +199,15 @@ def _attn_step_record(
     B = x.shape[0]
     H, G, hd = attn.n_heads, attn.n_groups, attn.head_dim
 
-    q_pre = attn.q_proj(x)  # (B, 1, H·hd)
-    k_pre = attn.k_proj(x)  # (B, 1, G·hd)
-    v_pre = attn.v_proj(x)  # (B, 1, G·hd)
+    x = x.to(torch.float64)
+
+    def W(lin):
+
+        return lin.weight.detach().to(torch.float64).T
+
+    q_pre = x @ W(attn.q_proj)  # (B, 1, H·hd)
+    k_pre = x @ W(attn.k_proj)  # (B, 1, G·hd)
+    v_pre = x @ W(attn.v_proj)  # (B, 1, G·hd)
     q_rope_in = q_pre.view(B, 1, H, hd).permute(0, 2, 1, 3)  # (B, H, 1, hd) pre-RoPE
     k_rope_in = k_pre.view(B, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd) pre-RoPE
     v = v_pre.view(B, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
@@ -214,7 +230,7 @@ def _attn_step_record(
     mask = torch.zeros(1, scores.shape[-1], dtype=torch.bool, device=x.device)  # nothing masked in decode
     attn_w = stable_softmax_t(scores, dim=-1)  # (B, H, 1, t) — nothing masked in decode
     ctx = (attn_w @ v_r).permute(0, 2, 1, 3).reshape(B, 1, H * hd)  # (B, 1, H·hd)
-    out = attn.o_proj(ctx)  # (B, 1, D)
+    out = ctx @ W(attn.o_proj)  # (B, 1, D)
 
     return out, {
         "q_pre": arr(q_pre),  # (B, 1, H·hd)
@@ -240,9 +256,9 @@ def _attn_step_record(
 
 def _ffn_record(mlp: TritonSwiGLUFFN, x: torch.Tensor, out: torch.Tensor) -> FFNRecord:
     """Capture dense SwiGLU: pre_gate, gate (post-SiLU), up, gated, output."""
-    pre_gate = x @ mlp.gate_proj  # (B, S, FF)
+    pre_gate = x @ mlp.gate_proj.detach().to(torch.float64)  # (B, S, FF)
     gate = F.silu(pre_gate)  # (B, S, FF)
-    up = x @ mlp.up_proj  # (B, S, FF)
+    up = x @ mlp.up_proj.detach().to(torch.float64)  # (B, S, FF)
     gated = gate * up  # (B, S, FF)
     return {
         "pre_gate": arr(pre_gate),
@@ -257,7 +273,7 @@ def _ffn_record(mlp: TritonSwiGLUFFN, x: torch.Tensor, out: torch.Tensor) -> FFN
 def _moe_record(mlp: TritonMixtureOfExperts, x: torch.Tensor, out: torch.Tensor) -> MoERecord:
     """Capture MoE: router scores, softmax probs, top-k selection, per-expert outputs."""
     E = mlp.n_experts
-    scores = mlp.gate(x)  # (B, S, E)
+    scores = x @ mlp.gate.weight.detach().to(torch.float64).T  # (B, S, E)
     scores_stable = scores - scores.max(dim=-1, keepdim=True).values  # (B, S, E)
     probs = stable_softmax_t(scores, dim=-1)  # (B, S, E)
     if mlp.top_k < E:
@@ -270,8 +286,8 @@ def _moe_record(mlp: TritonMixtureOfExperts, x: torch.Tensor, out: torch.Tensor)
     else:
         topk_idx = torch.argsort(probs, dim=-1, descending=True)[..., : mlp.top_k]
         weights = probs
-    expert_outs = [expert(x) for expert in mlp.experts]  # E × (B, S, D)
-    shared_outs = [shared(x) for shared in mlp.shared_expert_list]  # n_shared × (B, S, D)
+    expert_outs = [_ffn_f64(expert, x) for expert in mlp.expert_list]  # E × (B, S, D)
+    shared_outs = [_ffn_f64(sh, x) for sh in mlp.shared_expert_list]  # n_shared × (B, S, D)
     return {
         "scores": arr(scores_stable),  # (B, S, E) stable-softmaxed
         "probs": arr(probs),  # (B, S, E) after top-k mask
@@ -312,7 +328,14 @@ def instrumented_forward(model: TritonModel, input_ids: torch.Tensor) -> tuple[F
     for block in model.stack.blocks:
         ln1 = block.input_layernorm
         ln1_out = ln1(stream)  # (B, S, D)
-        attn_out, attn_rec = _attn_record(block.self_attn, ln1_out, 0)  # (B, S, D) — window positions 0..S-1
+        from impl._torch.layers import GatedDeltaNet as _GDN
+        from impl._triton.transformer import TritonGatedDeltaNet as _TGDN
+
+        if isinstance(block.self_attn, (_GDN, _TGDN)):
+            inner = block.self_attn._impl if hasattr(block.self_attn, "_impl") else block.self_attn
+            attn_out, attn_rec = _deltanet_record(inner, ln1_out, ln1_out.new_zeros(ln1_out.shape))
+        else:
+            attn_out, attn_rec = _attn_record(block.self_attn, ln1_out, 0)  # (B, S, D) — window positions 0..S-1
         h = stream + attn_out  # (B, S, D) residual after attention
         ln2 = block.post_attention_layernorm
         ln2_out = ln2(h)  # (B, S, D)
@@ -321,11 +344,17 @@ def instrumented_forward(model: TritonModel, input_ids: torch.Tensor) -> tuple[F
         out = h + ff_out  # (B, S, D) block output
         block_rec: BlockRecord = {
             "ln1": _rmsnorm_record(ln1.weight, stream, ln1.eps, ln1_out),
-            "attn": attn_rec,
             "h": arr(h),
             "ln2": _rmsnorm_record(ln2.weight, h, ln2.eps, ln2_out),
             "out": arr(out),
         }
+        from impl._torch.layers import GatedDeltaNet as _GDN2
+        from impl._triton.transformer import TritonGatedDeltaNet as _TGDN2
+
+        if isinstance(block.self_attn, (_GDN2, _TGDN2)):
+            block_rec["deltanet"] = attn_rec  # type: ignore[typeddict-item]
+        else:
+            block_rec["attn"] = attn_rec  # type: ignore[typeddict-item]
         if isinstance(mlp, TritonMixtureOfExperts):
             block_rec["moe"] = _moe_record(mlp, ln2_out, ff_out)
         else:
@@ -482,7 +511,7 @@ def generate_with_records(
         # pre-RoPE projections, so the display and the state agree exactly.
         caches.append(
             _init_kv_cache(
-                block.self_attn,
+                block.self_attn,  # type: ignore[arg-type]
                 torch.tensor(r["k_pre"], device=device),
                 torch.tensor(r["v_pre"], device=device),
                 pos0,
@@ -499,7 +528,14 @@ def generate_with_records(
         for j, block in enumerate(model.stack.blocks):
             ln1 = block.input_layernorm
             ln1_out = ln1(stream)  # (1, 1, D)
-            attn_out, attn_rec = _attn_step_record(block.self_attn, ln1_out, t, caches[j])  # (1, 1, D)
+            from impl._torch.layers import GatedDeltaNet as _GDN
+            from impl._triton.transformer import TritonGatedDeltaNet as _TGDN
+
+            if isinstance(block.self_attn, (_GDN, _TGDN)):
+                inner = block.self_attn._impl if hasattr(block.self_attn, "_impl") else block.self_attn
+                attn_out, attn_rec = _deltanet_record(inner, ln1_out, ln1_out.new_zeros(ln1_out.shape))
+            else:
+                attn_out, attn_rec = _attn_step_record(block.self_attn, ln1_out, t, caches[j])  # (1, 1, D)
             h = stream + attn_out  # (1, 1, D)
             ln2 = block.post_attention_layernorm
             ln2_out = ln2(h)  # (1, 1, D)
@@ -508,11 +544,17 @@ def generate_with_records(
             out = h + ff_out  # (1, 1, D)
             block_rec: BlockRecord = {
                 "ln1": _rmsnorm_record(ln1.weight, stream, ln1.eps, ln1_out),
-                "attn": attn_rec,
                 "h": arr(h),
                 "ln2": _rmsnorm_record(ln2.weight, h, ln2.eps, ln2_out),
                 "out": arr(out),
             }
+            from impl._torch.layers import GatedDeltaNet as _GDN3
+            from impl._triton.transformer import TritonGatedDeltaNet as _TGDN3
+
+            if isinstance(block.self_attn, (_GDN3, _TGDN3)):
+                block_rec["deltanet"] = attn_rec  # type: ignore[typeddict-item]
+            else:
+                block_rec["attn"] = attn_rec  # type: ignore[typeddict-item]
             if isinstance(mlp, TritonMixtureOfExperts):
                 block_rec["moe"] = _moe_record(mlp, ln2_out, ff_out)
             else:

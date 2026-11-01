@@ -58,7 +58,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Protocol
+from typing import Any, Protocol
 
 import torch
 
@@ -187,11 +187,19 @@ class SpeculativeGenerator:
         return logits[:, -1:, :], x_final[:, -1, :]
 
     @staticmethod
-    def _trim_cache(cache: list[dict[str, torch.Tensor]], n: int) -> None:
-        """Drop every cached position >= n (rejected draft tail)."""
+    def _trim_cache(cache: list[dict[str, Any]], n: int) -> None:
+        """Drop every cached position >= n (rejected draft tail).
+
+        Attention layers slice the K/V rows; DeltaNet layers (ADR 0006)
+        cannot slice the recurrent S — restore the snapshot taken at
+        position n from s_hist and truncate the snapshot list."""
         for layer in cache:
-            layer["k"] = layer["k"][:, :, :n]
-            layer["v"] = layer["v"][:, :, :n]
+            if "s" in layer:
+                layer["s"] = layer["s_hist"][n].clone()
+                del layer["s_hist"][n + 1 :]
+            else:
+                layer["k"] = layer["k"][:, :, :n]
+                layer["v"] = layer["v"][:, :, :n]
 
     def _commit(
         self, cache: list[dict[str, torch.Tensor]], position: int, token: int

@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from shared.config import TransformerConfig
-from shared.constants import Attn, Keys, LayerNorm, Mlp
+from shared.constants import Attn, DeltaNet, Keys, LayerNorm, Mlp
 from shared.registry import ParameterRegistry
 
 
@@ -221,3 +221,44 @@ class TestValidate:
         params[Keys.embed()] = np.zeros((16, 8))  # wrong vocab
         with pytest.raises(ValueError, match="Shape mismatch"):
             reg.validate(params)
+
+
+def _hybrid_cfg(n_layers: int = 4) -> TransformerConfig:
+    return TransformerConfig.from_dict(
+        {
+            "vocab_size": 32,
+            "embed_dim": 8,
+            "n_layers": n_layers,
+            "n_heads": 2,
+            "n_experts": 1,
+            "top_k": 1,
+            "expert_dim": 16,
+            "layer_pattern": "dddF",
+        }
+    )
+
+
+class TestHybridDeltaNetEntries:
+    def test_deltanet_keys_present_only_on_d_layers(self) -> None:
+        reg = ParameterRegistry(_hybrid_cfg(4))
+        keys = reg.keys()
+        assert Keys.deltanet(0, DeltaNet.Q_PROJ) in keys
+        assert Keys.deltanet(3, DeltaNet.Q_PROJ) not in keys  # layer 3 is 'F'
+        assert Keys.attn(3, Attn.Q_PROJ) in keys
+        assert Keys.attn(0, Attn.Q_PROJ) not in keys  # layer 0 is 'd'
+
+    def test_deltanet_shapes(self) -> None:
+        reg = ParameterRegistry(_hybrid_cfg(4))
+        shapes = reg.expected_shapes()
+        D, H = 8, 2
+        hd = D // H
+        assert shapes[Keys.deltanet(1, DeltaNet.Q_PROJ)] == (D, H * hd)
+        assert shapes[Keys.deltanet(1, DeltaNet.O_PROJ)] == (H * hd, D)
+        assert shapes[Keys.deltanet(1, DeltaNet.A_PROJ)] == (D, H)
+        assert shapes[Keys.deltanet(1, DeltaNet.DT_BIAS)] == (H,)
+        assert shapes[Keys.deltanet(1, DeltaNet.GATE_PROJ)] == (D, D)
+        assert shapes[Keys.deltanet(1, DeltaNet.NORM)] == (D,)
+
+    def test_all_full_config_has_no_deltanet_keys(self) -> None:
+        reg = ParameterRegistry(_dense_cfg(2))
+        assert not any(".deltanet." in k for k in reg.keys())  # noqa: SIM118

@@ -152,15 +152,15 @@ class TestVerifyEquivalenceScriptIntegration:
             # We don't care about PASS/FAIL for this basic sanity check
 
     def test_script_loads_scenarios(self):
-        """Script should define all 11 scenarios."""
+        """Script should define all 13 scenarios."""
         import scripts.verify_equivalence as ve
 
-        # Check that all 11 scenarios are defined (7 original + 2
+        # Check that all 13 scenarios are defined (11 previous + 2
         # speculative, ADR 0003 + the param-matched MoE and the RL
         # gradient parity of ADRs 0004/0005)
         assert hasattr(ve, "SCENARIOS")
         if isinstance(ve.SCENARIOS, list):
-            assert len(ve.SCENARIOS) == 11
+            assert len(ve.SCENARIOS) == 13
 
     def test_scenarios_have_correct_attributes(self):
         """Each scenario should have name, kwargs, and expected outputs."""
@@ -220,7 +220,7 @@ class TestScenariosFunction:
         import scripts.verify_equivalence as ve
 
         scenarios = ve._scenarios()
-        assert len(scenarios) == 11
+        assert len(scenarios) == 13
 
     def test_each_scenario_has_name(self):
         import scripts.verify_equivalence as ve

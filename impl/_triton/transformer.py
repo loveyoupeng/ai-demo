@@ -317,6 +317,47 @@ class TritonMultiHeadAttention(nn.Module):
         return self.o_proj(ctx)  # (B, c, D)
 
 
+class TritonGatedDeltaNet(nn.Module):
+    """Gated DeltaNet on the Triton track (ADR 0006).
+
+    Same math as ``impl._torch.layers.GatedDeltaNet`` / the NumPy reference
+    (``impl/_np/deltanet.py``). PROD note: the recurrent scan is plain torch
+    ops here — a fused Triton chunked-WY kernel is the production path; at
+    teaching scale (ctx <= 128, D = 64) the loop is fine and keeps the
+    recurrence readable. The projections themselves are cuBLAS matmuls,
+    which run on tensor cores under BF16.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        n_heads: int,
+        layer_index: int | None = None,
+        params: Mapping[str, np.ndarray] | None = None,
+    ) -> None:
+        super().__init__()
+        from impl._torch.layers import GatedDeltaNet
+
+        self._impl = GatedDeltaNet(embed_dim, n_heads, layer_index=layer_index, params=params)
+        # register the inner module's parameters under this module
+        self.add_module("impl", self._impl)
+
+    def forward_state(self, x: torch.Tensor, position: int = 0) -> Result[torch.Tensor, dict]:
+        return self._impl.forward_state(x, position)
+
+    def forward(self, x: torch.Tensor, position: int = 0) -> torch.Tensor:
+        return self._impl.forward(x, position)
+
+    def forward_step(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
+        return self._impl.forward_step(x, position, cache)
+
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
+        return self._impl.forward_chunk(x, position, cache)
+
+    def _move_to_device(self, x: torch.Tensor) -> None:
+        self._impl.to(device=x.device, dtype=x.dtype if x.dtype.is_floating_point else None)
+
+
 class TritonSwiGLUFFN(nn.Module):
     """Dense SwiGLU feed-forward, computed by the triton ``swiglu_ffn`` kernel.
 
@@ -571,13 +612,21 @@ class TritonTransformerBlock(nn.Module):
         if p is not None:
             copy_in_place(self.input_layernorm.weight, p[Keys.ln(i, LayerNorm.INPUT)])
             copy_in_place(self.post_attention_layernorm.weight, p[Keys.ln(i, LayerNorm.POST_ATTENTION)])
-        self.self_attn = TritonMultiHeadAttention(
-            config,
-            q_proj=None if p is None else p[Keys.attn(i, Attn.Q_PROJ)],
-            k_proj=None if p is None else p[Keys.attn(i, Attn.K_PROJ)],
-            v_proj=None if p is None else p[Keys.attn(i, Attn.V_PROJ)],
-            o_proj=None if p is None else p[Keys.attn(i, Attn.O_PROJ)],
-        )
+        if config.layer_kind(i) == "d":
+            self.self_attn: TritonMultiHeadAttention | TritonGatedDeltaNet = TritonGatedDeltaNet(
+                embed_dim=D,
+                n_heads=config.n_heads,
+                layer_index=i if p is not None else None,
+                params=p,
+            )
+        else:
+            self.self_attn = TritonMultiHeadAttention(
+                config,
+                q_proj=None if p is None else p[Keys.attn(i, Attn.Q_PROJ)],
+                k_proj=None if p is None else p[Keys.attn(i, Attn.K_PROJ)],
+                v_proj=None if p is None else p[Keys.attn(i, Attn.V_PROJ)],
+                o_proj=None if p is None else p[Keys.attn(i, Attn.O_PROJ)],
+            )
         if config.has_moe():
             self.mlp: TritonSwiGLUFFN | TritonMixtureOfExperts = TritonMixtureOfExperts(
                 embed_dim=D,
@@ -702,10 +751,22 @@ class TritonDecoderStack(nn.Module):
 
     def reset_parameters(self) -> None:
         for block in self.blocks:
-            block.self_attn.q_proj.reset_parameters()
-            block.self_attn.k_proj.reset_parameters()
-            block.self_attn.v_proj.reset_parameters()
-            block.self_attn.o_proj.reset_parameters()
+            attn = block.self_attn
+            if isinstance(attn, TritonGatedDeltaNet):
+                for lin in (
+                    attn._impl.q_proj,
+                    attn._impl.k_proj,
+                    attn._impl.v_proj,
+                    attn._impl.o_proj,
+                    attn._impl.a_proj,
+                    attn._impl.gate_proj,
+                ):
+                    lin.reset_parameters()
+            else:
+                attn.q_proj.reset_parameters()
+                attn.k_proj.reset_parameters()
+                attn.v_proj.reset_parameters()
+                attn.o_proj.reset_parameters()
             block.mlp.reset_parameters()
 
     def forward(self, x: torch.Tensor, position: int = 0) -> torch.Tensor:

@@ -77,17 +77,18 @@ class TestLoadBackend:
     """load_learning_model materializes the same checkpoint in either track."""
 
     @pytest.mark.timeout(120)
-    def test_numpy_is_default_and_torch_is_float32(self):
+    def test_numpy_is_default_and_torch_serves_checkpoint_dtype(self):
         np_model, vocab = _load_numpy()
         assert isinstance(np_model, NumPyModel)
         assert len(vocab) > 0
 
         torch_model, _ = _load_torch()
         assert isinstance(torch_model, TorchModel)
-        # The torch track casts to float32 for serving (numpy display
-        # compatibility); BF16 is used during training only.
-        assert torch_model.lm_head.weight.dtype == torch.float32
-        assert torch_model.embedding.weight.dtype == torch.float32
+        # GPU tracks serve in the checkpoint's dtype (BF16 — the running
+        # model parameter dtype); the record adapters recompute the display
+        # path in float64, and NumPy stays float64/float32.
+        assert torch_model.lm_head.weight.dtype == torch.bfloat16
+        assert torch_model.embedding.weight.dtype == torch.bfloat16
 
     @pytest.mark.timeout(120)
     def test_invalid_backend_raises(self):

@@ -20,6 +20,7 @@ from collections.abc import Mapping
 import numpy as np
 
 from impl._np.attention import MultiHeadAttention
+from impl._np.deltanet import GatedDeltaNet
 from impl._np.ffn import SwiGLUFFN
 from impl._np.layernorm import RMSNorm
 from impl._np.moe import MixtureOfExperts
@@ -97,17 +98,30 @@ class TransformerBlock:
         self.post_attention_layernorm = RMSNorm(
             D, eps=config.norm_eps, gamma=None if p is None else p[Keys.ln(i, LayerNorm.POST_ATTENTION)]
         )
-        self.self_attn = MultiHeadAttention(
-            embed_dim=D,
-            n_heads=H,
-            n_groups=G,
-            rope_dim=config.rope_dim,
-            seed=seed + 1,
-            q_proj=None if p is None else p[Keys.attn(i, Attn.Q_PROJ)],
-            k_proj=None if p is None else p[Keys.attn(i, Attn.K_PROJ)],
-            v_proj=None if p is None else p[Keys.attn(i, Attn.V_PROJ)],
-            o_proj=None if p is None else p[Keys.attn(i, Attn.O_PROJ)],
-        )
+        # Mixing sublayer, per layer kind (ADR 0006): 'F' → full attention,
+        # 'd' → Gated DeltaNet. Both expose the same forward/step/chunk
+        # interface; only the cache dict shape differs ({"k","v"} vs
+        # {"s","s_hist"}), which make_cache picks per layer.
+        if config.layer_kind(i) == "d":
+            self.self_attn: MultiHeadAttention | GatedDeltaNet = GatedDeltaNet(
+                embed_dim=D,
+                n_heads=H,
+                seed=seed + 1,
+                layer_index=i if p is not None else None,
+                params=p,
+            )
+        else:
+            self.self_attn = MultiHeadAttention(
+                embed_dim=D,
+                n_heads=H,
+                n_groups=G,
+                rope_dim=config.rope_dim,
+                seed=seed + 1,
+                q_proj=None if p is None else p[Keys.attn(i, Attn.Q_PROJ)],
+                k_proj=None if p is None else p[Keys.attn(i, Attn.K_PROJ)],
+                v_proj=None if p is None else p[Keys.attn(i, Attn.V_PROJ)],
+                o_proj=None if p is None else p[Keys.attn(i, Attn.O_PROJ)],
+            )
         if config.has_moe():
             self.mlp: SwiGLUFFN | MixtureOfExperts = MixtureOfExperts(
                 embed_dim=D,
@@ -214,8 +228,12 @@ class TransformerBlock:
             "input_layernorm.gamma": d_gamma1,
             "post_attention_layernorm.gamma": d_gamma2,
         }
-        for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
-            dparams[f"self_attn.{name}"] = attn_grads[name]
+        if isinstance(self.self_attn, GatedDeltaNet):
+            for name in ("q_proj", "k_proj", "v_proj", "o_proj", "a_proj", "dt_bias", "gate_proj", "norm"):
+                dparams[f"deltanet.{name}"] = attn_grads[name]
+        else:
+            for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
+                dparams[f"self_attn.{name}"] = attn_grads[name]
         if isinstance(self.mlp, MixtureOfExperts):
             dparams["mlp.gate"] = mlp_grads["gate"]
             dparams["mlp.experts"] = mlp_grads["experts"]  # list of {gate_proj, up_proj, down_proj}
@@ -254,7 +272,11 @@ class TransformerBlock:
         """
         ln1_out = self.input_layernorm.forward(x)  # (B, 1, D)
         attn_state: dict | None = {} if record is not None else None
-        attn_out = self.self_attn.forward_step(ln1_out, position, cache, quantize=quantize, record=attn_state)
+        if isinstance(self.self_attn, GatedDeltaNet):
+            # DeltaNet layers carry the recurrent S state (no K/V, no TurboQuant).
+            attn_out = self.self_attn.forward_step(ln1_out, position, cache, record=attn_state)
+        else:
+            attn_out = self.self_attn.forward_step(ln1_out, position, cache, quantize=quantize, record=attn_state)
         h = x + attn_out  # (B, 1, D)
         ln2_out = self.post_attention_layernorm.forward(h)  # (B, 1, D)
         ff_out, ff_state = self.mlp.forward_state(ln2_out).unwrap_with()  # (B, 1, D)

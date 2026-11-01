@@ -139,6 +139,18 @@ SCENARIOS: list[Scenario] = [
         kwargs=_cfg(),
         backends=["numpy", "torch", "triton", "cuda"],
     ),
+    Scenario(
+        name="deltanet_np_torch",
+        description="Gated DeltaNet hybrid (ADR 0006, 3:1 'dddF' over 4 layers): NumPy reference vs PyTorch",
+        kwargs=_cfg(n_layers=4, layer_pattern="dddF"),
+        backends=["numpy", "torch"],
+    ),
+    Scenario(
+        name="deltanet_all_four",
+        description="Gated DeltaNet hybrid on all four tracks (full interchange incl. GPU)",
+        kwargs=_cfg(n_layers=4, layer_pattern="dddF"),
+        backends=["numpy", "torch", "triton", "cuda"],
+    ),
 ]
 
 

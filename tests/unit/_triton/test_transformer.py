@@ -87,12 +87,12 @@ class TestTransformerBlockWiring:
         loss = out.sum()
         loss.backward()
 
-        attn_grad = block.self_attn.q_proj.weight.grad
-        assert attn_grad is not None and attn_grad.norm() > 1e-6, "Attention gradient should be non-trivial"
+        attn_grad = block.self_attn.q_proj.weight.grad  # type: ignore[attr-defined]
+        assert attn_grad is not None and float(attn_grad.norm()) > 1e-6  # type: ignore[union-attr]
         if hasattr(block.mlp, "expert_list"):
-            mlp_grad = block.mlp.expert_list[0].gate_proj.grad  # pyright: ignore[reportIndexIssue, reportAttributeAccessIssue]
+            mlp_grad = block.mlp.expert_list[0].gate_proj.grad  # type: ignore[attr-defined]
         else:
-            mlp_grad = block.mlp.gate_proj.grad
+            mlp_grad = block.mlp.gate_proj.grad  # type: ignore[attr-defined]
         assert mlp_grad is not None, "FFN/MoE gradient should exist"
         ln_grad = block.input_layernorm.weight.grad
         assert ln_grad is not None, "Layernorm gradient should exist"
@@ -107,7 +107,7 @@ class TestTransformerBlockWiring:
         out = block(x)
         # Zero the attention output weights -> attention suppressed -> output changes
         with torch.no_grad():
-            block.self_attn.o_proj.weight.zero_()
+            block.self_attn.o_proj.weight.zero_()  # type: ignore[union-attr]
         out_no_attn = block(x)
         assert not torch.allclose(out, out_no_attn, atol=1e-3), "Attention should contribute to output"
         assert torch.isfinite(out).all()

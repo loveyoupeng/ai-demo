@@ -36,7 +36,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from impl._torch.learning import _generate_with_spec_records  # shared-seam: torch-family logic consumed by this track
+from impl._torch.learning import (
+    _deltanet_record,
+    _generate_with_spec_records,
+)  # shared-seam: torch-family logic consumed by this track
 from shared.constants import REP_PENALTY
 from shared.torch_softmax import stable_softmax_np, stable_softmax_t
 
@@ -72,7 +75,7 @@ def arr(t: torch.Tensor) -> list:
     All record values are float64, rounded to 8 decimals — identical to the
     NumPy/Torch records' ``arr`` so all backends serialize the same way.
     """
-    return np.round(t.detach().cpu().numpy().astype(np.float64), 8).tolist()
+    return np.round(t.detach().cpu().to(torch.float64).numpy(), 8).tolist()
 
 
 def _w(t: torch.Tensor) -> torch.Tensor:
@@ -325,7 +328,7 @@ def _moe_record(block: CuTransformerBlock, x: torch.Tensor) -> tuple[torch.Tenso
         shared_outs = [_swiglu(x, sg[s], su[s], sd[s]) for s in range(n_shared)]  # n_shared × (B, S, D)
         out = out + torch.stack(shared_outs).mean(dim=0)  # (B, S, D)
     return out, {
-        "scores": arr(scores_stable),  # (B, S, E) stable-softmaxed
+        "scores": arr(scores),  # (B, S, E) raw router scores
         "probs": arr(probs),  # (B, S, E) after top-k mask
         "topk_idx": topk_idx.tolist(),  # (B, S, k)
         "weights": arr(weights),  # (B, S, E) renormalized
@@ -385,19 +388,25 @@ def _instrumented_blocks(
     for i, block in enumerate(model.stacking.blocks):
         eps = model.config.norm_eps
         ln1_out, _ = _rmsnorm(stream, _w(block.input_layernorm_gamma), eps)  # (B, S, D)
-        attn_out, attn_rec = _attention_forward(
-            block, ln1_out, position, cache=None if caches is None else caches[i]
-        )  # (B, S, D)
+        if hasattr(block, "deltanet"):
+            attn_out, attn_rec = _deltanet_record(block.deltanet._impl, ln1_out, ln1_out.new_zeros(ln1_out.shape))
+        else:
+            attn_out, attn_rec = _attention_forward(
+                block, ln1_out, position, cache=None if caches is None else caches[i]
+            )  # (B, S, D)
         h = stream + attn_out  # (B, S, D) residual after attention
         ln2_out, _ = _rmsnorm(h, _w(block.post_attention_layernorm_gamma), eps)  # (B, S, D)
         block_rec: BlockRecord = {
             "ln1": _rmsnorm_record(_w(block.input_layernorm_gamma), stream, eps, ln1_out),
-            "attn": attn_rec,
             "h": arr(h),
             "ln2": _rmsnorm_record(_w(block.post_attention_layernorm_gamma), h, eps, ln2_out),
         }
         # TypedDicts are closed shapes: the MoE field carries the MoE record,
         # the dense field the FFN record — assigned in the branch that builds it.
+        if hasattr(block, "deltanet"):
+            block_rec["deltanet"] = attn_rec  # type: ignore[typeddict-item]
+        else:
+            block_rec["attn"] = attn_rec  # type: ignore[typeddict-item]
         if block.config.has_moe():
             ff_out, moe_rec = _moe_record(block, ln2_out)  # (B, S, D)
             block_rec["moe"] = moe_rec

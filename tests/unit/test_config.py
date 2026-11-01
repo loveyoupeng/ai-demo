@@ -142,6 +142,33 @@ class TestQueryMethods:
         cfg = TransformerConfig(n_experts=1, top_k=1)
         assert cfg.has_moe() is False
 
+    def test_layer_kind_default_all_full(self):
+        cfg = TransformerConfig(n_layers=3)
+        assert [cfg.layer_kind(i) for i in range(3)] == ["F", "F", "F"]
+        assert cfg.has_deltanet() is False
+
+    def test_layer_kind_pattern_repeats(self):
+        cfg = TransformerConfig(n_layers=4, layer_pattern="dddF")
+        assert [cfg.layer_kind(i) for i in range(4)] == ["d", "d", "d", "F"]
+        assert cfg.has_deltanet() is True
+        cfg6 = TransformerConfig(n_layers=6, layer_pattern="dddF")
+        assert [cfg6.layer_kind(i) for i in range(6)] == ["d", "d", "d", "F", "d", "d"]
+
+    def test_layer_pattern_invalid_char_rejected(self):
+        with pytest.raises(AssertionError, match="layer_pattern"):
+            TransformerConfig(n_layers=1, layer_pattern="dx")
+
+    def test_layer_pattern_serialization_roundtrip(self):
+        cfg = TransformerConfig(n_layers=4, layer_pattern="dddF")
+        cfg2 = TransformerConfig.from_dict(cfg.to_dict())
+        assert cfg2.layer_pattern == "dddF"
+        assert [cfg2.layer_kind(i) for i in range(4)] == ["d", "d", "d", "F"]
+
+    def test_old_config_without_pattern_loads_as_all_full(self):
+        cfg = TransformerConfig.from_dict({"vocab_size": 64, "embed_dim": 32, "n_layers": 1, "n_heads": 4})
+        assert cfg.layer_pattern == ""
+        assert cfg.layer_kind(0) == "F"
+
 
 class TestSerialization:
     """to_dict and from_dict roundtrip."""
@@ -168,6 +195,7 @@ class TestSerialization:
             "top_k",
             "expert_dim",
             "n_shared_experts",
+            "layer_pattern",
             "dtype",
             "seed",
             "norm_eps",

@@ -72,7 +72,13 @@ def count_active_params(cfg: TransformerConfig) -> int:
     n = V * D  # embedding
     n += D  # final norm gamma
     n += D * V  # lm_head
-    n += L * (2 * D + 4 * D * D)  # two norm gammas + q/k/v/o per layer (MHA-sized)
+    n += L * (2 * D)  # two norm gammas per layer
+    for i in range(L):
+        if cfg.layer_kind(i) == "d":
+            # DeltaNet (ADR 0006): q/k/v/o at H heads + a_proj (D*H) + gate_proj (D*D)
+            n += 4 * D * H * hd + D * H + D * D + H + D  # q/k/v/o + a_proj + gate_proj + dt_bias + norm
+        else:
+            n += 4 * D * D  # q/k/v/o at MHA size
     if cfg.has_moe():
         FF, E = cfg.expert_dim, cfg.n_experts
         routed = cfg.top_k
@@ -112,31 +118,27 @@ def load_learning_model(
         from impl._torch.layers import TorchModel as _TorchModel
 
         model = _TorchModel(cfg, params)
-        # Cast to float32 for display compatibility (the learning page
-        # converts torch tensors to numpy for display; numpy doesn't
-        # support bfloat16). The checkpoint itself is stored in float32;
-        # BF16 compute happens during training, not serving.
-        model = model.float()
+        # Serve in the checkpoint's own dtype (BF16 on the GPU tracks —
+        # ADR: "BF16 as the running model parameter"; the record adapters
+        # recompute their display path in float64 from the parameters, and
+        # drafter_from_sidecar casts the drafter to the target's dtype, so
+        # BF16 serving is dtype-clean end to end). NumPy never uses BF16.
         model.eval()
     elif backend == "triton":
         from impl._triton.model import TritonModel
 
-        model = TritonModel(cfg, params).cuda().float()
+        model = TritonModel(cfg, params).cuda()
         model.eval()
     elif backend == "cuda":
         import torch
 
         from impl._cuda.model import CUDAModel as _CUDAModel
-        from impl._cuda.model import _cuda_to_device, _cuda_to_dtype
+        from impl._cuda.model import _cuda_to_device
 
         model = _CUDAModel(cfg, params)
-        # Same serving convention as the torch/triton tracks: float32.
-        # The checkpoint's BF16 dtype marker is a TRAINING (AMP) property;
-        # serving (and the drafter sidecars beside it, which load as
-        # float32 and align to the target via ``drafter_from_sidecar``)
-        # computes in float32 — a BF16 target against float32 drafter
-        # weights is exactly the mixed-dtype matmul the page hit.
-        _cuda_to_dtype(model, torch.float32)  # in place
+        # Serve in BF16 (the checkpoint's dtype marker is the running dtype
+        # on the GPU tracks); the drafter sidecar aligns via
+        # drafter_from_sidecar. NumPy track stays float64/float32.
         _cuda_to_device(model, torch.device("cuda" if torch.cuda.is_available() else "cpu"))  # in place
     else:
         raise ValueError(f"backend must be 'numpy'|'torch'|'triton'|'cuda', got {backend!r}")
@@ -457,6 +459,8 @@ class _LearningHandler(BaseHTTPRequestHandler):
             # token (routed top_k of E + the shared experts).
             "n_params_active": count_active_params(cfg),
             "has_moe": cfg.has_moe(),
+            "has_deltanet": cfg.has_deltanet(),
+            "layer_kinds": [cfg.layer_kind(i) for i in range(cfg.n_layers)],
             "spec_available": self._spec_available(),
             "default_spec": self.default_spec if self.default_spec in self._spec_available() else "plain",
             "spec_block_size": self._spec_block_sizes(),

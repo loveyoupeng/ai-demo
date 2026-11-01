@@ -187,7 +187,7 @@ def load_think_corpus(tok: Tokenizer) -> list[list[int]]:
     # synthetic two-step arithmetic: (a + b) * c with template rationales —
     # the guaranteed-learnable floor so RL always has a signal to reinforce
     rng = np.random.default_rng(42)
-    for _ in range(2000):
+    for _ in range(4000):  # synthetic floor for the hybrid (DeltaNet) layers
         a, b, c = int(rng.integers(1, 6)), int(rng.integers(1, 6)), int(rng.integers(2, 5))
         q = f"{a} plus {b}, then times {c}."
         mid = a + b
@@ -355,13 +355,18 @@ def main() -> int:
         {
             "vocab_size": VOCAB,
             "embed_dim": 64,
-            "n_layers": 3 if moe else 6,  # depth vs bank: the budget split
+            # ADR 0006 hybrid: every 4th layer is full attention, the other 3
+            # are Gated DeltaNet (the 3:1 pattern). Geometry stays param-matched
+            # at ~279K total: dense = 6L thin FFN(80), MoE = 3L with E=10+1
+            # shared at expert_dim=24 (282,380 total, ~56% active/token).
+            "n_layers": 3 if moe else 6,
+            "layer_pattern": "dddF",
             "n_heads": 4,
             "context_length": CTX,
             "seed": 42,
-            "n_experts": 8 if moe else 1,
+            "n_experts": 10 if moe else 1,
             "n_shared_experts": 1 if moe else 0,
-            "expert_dim": 32 if moe else 96,  # dense FFN 96 = 1.5·D (thin)
+            "expert_dim": 24 if moe else 80,
             "top_k": 1,
             # BF16 AMP: GPU matmuls hit the tensor cores (~2x FP32 on Ampere+);
             # the checkpoint stores FP32 either way (npz has no bf16).

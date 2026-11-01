@@ -32,13 +32,14 @@ from pathlib import Path
 import numpy as np
 
 from impl._np.cross_entropy import CrossEntropyLoss
+from impl._np.deltanet import GatedDeltaNet
 from impl._np.embedding import Embedding
 from impl._np.layernorm import RMSNorm
 from impl._np.moe import MixtureOfExperts
 from impl._np.stack import DecoderStack
 from shared.checkpoint import load_checkpoint
 from shared.config import TransformerConfig
-from shared.constants import ATTN_PROJS, FFN_PROJS, Attn, Keys, LayerNorm, Mlp
+from shared.constants import ATTN_PROJS, FFN_PROJS, Attn, DeltaNet, Keys, LayerNorm, Mlp
 from shared.registry import ParameterRegistry
 
 logger = logging.getLogger(__name__)
@@ -137,7 +138,7 @@ class NumPyModel:
         logits, _trace = self.forward_with_trace(input_ids)
         return logits
 
-    def _param_slots(self) -> list[tuple[str, object, str]]:
+    def _param_slots(self) -> list[tuple[str, object, str]]:  # noqa: C901
         """Storage binding: registry key → (owner, attribute) of the live array.
 
         The track's only traversal: ``_param_arrays`` (key → array),
@@ -154,13 +155,27 @@ class NumPyModel:
             slots.append((Keys.ln(i, LayerNorm.INPUT), block.input_layernorm, "gamma"))
             slots.append((Keys.ln(i, LayerNorm.POST_ATTENTION), block.post_attention_layernorm, "gamma"))
             attn = block.self_attn
-            for proj, attr in (
-                (Attn.Q_PROJ, "q_proj"),
-                (Attn.K_PROJ, "k_proj"),
-                (Attn.V_PROJ, "v_proj"),
-                (Attn.O_PROJ, "o_proj"),
-            ):
-                slots.append((Keys.attn(i, proj), attn, attr))
+            if self.config.layer_kind(i) == "d":
+                # Gated DeltaNet layer (ADR 0006): its params live under Keys.deltanet.
+                for attr_key, attr_name in (
+                    (DeltaNet.Q_PROJ, "q_proj"),
+                    (DeltaNet.K_PROJ, "k_proj"),
+                    (DeltaNet.V_PROJ, "v_proj"),
+                    (DeltaNet.O_PROJ, "o_proj"),
+                    (DeltaNet.A_PROJ, "a_proj"),
+                    (DeltaNet.DT_BIAS, "dt_bias"),
+                    (DeltaNet.GATE_PROJ, "gate_proj"),
+                ):
+                    slots.append((Keys.deltanet(i, attr_key), attn, attr_name))
+                slots.append((Keys.deltanet(i, DeltaNet.NORM), attn.norm, "gamma"))  # type: ignore[union-attr]
+            else:
+                for proj, attr in (
+                    (Attn.Q_PROJ, "q_proj"),
+                    (Attn.K_PROJ, "k_proj"),
+                    (Attn.V_PROJ, "v_proj"),
+                    (Attn.O_PROJ, "o_proj"),
+                ):
+                    slots.append((Keys.attn(i, proj), attn, attr))
             mlp = block.mlp
             if isinstance(mlp, MixtureOfExperts):
                 slots.append((Keys.moe_gate(i), mlp, "gate"))
@@ -303,10 +318,18 @@ class NumPyModel:
         G = self.config.kv_heads
         hd = D // H
         dtype = self.embedding.weight.dtype
+        # Kind-aware per-layer cache (ADR 0006): 'd' layers carry the recurrent
+        # DeltaNet state {"s": (B,H,hd,hd), "s_hist": []} instead of K/V.
         if not quantize:
-            empty_k = np.zeros((B, G, 0, hd), dtype=dtype)
-            empty_v = np.zeros((B, G, 0, hd), dtype=dtype)
-            return [{"k": empty_k.copy(), "v": empty_v.copy()} for _ in range(self.config.n_layers)]
+            caches: list[dict] = []
+            for i in range(self.config.n_layers):
+                if self.config.layer_kind(i) == "d":
+                    caches.append({"s": np.zeros((B, H, hd, hd), dtype=dtype), "s_hist": []})
+                else:
+                    caches.append(
+                        {"k": np.zeros((B, G, 0, hd), dtype=dtype), "v": np.zeros((B, G, 0, hd), dtype=dtype)}
+                    )
+            return caches
         empty_bits = np.zeros((B, H, 0, hd), dtype=np.int8)
         # Scales are stored per (B, H) — a single scalar per head, broadcast
         # over the sequence and head-dim axes at dequantize time.
@@ -378,14 +401,23 @@ class NumPyModel:
         G = self.config.kv_heads
         for i, block_state in enumerate(blocks_rec):
             attn_state = block_state["attn"]
+            if self.config.layer_kind(i) == "d":
+                # DeltaNet layer (ADR 0006): backfill the recurrent state and
+                # the per-position snapshot history from the captured scan.
+                cache[i]["s"] = attn_state["s_final"]  # (B, H, hd, hd)
+                cache[i]["s_hist"] = [attn_state["s_hist"][:, :, j] for j in range(attn_state["s_hist"].shape[2])]
+                continue
             k_group = attn_state["k_group"]  # (B, G, S, hd)
             v_group = attn_state["v_group"]  # (B, G, S, hd)
             if quantize:
                 attn_layer = self.stack.layers[i].self_attn
+                assert not isinstance(attn_layer, GatedDeltaNet), (
+                    "TurboQuant is a KV-cache feature; DeltaNet layers carry S state"
+                )
                 k_r = np.repeat(k_group, H // G, axis=1) if G != H else k_group  # (B, H, S, hd)
                 v_r = np.repeat(v_group, H // G, axis=1) if G != H else v_group
-                cache[i]["bits_k"], cache[i]["scales_k"] = attn_layer._quantize_turbo_full(k_r)
-                cache[i]["bits_v"], cache[i]["scales_v"] = attn_layer._quantize_turbo_full(v_r)
+                cache[i]["bits_k"], cache[i]["scales_k"] = attn_layer._quantize_turbo_full(k_r)  # type: ignore[union-attr]
+                cache[i]["bits_v"], cache[i]["scales_v"] = attn_layer._quantize_turbo_full(v_r)  # type: ignore[union-attr]
             else:
                 cache[i]["k"] = k_group
                 cache[i]["v"] = v_group
@@ -543,7 +575,7 @@ class NumPyModel:
         dlogits = CrossEntropyLoss(shift=False).backward(logits, targets)  # (B, S, V)
         return self.backward_from_dlogits(dlogits, trace, input_ids)
 
-    def backward_from_dlogits(
+    def backward_from_dlogits(  # noqa: C901
         self,
         dlogits: np.ndarray,
         trace: dict,
@@ -586,8 +618,21 @@ class NumPyModel:
         for i, block_grads in enumerate(per_layer_grads):
             grads[Keys.ln(i, LayerNorm.INPUT)] = block_grads["input_layernorm.gamma"]
             grads[Keys.ln(i, LayerNorm.POST_ATTENTION)] = block_grads["post_attention_layernorm.gamma"]
-            for proj in ATTN_PROJS:
-                grads[Keys.attn(i, proj)] = block_grads[f"self_attn.{proj}"]
+            if self.config.layer_kind(i) == "d":
+                for attr, name in (
+                    (DeltaNet.Q_PROJ, "q_proj"),
+                    (DeltaNet.K_PROJ, "k_proj"),
+                    (DeltaNet.V_PROJ, "v_proj"),
+                    (DeltaNet.O_PROJ, "o_proj"),
+                    (DeltaNet.A_PROJ, "a_proj"),
+                    (DeltaNet.DT_BIAS, "dt_bias"),
+                    (DeltaNet.GATE_PROJ, "gate_proj"),
+                    (DeltaNet.NORM, "norm"),
+                ):
+                    grads[Keys.deltanet(i, attr)] = block_grads[f"deltanet.{name}"]
+            else:
+                for proj in ATTN_PROJS:
+                    grads[Keys.attn(i, proj)] = block_grads[f"self_attn.{proj}"]
             block = self.stack.layers[i]
             if isinstance(block.mlp, MixtureOfExperts):
                 grads[Keys.moe_gate(i)] = block_grads["mlp.gate"]

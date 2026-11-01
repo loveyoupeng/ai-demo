@@ -36,6 +36,13 @@ class TransformerConfig:
     n_heads: int = 8  # Number of query heads
     n_groups: int | None = None  # None → n_heads (standard MHA); else K/V heads (must divide n_heads)
 
+    # Hybrid layer pattern (ADR 0006): each char is one layer's mixing
+    # sublayer — 'F' = full (RoPE) attention, 'd' = Gated DeltaNet
+    # (linear/recurrent). The pattern REPEATS over n_layers, so "dddF"
+    # gives a 3:1 DeltaNet:attention ratio (the Qwen3-Next/Kimi-Linear
+    # hybrid shape). None or "" = all full attention (the classic model).
+    layer_pattern: str | None = None
+
     # Positional encoding
     # 0 → rotate all head dimensions (standard RoPE).
     # 0 < rope_dim < head_dim → rotate the first rope_dim dimensions only.
@@ -95,6 +102,10 @@ class TransformerConfig:
         object.__setattr__(self, "v_dim", n_groups * head_dim)
         if self.expert_dim == 0:
             object.__setattr__(self, "expert_dim", self.embed_dim * 4)
+        # Hybrid pattern: validate chars and normalize None → "" (all-F).
+        pat = self.layer_pattern or ""
+        assert all(c in ("F", "d") for c in pat), f"layer_pattern chars must be F or d, got {pat!r}"
+        object.__setattr__(self, "layer_pattern", pat)
 
     def is_gqa(self) -> bool:
         """GQA active when n_groups < n_heads (multiple query heads share one K/V head)."""
@@ -109,6 +120,19 @@ class TransformerConfig:
     def has_moe(self) -> bool:
         """MoE active when n_experts > 1."""
         return self.n_experts > 1
+
+    def layer_kind(self, layer_idx: int) -> str:
+        """Mixing sublayer of layer ``layer_idx``: 'F' (full attention) or
+        'd' (Gated DeltaNet). The pattern repeats over n_layers; an empty
+        pattern means all layers are full attention."""
+        pat = self.layer_pattern or ""
+        if not pat:
+            return "F"
+        return pat[layer_idx % len(pat)]
+
+    def has_deltanet(self) -> bool:
+        """True when any layer runs Gated DeltaNet (pattern contains 'd')."""
+        return "d" in (self.layer_pattern or "")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize, excluding derived fields head_dim/k_dim/v_dim.

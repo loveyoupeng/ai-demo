@@ -219,10 +219,17 @@ class SpeculativeGenerator:
 
     @staticmethod
     def _trim_cache(cache: list[dict], n: int) -> None:
-        """Drop every cached position >= n (rejected draft tail)."""
+        """Drop every cached position >= n (rejected draft tail).
+
+        Attention layers slice the K/V rows; DeltaNet layers (ADR 0006)
+        restore the S snapshot taken at position n from s_hist."""
         for layer in cache:
-            layer["k"] = layer["k"][:, :, :n]
-            layer["v"] = layer["v"][:, :, :n]
+            if "s" in layer:
+                layer["s"] = layer["s_hist"][n].copy()
+                del layer["s_hist"][n + 1 :]
+            else:
+                layer["k"] = layer["k"][:, :, :n]
+                layer["v"] = layer["v"][:, :, :n]
 
     def _commit(self, cache: list[dict], position: int, token: int) -> tuple[np.ndarray, np.ndarray]:
         """Append the committed anchor token to the target cache and return

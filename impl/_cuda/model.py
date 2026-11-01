@@ -35,6 +35,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -44,7 +45,7 @@ from impl._cuda.layernorm import rmsnorm as _rmsnorm
 from impl._cuda.stack import CuDecoderStack
 from shared.checkpoint import load_checkpoint
 from shared.config import TransformerConfig
-from shared.constants import Attn, Keys, LayerNorm, Mlp
+from shared.constants import Attn, DeltaNet, Keys, LayerNorm, Mlp
 from shared.registry import ParameterRegistry
 
 
@@ -61,6 +62,10 @@ def _cuda_to_device(model: CUDAModel, device: torch.device | str) -> None:
         for attr in list(block.__dict__.values()):
             if isinstance(attr, torch.Tensor):
                 attr.data = attr.data.to(device)
+        dn = getattr(block, "deltanet", None)
+        if dn is not None:
+            for p in dn._impl.parameters():
+                p.data = p.data.to(device)
 
 
 def _cuda_to_dtype(model: CUDAModel, dtype: torch.dtype) -> None:
@@ -73,6 +78,10 @@ def _cuda_to_dtype(model: CUDAModel, dtype: torch.dtype) -> None:
         for attr in list(block.__dict__.values()):
             if isinstance(attr, torch.Tensor):
                 attr.data = attr.data.to(dtype)
+        dn = getattr(block, "deltanet", None)
+        if dn is not None:
+            for p in dn._impl.parameters():
+                p.data = p.data.to(dtype)
 
 
 class CUDAModel:
@@ -238,13 +247,20 @@ class CUDAModel:
         hd = self.config.head_dim
         device = self.device
         dtype = self.lm_head_weight.dtype
-        return [
-            {
-                "k": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
-                "v": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
-            }
-            for _ in range(self.config.n_layers)
-        ]
+        caches: list[dict[str, Any]] = []
+        for i in range(self.config.n_layers):
+            if self.config.layer_kind(i) == "d":
+                caches.append(
+                    {"s": torch.zeros(B, self.config.n_heads, hd, hd, device=device, dtype=dtype), "s_hist": []}
+                )
+            else:
+                caches.append(
+                    {
+                        "k": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+                        "v": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+                    }
+                )
+        return caches
 
     def forward_prefill(
         self, input_ids: torch.Tensor, cache: list[dict[str, torch.Tensor]] | None = None, position: int = 0
@@ -279,8 +295,12 @@ class CUDAModel:
         x = _rmsnorm(x, self.final_norm_gamma.to(device), eps=self.config.norm_eps)  # (B, S, D)
         logits = x @ self.lm_head_weight.to(device)  # (B, S, V)
         for i, attn_state in enumerate(states):
-            cache[i]["k"] = attn_state["k_group"]  # (B, G, S, hd)
-            cache[i]["v"] = attn_state["v_group"]  # (B, G, S, hd)
+            if self.config.layer_kind(i) == "d":
+                cache[i]["s"] = attn_state["s_final"]
+                cache[i]["s_hist"] = [attn_state["s_hist"][:, :, j] for j in range(attn_state["s_hist"].shape[2])]  # type: ignore[assignment]
+            else:
+                cache[i]["k"] = attn_state["k_group"]  # (B, G, S, hd)
+                cache[i]["v"] = attn_state["v_group"]  # (B, G, S, hd)
         return logits, cache
 
     def forward_step(
@@ -309,8 +329,11 @@ class CUDAModel:
         device = self.device
         input_ids = input_ids.to(device)
         for entry in cache:
-            entry["k"] = entry["k"].to(device)
-            entry["v"] = entry["v"].to(device)
+            if "s" in entry:
+                entry["s"] = entry["s"].to(device)
+            else:
+                entry["k"] = entry["k"].to(device)
+                entry["v"] = entry["v"].to(device)
         x = self.embedding_weights.to(device)[input_ids]  # (B, 1, D)
         stack_out = self.stacking.forward_step(x, position, cache)  # (B, 1, D)
         x_final = _rmsnorm(stack_out, self.final_norm_gamma.to(device), eps=self.config.norm_eps)  # (B, 1, D)
@@ -345,8 +368,11 @@ class CUDAModel:
         device = self.device
         input_ids = input_ids.to(device)
         for entry in cache:
-            entry["k"] = entry["k"].to(device)  # same dicts, mutated in place
-            entry["v"] = entry["v"].to(device)
+            if "s" in entry:
+                entry["s"] = entry["s"].to(device)
+            else:
+                entry["k"] = entry["k"].to(device)  # same dicts, mutated in place
+                entry["v"] = entry["v"].to(device)
         x = self.embedding_weights.to(device)[input_ids]  # (B, c, D)
         stack_out = self.stacking.forward_chunk(x, position, cache)  # (B, c, D)
         x_final = _rmsnorm(stack_out, self.final_norm_gamma.to(device), eps=self.config.norm_eps)  # (B, c, D)
@@ -367,10 +393,21 @@ class CUDAModel:
         for i, block in enumerate(self.stacking.blocks):
             t[Keys.ln(i, LayerNorm.INPUT)] = block.input_layernorm_gamma
             t[Keys.ln(i, LayerNorm.POST_ATTENTION)] = block.post_attention_layernorm_gamma
-            t[Keys.attn(i, Attn.Q_PROJ)] = block.q_proj
-            t[Keys.attn(i, Attn.K_PROJ)] = block.k_proj
-            t[Keys.attn(i, Attn.V_PROJ)] = block.v_proj
-            t[Keys.attn(i, Attn.O_PROJ)] = block.o_proj
+            if hasattr(block, "deltanet"):
+                dn = block.deltanet
+                t[Keys.deltanet(i, DeltaNet.Q_PROJ)] = block.q_proj
+                t[Keys.deltanet(i, DeltaNet.K_PROJ)] = block.k_proj
+                t[Keys.deltanet(i, DeltaNet.V_PROJ)] = block.v_proj
+                t[Keys.deltanet(i, DeltaNet.O_PROJ)] = block.o_proj
+                t[Keys.deltanet(i, DeltaNet.A_PROJ)] = dn.a_proj
+                t[Keys.deltanet(i, DeltaNet.GATE_PROJ)] = dn.gate_proj
+                t[Keys.deltanet(i, DeltaNet.DT_BIAS)] = dn.dt_bias
+                t[Keys.deltanet(i, DeltaNet.NORM)] = dn.norm_gamma
+            else:
+                t[Keys.attn(i, Attn.Q_PROJ)] = block.q_proj
+                t[Keys.attn(i, Attn.K_PROJ)] = block.k_proj
+                t[Keys.attn(i, Attn.V_PROJ)] = block.v_proj
+                t[Keys.attn(i, Attn.O_PROJ)] = block.o_proj
             if self.config.has_moe():
                 t[Keys.moe_gate(i)] = block.router
                 for e in range(self.config.n_experts):
@@ -394,10 +431,18 @@ class CUDAModel:
         ``(in, out)`` layout, so no transposition is needed. Storage is
         supplied via the track's binding map.
         """
-        tensors = ParameterRegistry(self.config).bind(self._param_tensors())
-        return {
-            entry.key: tensors[entry.key].detach().cpu().numpy() for entry in ParameterRegistry(self.config).entries
-        }
+        reg = ParameterRegistry(self.config)
+        tensors = reg.bind(self._param_tensors())
+        out: dict[str, np.ndarray] = {}
+        for entry in reg.entries:
+            t = tensors[entry.key]
+            arr = t.detach().cpu().numpy()
+            # nn.Linear-backed params (deltanet projections) are stored (out, in)
+            # while the checkpoint keeps (in, out) — transpose on the way out.
+            if entry.torch_transpose and "deltanet" in entry.key and arr.ndim == 2:
+                arr = arr.T
+            out[entry.key] = arr
+        return out
 
     def load_from_numpy_dict(self, params: Mapping[str, np.ndarray]) -> None:
         """Load parameters from a flat dict keyed by ``shared.constants.Keys``.
@@ -410,4 +455,8 @@ class CUDAModel:
         tensors = ParameterRegistry(self.config).bind(self._param_tensors())
         for entry in registry.entries:
             loaded = torch.from_numpy(params[entry.key]).to(tensors[entry.key].dtype)
+            # nn.Linear-backed deltanet params are stored (out, in); the
+            # checkpoint keeps (in, out) — transpose on the way in.
+            if entry.torch_transpose and "deltanet" in entry.key and loaded.ndim == 2:
+                loaded = loaded.T.contiguous()
             tensors[entry.key].data.copy_(loaded)

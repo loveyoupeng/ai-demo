@@ -114,9 +114,28 @@ class MoERecord(TypedDict):
     top_k: int
 
 
+class DeltaNetRecord(TypedDict):
+    """Gated DeltaNet capture (ADR 0006): projections, gates, recurrent
+    state per position, read-out."""
+
+    q_pre: list
+    k_pre: list
+    v_pre: list
+    q: list  # L2-normalized q, per head (B, H, S, hd)
+    k: list  # L2-normalized k, per head
+    v: list
+    beta: list  # forget gate sigmoid, (B, H, S, 1)
+    alpha: list  # output gate sigmoid, (B, S, D)
+    o: list  # read-out o_t = S_t q_t, (B, H, S, hd)
+    pre_o: list  # heads merged @ o_proj, before norm+gate (B, S, D)
+    s_hist: list  # recurrent state after each position (B, H, S, hd, hd)
+    out: list
+
+
 class BlockRecord(TypedDict, total=False):
     ln1: NormRecord
     attn: AttnRecord
+    deltanet: DeltaNetRecord  # present on 'd' layers (ADR 0006)
     h: list
     ln2: NormRecord
     ffn: FFNRecord
@@ -258,13 +277,32 @@ def _block_record(block: TransformerBlock, bs: dict) -> BlockRecord:
     """Serialize one block's raw state (filled by ``TransformerBlock``)."""
     rec: BlockRecord = {
         "ln1": _rmsnorm_record(block.input_layernorm.gamma, bs["x"], block.input_layernorm.eps, bs["ln1_out"]),
-        "attn": _attn_record(bs["attn"], bs["attn_out"]),
         "h": arr(bs["h"]),
         "ln2": _rmsnorm_record(
             block.post_attention_layernorm.gamma, bs["h"], block.post_attention_layernorm.eps, bs["ln2_out"]
         ),
         "out": arr(bs["out"]),
     }
+    from impl._np.deltanet import GatedDeltaNet
+
+    if isinstance(block.self_attn, GatedDeltaNet):
+        st = bs["attn"]
+        rec["deltanet"] = {
+            "q_pre": arr(st["q"].transpose(0, 2, 1, 3).reshape(*st["q"].shape[:2], -1)),
+            "k_pre": arr(st["k"].transpose(0, 2, 1, 3).reshape(*st["k"].shape[:2], -1)),
+            "v_pre": arr(st["v"].transpose(0, 2, 1, 3).reshape(*st["v"].shape[:2], -1)),
+            "q": arr(st["qn"]),
+            "k": arr(st["kn"]),
+            "v": arr(st["v"]),
+            "beta": arr(st["beta"]),
+            "alpha": arr(st["alpha"]),
+            "o": arr(st["o"]),
+            "pre_o": arr(st["pre_o"]),
+            "s_hist": arr(st["s_hist"]),
+            "out": arr(bs["attn_out"]),
+        }
+    else:
+        rec["attn"] = _attn_record(bs["attn"], bs["attn_out"])
     if isinstance(block.mlp, MixtureOfExperts):
         rec["moe"] = _moe_record(bs["ff"], bs["mlp_out"], block.mlp.n_experts, block.mlp.top_k)
     else:

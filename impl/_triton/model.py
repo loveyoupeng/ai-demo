@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -29,12 +30,13 @@ import torch.nn as nn
 
 from impl._triton.transformer import (
     TritonDecoderStack,
+    TritonGatedDeltaNet,
     TritonMixtureOfExperts,
     copy_in_place,
 )
 from shared.checkpoint import load_checkpoint
 from shared.config import TransformerConfig
-from shared.constants import Attn, Keys, LayerNorm, Mlp
+from shared.constants import Attn, DeltaNet, Keys, LayerNorm, Mlp
 from shared.registry import ParameterRegistry
 
 
@@ -129,13 +131,20 @@ class TritonModel(nn.Module):
         hd = self.embed_dim // self.config.n_heads
         device = self.embedding.weight.device
         dtype = self.embedding.weight.dtype
-        return [
-            {
-                "k": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
-                "v": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
-            }
-            for _ in range(self.config.n_layers)
-        ]
+        caches: list[dict[str, Any]] = []
+        for i in range(self.config.n_layers):
+            if self.config.layer_kind(i) == "d":
+                caches.append(
+                    {"s": torch.zeros(B, self.config.n_heads, hd, hd, device=device, dtype=dtype), "s_hist": []}
+                )
+            else:
+                caches.append(
+                    {
+                        "k": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+                        "v": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+                    }
+                )
+        return caches
 
     def forward_prefill(
         self, input_ids: torch.Tensor, cache: list[dict[str, torch.Tensor]] | None = None, position: int = 0
@@ -165,8 +174,12 @@ class TritonModel(nn.Module):
         x_final = self.final_norm(x)  # (B, S, D)
         logits = self.lm_head(x_final)  # (B, S, V)
         for i, attn_state in enumerate(states):
-            cache[i]["k"] = attn_state["k_group"]  # (B, G, S, hd)
-            cache[i]["v"] = attn_state["v_group"]  # (B, G, S, hd)
+            if self.config.layer_kind(i) == "d":
+                cache[i]["s"] = attn_state["s_final"]
+                cache[i]["s_hist"] = [attn_state["s_hist"][:, :, j] for j in range(attn_state["s_hist"].shape[2])]  # type: ignore[index]
+            else:
+                cache[i]["k"] = attn_state["k_group"]  # (B, G, S, hd)
+                cache[i]["v"] = attn_state["v_group"]  # (B, G, S, hd)
         return logits, cache
 
     def forward_step(
@@ -263,13 +276,24 @@ class TritonModel(nn.Module):
             t[Keys.ln(layer_idx, LayerNorm.INPUT)] = block.input_layernorm.weight
             t[Keys.ln(layer_idx, LayerNorm.POST_ATTENTION)] = block.post_attention_layernorm.weight
             attn = block.self_attn
-            for proj, module in (
-                (Attn.Q_PROJ, attn.q_proj),
-                (Attn.K_PROJ, attn.k_proj),
-                (Attn.V_PROJ, attn.v_proj),
-                (Attn.O_PROJ, attn.o_proj),
-            ):
-                t[Keys.attn(layer_idx, proj)] = module.weight
+            if isinstance(attn, TritonGatedDeltaNet):
+                inner = attn._impl
+                t[Keys.deltanet(layer_idx, DeltaNet.Q_PROJ)] = inner.q_proj.weight
+                t[Keys.deltanet(layer_idx, DeltaNet.K_PROJ)] = inner.k_proj.weight
+                t[Keys.deltanet(layer_idx, DeltaNet.V_PROJ)] = inner.v_proj.weight
+                t[Keys.deltanet(layer_idx, DeltaNet.O_PROJ)] = inner.o_proj.weight
+                t[Keys.deltanet(layer_idx, DeltaNet.A_PROJ)] = inner.a_proj.weight
+                t[Keys.deltanet(layer_idx, DeltaNet.GATE_PROJ)] = inner.gate_proj.weight
+                t[Keys.deltanet(layer_idx, DeltaNet.DT_BIAS)] = inner.dt_bias
+                t[Keys.deltanet(layer_idx, DeltaNet.NORM)] = inner.norm.weight
+            else:
+                for proj, module in (
+                    (Attn.Q_PROJ, attn.q_proj),
+                    (Attn.K_PROJ, attn.k_proj),
+                    (Attn.V_PROJ, attn.v_proj),
+                    (Attn.O_PROJ, attn.o_proj),
+                ):
+                    t[Keys.attn(layer_idx, proj)] = module.weight
             mlp = block.mlp
             if isinstance(mlp, TritonMixtureOfExperts):
                 t[Keys.moe_gate(layer_idx)] = mlp.gate.weight

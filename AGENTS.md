@@ -210,6 +210,11 @@ the dev loop.
 - `shared/config.py` — `TransformerConfig`: single source of truth for every
   dimension (GQA, RoPE, MoE); validated in `__post_init__`, derived fields
   computed.
+- **Hybrid 3:1 Gated DeltaNet (ADR 0006)**: `TransformerConfig.layer_pattern`
+  (e.g. `"dddF"`) picks per-layer mixing — 'd' = Gated DeltaNet (recurrent
+  `S` state in the cache, sequential chunk scan), 'F' = full RoPE attention.
+  NumPy = math reference with analytic BPTT backward (`impl/_np/deltanet.py`);
+  torch/triton/cuda = framework equivalents. Page renders a `deltanet` module.
 - `shared/constants.py` + `shared/registry.py` — the checkpoint contract
   (HF-Llama key scheme; format owner with `validate()`).
 - `impl/_np/model.py` — reference `NumPyModel` (forward, analytic backward,
@@ -218,7 +223,7 @@ the dev loop.
 - `impl/_torch/layers.py` — PyTorch operator mirror (SDPA, GQA repeat before
   SDPA); `impl/_triton/transformer.py` — Triton stack + the documented seam.
 - `scripts/train.py`, `scripts/infer.py`, `scripts/learning.py` — unified
-  4-backend entry points; `scripts/verify_equivalence.py` — 11-scenario
+  4-backend entry points; `scripts/verify_equivalence.py` — 13-scenario
   parity check (`scripts.check_docs` pins the count).
 - `tests/unit/_cuda/conftest.py` — NVRTC per-file context isolation
   (CUDA tests run one file per invocation).
@@ -288,10 +293,11 @@ uv run python -m scripts.check_docs
 - Gradient correctness: `tests/unit/_np/test_gradient_check.py` — analytic
   backward vs finite differences at ~1e-10 (incl. MoE kink handling).
 - End-to-end equivalence: `uv run python -m scripts.verify_equivalence` —
-  11 scenarios (`dense_np_torch`, `gqa_np_torch`, `moe_np_torch`,
+  13 scenarios (`dense_np_torch`, `gqa_np_torch`, `moe_np_torch`,
   `moe_shared_experts_np_torch`, `gqa_torch_triton`, `spec_mtp_np_torch`,
   `spec_dspark_np_torch`, `moe_param_matched_np_torch`,
-  `rl_dense_np_torch`, `cuda_shared_weights`, `all_four_backends`);
+  `rl_dense_np_torch`, `cuda_shared_weights`, `all_four_backends`,
+  `deltanet_np_torch`, `deltanet_all_four`);
   greedy outputs must match.
 - Round-trip guarantee to preserve: save from any backend → load into any
   other → identical logits.

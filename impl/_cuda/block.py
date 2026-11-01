@@ -105,6 +105,61 @@ def _copy_in_place(tensor: torch.Tensor, value: np.ndarray) -> None:
 # ── CUDA block assembly ────────────────────────────────────────────────────────
 
 
+class CuGatedDeltaNet:
+    """Gated DeltaNet sublayer for the CUDA track (ADR 0006).
+
+    Plain-tensor owner (like ``CuTransformerBlock`` — not an nn.Module), but
+    the math delegates to the torch track's ``GatedDeltaNet`` implementation
+    (cuBLAS projections + a readable scan loop). PROD note: a fused NVRTC
+    delta-rule kernel is the production path; at teaching scale the loop is
+    fine and keeps the recurrence inspectable. Cache contract identical to
+    the NumPy track: {"s": (B,H,hd,hd), "s_hist": [...]}.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        n_heads: int,
+        seed: int = 0,
+        layer_index: int | None = None,
+        params: Mapping[str, np.ndarray] | None = None,
+    ) -> None:
+        from impl._torch.layers import GatedDeltaNet
+
+        self._impl = GatedDeltaNet(embed_dim, n_heads, layer_index=layer_index, params=params)
+        # mirror the plain-tensor attribute surface the block/stack code reads
+        self.n_heads = n_heads
+        self.head_dim = embed_dim // n_heads
+        # expose tensors as plain attributes for _param_tensors/_cuda_to_device walks
+        self.q_proj: torch.Tensor = self._impl.q_proj.weight
+        self.k_proj: torch.Tensor = self._impl.k_proj.weight
+        self.v_proj: torch.Tensor = self._impl.v_proj.weight
+        self.o_proj: torch.Tensor = self._impl.o_proj.weight
+        self.a_proj: torch.Tensor = self._impl.a_proj.weight
+        self.gate_proj: torch.Tensor = self._impl.gate_proj.weight
+        self.dt_bias: torch.Tensor = self._impl.dt_bias
+        self.norm_gamma: torch.Tensor = self._impl.norm.weight
+
+    def _to_input(self, x: torch.Tensor) -> None:
+        self._impl.to(device=x.device, dtype=x.dtype if x.dtype.is_floating_point else None)
+
+    def forward(self, x: torch.Tensor, position: int = 0) -> torch.Tensor:
+        self._to_input(x)
+        return self._impl.forward(x, position)
+
+    def forward_state(self, x: torch.Tensor, position: int = 0) -> Result:
+        self._to_input(x)
+        return self._impl.forward_state(x, position)
+
+    def forward_step(self, x: torch.Tensor, position: int, cache: dict) -> torch.Tensor:
+        self._to_input(x)
+        return self._impl.forward_step(x, position, cache)
+
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: dict) -> torch.Tensor:
+        self._to_input(x)
+        return self._impl.forward_chunk(x, position, cache)
+
+
 class CuTransformerBlock:
     """CUDA TransformerBlock — assembly of all CUDA primitives.
 
@@ -130,7 +185,7 @@ class CuTransformerBlock:
     """
 
     # ------------------------------------------------------------------ init
-    def __init__(
+    def __init__(  # noqa: C901 — kind-aware deltanet branch added one path
         self,
         config: TransformerConfig,
         seed: int = 0,
@@ -173,12 +228,23 @@ class CuTransformerBlock:
         self.post_attention_layernorm_gamma.requires_grad_(True)
 
         # ── Attention projections (no bias, Llama convention) ──────────
-        self.q_proj = _init_weight(D, H * hd, seed=seed + 2)
-        self.k_proj = _init_weight(D, G * hd, seed=seed + 3)
-        self.v_proj = _init_weight(D, G * hd, seed=seed + 4)
-        self.o_proj = _init_weight(H * hd, D, seed=seed + 5)
-        for p in (self.q_proj, self.k_proj, self.v_proj, self.o_proj):
-            p.requires_grad_(True)
+        if config.layer_kind(i) == "d":
+            # Gated DeltaNet layer (ADR 0006): owns its own sublayer object;
+            # the block's forward paths dispatch on this type.
+            self.deltanet = CuGatedDeltaNet(
+                D, H, seed=seed + 1, layer_index=i if ckpt is not None else None, params=ckpt
+            )
+            self.q_proj = self.deltanet.q_proj  # attribute aliases keep _param_tensors/_cuda_to_device walks working
+            self.k_proj = self.deltanet.k_proj
+            self.v_proj = self.deltanet.v_proj
+            self.o_proj = self.deltanet.o_proj
+        else:
+            self.q_proj = _init_weight(D, H * hd, seed=seed + 2)
+            self.k_proj = _init_weight(D, G * hd, seed=seed + 3)
+            self.v_proj = _init_weight(D, G * hd, seed=seed + 4)
+            self.o_proj = _init_weight(H * hd, D, seed=seed + 5)
+            for p in (self.q_proj, self.k_proj, self.v_proj, self.o_proj):
+                p.requires_grad_(True)
 
         if config.has_moe():
             # ── MoE: router + SwiGLU experts ───────────────────────────
@@ -224,10 +290,15 @@ class CuTransformerBlock:
         if ckpt is not None:
             _copy_in_place(self.input_layernorm_gamma, ckpt[Keys.ln(i, LayerNorm.INPUT)])
             _copy_in_place(self.post_attention_layernorm_gamma, ckpt[Keys.ln(i, LayerNorm.POST_ATTENTION)])
-            _copy_in_place(self.q_proj, ckpt[Keys.attn(i, Attn.Q_PROJ)])
-            _copy_in_place(self.k_proj, ckpt[Keys.attn(i, Attn.K_PROJ)])
-            _copy_in_place(self.v_proj, ckpt[Keys.attn(i, Attn.V_PROJ)])
-            _copy_in_place(self.o_proj, ckpt[Keys.attn(i, Attn.O_PROJ)])
+            if hasattr(self, "deltanet"):
+                # DeltaNet layer: the sublayer object already injected its own
+                # slice at construction; the q/k/v/o aliases share that storage.
+                pass
+            else:
+                _copy_in_place(self.q_proj, ckpt[Keys.attn(i, Attn.Q_PROJ)])
+                _copy_in_place(self.k_proj, ckpt[Keys.attn(i, Attn.K_PROJ)])
+                _copy_in_place(self.v_proj, ckpt[Keys.attn(i, Attn.V_PROJ)])
+                _copy_in_place(self.o_proj, ckpt[Keys.attn(i, Attn.O_PROJ)])
             if config.has_moe():
                 _copy_in_place(self.router, ckpt[Keys.moe_gate(i)])
                 for e in range(E):
@@ -264,6 +335,17 @@ class CuTransformerBlock:
         B, S, D = x.shape
         device = x.device
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
+
+        if hasattr(self, "deltanet"):
+            # ADR 0006 DeltaNet layer: the whole mixing sublayer is the recurrent
+            # scan; then the same pre-norm FFN/residual as the attention path.
+            xn = rmsnorm(x, self.input_layernorm_gamma.to(device), eps=self.config.norm_eps)
+            attn_out = self.deltanet.forward(xn, position).to(device)
+            h = x + attn_out
+            hn = rmsnorm(h, self.post_attention_layernorm_gamma.to(device), eps=self.config.norm_eps)
+            if self.config.has_moe():
+                return h + self._moe_forward(hn, device)
+            return h + swiglu_ffn(hn, self.gate_proj.to(device), self.up_proj.to(device), self.down_proj.to(device))
 
         # Move weights to the input's device (caller may have built them on CPU)
         Wq, Wk, Wv, Wo = (
@@ -337,6 +419,19 @@ class CuTransformerBlock:
         device = x.device
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
 
+        if hasattr(self, "deltanet"):
+            xn = rmsnorm(x, self.input_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
+            res = self.deltanet.forward_state(xn, position)
+            h = x + res.value
+            hn = rmsnorm(h, self.post_attention_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
+            if self.config.has_moe():
+                out = h + self._moe_forward(hn, x.device)
+            else:
+                out = h + swiglu_ffn(
+                    hn, self.gate_proj.to(x.device), self.up_proj.to(x.device), self.down_proj.to(x.device)
+                )
+            return Result.capture(out, {}, dict(res.ctx.display))
+
         Wq, Wk, Wv, Wo = (
             self.q_proj.to(device),
             self.k_proj.to(device),
@@ -382,8 +477,19 @@ class CuTransformerBlock:
     def forward_step(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
         # Fail fast on a schema mismatch: these tracks build only the naive
         # {'k','v'} cache (make_cache has no quantize mode).
-        missing = [k for k in ("k", "v") if k not in cache]
-        assert not missing, f"forward_step needs a naive {{'k','v'}} cache (missing keys: {missing})"
+        if not hasattr(self, "deltanet"):
+            missing = [k for k in ("k", "v") if k not in cache]
+            assert not missing, f"forward_step needs a naive {{'k','v'}} cache (missing keys: {missing})"
+        if hasattr(self, "deltanet"):
+            xn = rmsnorm(x, self.input_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
+            attn_out = self.deltanet.forward_step(xn, position, cache)
+            h = x + attn_out
+            hn = rmsnorm(h, self.post_attention_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
+            if self.config.has_moe():
+                return h + self._moe_forward(hn, x.device)
+            return h + swiglu_ffn(
+                hn, self.gate_proj.to(x.device), self.up_proj.to(x.device), self.down_proj.to(x.device)
+            )
         """Process ONE new token against this block's cached K/V (KV-cached path).
 
         Mirrors ``impl._torch.layers.TransformerBlock.forward_step`` (which
@@ -455,6 +561,17 @@ class CuTransformerBlock:
 
         Returns: out (B, c, D).
         """
+        if hasattr(self, "deltanet"):
+            B, c, _ = x.shape
+            xn = rmsnorm(x, self.input_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
+            attn_out = self.deltanet.forward_chunk(xn, position, cache)
+            h = x + attn_out
+            hn = rmsnorm(h, self.post_attention_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
+            if self.config.has_moe():
+                return h + self._moe_forward(hn, x.device)
+            return h + swiglu_ffn(
+                hn, self.gate_proj.to(x.device), self.up_proj.to(x.device), self.down_proj.to(x.device)
+            )
         B, c, _ = x.shape
         device = x.device
         H, G, hd = self.n_heads, self.n_groups, self.head_dim

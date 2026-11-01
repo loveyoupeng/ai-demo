@@ -53,6 +53,19 @@ Known deltas, kept consciously:
 
 ## Architecture
 
+### Hybrid layer pattern (ADR 0006)
+
+`TransformerConfig.layer_pattern` (e.g. `"dddF"`, repeating over `n_layers`)
+picks each layer's mixing sublayer: **'F'** = full RoPE attention, **'d'** =
+Gated DeltaNet (linear attention — a per-head recurrent state `S (hd, hd)`
+updated by the delta rule, O(hd²) per token, no history read). The 3:1
+DeltaNet:attention ratio is the Qwen3-Next/Kimi-Linear hybrid shape. DeltaNet
+layers carry `{"s", "s_hist"}` in their cache instead of K/V rows; spec
+verification scans DeltaNet layers sequentially and snapshots S per position
+for rollback (greedy spec stays lossless). See ADR 0006 and
+`impl/_np/deltanet.py` (the math reference, with analytic BPTT backward).
+
+
 ```mermaid
 flowchart TD
     GPU["PyTorch / Triton / CUDA tracks"] --> CFG["Shared Config + TransformerConfig<br/>(shared/config.py)"]
