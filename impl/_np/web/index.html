@@ -507,6 +507,13 @@ function blockParamKeys(nodeId) {
   const t = sub.replace(/^attn\./, "self_attn.").replace(/^ffn\./, "mlp.").replace(/^deltanet\./, "deltanet.");
   const map = {
     "ln1": [`${L}.input_layernorm.weight`],
+    "attn": [`${L}.self_attn.q_proj.weight`, `${L}.self_attn.k_proj.weight`, `${L}.self_attn.v_proj.weight`, `${L}.self_attn.o_proj.weight`],
+    "deltanet": [`${L}.deltanet.q_proj.weight`, `${L}.deltanet.k_proj.weight`, `${L}.deltanet.v_proj.weight`, `${L}.deltanet.o_proj.weight`, `${L}.deltanet.a_proj.weight`, `${L}.deltanet.gate_proj.weight`],
+    "ffn": [`${L}.mlp.gate_proj.weight`, `${L}.mlp.up_proj.weight`, `${L}.mlp.down_proj.weight`],
+    "moe": [`${L}.mlp.gate.weight`],
+    "h": [],
+    "out": [],
+    "cache": [],
     "ln2": [`${L}.post_attention_layernorm.weight`],
     "self_attn.q": [`${L}.self_attn.q_proj.weight`],
     "self_attn.k": [`${L}.self_attn.k_proj.weight`],
@@ -1255,6 +1262,7 @@ function buildDiagram() {
   const blockTops = [];
   for (let i = 0; i < c.n_layers; i++) {
     const kind = (MODEL.layer_kinds || [])[i] || "F";
+    const mix = kind === "d" ? `b${i}.deltanet` : `b${i}.attn`;
     const by = HEAD_H + i * (BLOCK_H + BLOCK_GAP);
     blockTops.push(by);
     const lbl = svgEl("text", { class: "blklabel", x: ML, y: by - 8 });
@@ -2085,7 +2093,27 @@ function renderInspector() {
   }
 
   if (!view) {
-    body.innerHTML = '<p class="note">Pick a module in the diagram to see its tensors and math.</p>';
+    // No specific view for this node (e.g. the footer "softmax" default after
+    // Generate + record): fall back to the EXPLAIN card + learned weights so
+    // the inspector is never blank once a record exists.
+    const exKey0 = id.replace(/^b\d+\./, "");
+    const exInfo0 = EXPLAIN[exKey0];
+    if (exInfo0) {
+      const ex = document.createElement("div");
+      ex.className = "explain";
+      const what = document.createElement("div");
+      what.className = "ex-what";
+      what.textContent = exInfo0.what;
+      const why = document.createElement("div");
+      why.className = "ex-why";
+      why.textContent = exInfo0.why;
+      ex.appendChild(what);
+      ex.appendChild(why);
+      body.appendChild(ex);
+    } else {
+      body.innerHTML = '<p class="note">Pick a module in the diagram to see its tensors and math.</p>';
+    }
+    weightsBlock(body, id).then(() => body.querySelectorAll(".formula").forEach(renderTex));
     return;
   }
   const exKey = id.replace(/^b\d+\./, "");
