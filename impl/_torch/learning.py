@@ -391,7 +391,7 @@ def _ffn_f64(mlp, x: torch.Tensor) -> torch.Tensor:
     """Dense SwiGLU or MoE forward in float64 from the module's weights."""
     import torch.nn.functional as F
 
-    if isinstance(mlp, MixtureOfExperts):
+    if hasattr(mlp, "expert_list"):  # torch MixtureOfExperts or TritonMixtureOfExperts
         scores = x @ mlp.gate.weight.detach().cpu().to(torch.float64).T
         probs = stable_softmax_t(scores, dim=-1)
         E = mlp.n_experts
@@ -473,10 +473,10 @@ def instrumented_forward(model: TorchModel, input_ids: torch.Tensor) -> tuple[Fo
             block_rec["deltanet"] = attn_rec  # type: ignore[typeddict-item]
         else:
             block_rec["attn"] = attn_rec  # type: ignore[typeddict-item]
-        if isinstance(mlp, MixtureOfExperts):
-            block_rec["moe"] = _moe_record(mlp, ln2_out, ff_out)
+        if hasattr(mlp, "expert_list"):  # torch MixtureOfExperts or TritonMixtureOfExperts
+            block_rec["moe"] = _moe_record(mlp, ln2_out, ff_out)  # type: ignore[arg-type]
         else:
-            block_rec["ffn"] = _ffn_record(mlp, ln2_out, ff_out)
+            block_rec["ffn"] = _ffn_record(mlp, ln2_out, ff_out)  # type: ignore[arg-type]
         blocks.append(block_rec)
         stream = out
 
@@ -696,10 +696,10 @@ def generate_with_records(
                 block_rec["deltanet"] = attn_rec  # type: ignore[typeddict-item]
             else:
                 block_rec["attn"] = attn_rec  # type: ignore[typeddict-item]
-            if isinstance(mlp, MixtureOfExperts):
-                block_rec["moe"] = _moe_record(mlp, ln2_out, ff_out)
+            if hasattr(mlp, "expert_list"):  # torch MixtureOfExperts or TritonMixtureOfExperts
+                block_rec["moe"] = _moe_record(mlp, ln2_out, ff_out)  # type: ignore[arg-type]
             else:
-                block_rec["ffn"] = _ffn_record(mlp, ln2_out, ff_out)
+                block_rec["ffn"] = _ffn_record(mlp, ln2_out, ff_out)  # type: ignore[arg-type]
             blocks.append(block_rec)
             stream = out
 

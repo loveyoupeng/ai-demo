@@ -109,11 +109,19 @@ The AMP contract in this repo is deliberately simple and honest:
   back to float32 on save (`impl/_torch/layers.py`). Optimizer state (AdamW
   moments) stays FP32. So BF16 affects only training speed and numeric
   range — never the stored weights, never the cross-backend parity.
-- **Serving casts back to float32.** `load_learning_model` (the learning
-  page's loader) casts torch/triton/cuda serving models to float32, so the
-  page's records (which display in float64) and the drafter sidecars (float32)
-  all agree on one dtype. A BF16 target beside float32 drafters is exactly the
-  mixed-dtype matmul the page must never hit.
+- **Serving runs in BF16 on the GPU tracks.** `load_learning_model` keeps the
+  checkpoint's dtype (BF16) as the *running* model parameter dtype — the
+  industry shape (weights and compute both BF16, tensor-core matmuls). The
+  page's record adapters recompute every displayed intermediate in float64
+  from the parameters (CPU display path), and the drafter sidecars are cast
+  to the target's dtype (`drafter_from_sidecar`), so BF16 serving is exact on
+  the page and dtype-clean beside the drafters. The CUDA track's NVRTC
+  kernels are compiled for float/double only, so BF16 activations are upcast
+  at the kernel entry points (`impl/_cuda/{activation,layernorm,rope,attention,ffn}.py`).
+  Cross-backend greedy outputs can still diverge by one token at near-tie
+  logits (BF16's 7-bit mantissa rounds a 0.018-logit gap into a tie); the
+  lossless contract (spec ≡ plain) holds *within* each backend, and the NumPy
+  track stays float64/float32 as the exact reference.
 - **Stability-critical ops upcast to FP32 even in BF16 training.** RoPE
   computes in float32 and casts back (`impl/_torch/layers.py` `RoPE.forward`);
   RMSNorm's mean-of-squares is accumulated in the input dtype but the division

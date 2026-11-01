@@ -221,7 +221,9 @@ class SpeculativeGenerator:
         block, so its K/V row and its hidden state do not exist until this
         pass — production MTP serving has the same shape.
         """
-        device = cache[0]["k"].device
+        # first layer's cache picks the device — DeltaNet layers carry "s" instead of "k"
+        first = cache[0]
+        device = first["k"].device if "k" in first else first["s"].device
         token_ids = torch.tensor([[token]], dtype=torch.long, device=device)
         logits, x_final = self.model.forward_chunk(token_ids, position, cache)
         return logits, x_final[:, -1, :]  # (1, 1, V), (1, D) — the anchor's

@@ -65,7 +65,12 @@ if TYPE_CHECKING:
 # real forward is bf16-rounded while the display path recomputes in float64 —
 # the gap is bf16 mantissa noise, hence the looser tier here (the NumPy/Torch
 # record parity stays at the strict 1e-2 tier on float64/float32 models).
-_TOLERANCES = {"rtol": 2e-2, "atol": 2e-1}
+# The CUDA model SERVES in BF16 (the checkpoint's running dtype), so the real
+# forward is bf16-rounded while the display path recomputes in float64. The
+# MoE router's top-k makes bf16 noise amplify through the expert sum, hence
+# the looser atol tier (the NumPy/Torch record parity stays at the strict
+# 1e-2 tier on float64/float32 models).
+_TOLERANCES = {"rtol": 5e-2, "atol": 1.0}
 
 
 # ---------------------------------------------------------------------------

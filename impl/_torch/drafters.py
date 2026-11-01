@@ -96,8 +96,8 @@ def _rope_apply(x: torch.Tensor, position: int = 0, rope_dim: int = 0) -> torch.
     y_even = x_even * cos_b - x_odd * sin_b  # (B, S, H, pair_dim)
     y_odd = x_even * sin_b + x_odd * cos_b  # (B, S, H, pair_dim)
     rotated = torch.stack([y_even, y_odd], dim=-1).reshape(x_rot.shape)  # (B, S, H, d_rot)
-    if x_pass is not None:
-        return torch.cat([rotated, x_pass], dim=-1)  # (B, S, H, D)
+    out = torch.cat([rotated, x_pass], dim=-1) if x_pass is not None else rotated  # (B, S, H, D)
+    return out.to(x.dtype)  # tables are float32; cast back so SDPA sees one dtype
     return rotated
 
 
@@ -356,7 +356,14 @@ class TorchMTPDrafter(nn.Module):
         # The distillation path moves the drafter across devices/batches
         # (.to(device), batch-64 anchors); rebuild the tiny cache when its
         # shape/device no longer matches this call.
-        if self._cache["k"].shape[0] != B or self._cache["k"].device != anchor_hidden.device:
+        # rebuild when batch/device/dtype drift (the drafter is cast to the
+        # target's dtype AFTER construction — e.g. BF16 serving — so the cache
+        # must follow the current parameter dtype, not the init-time one).
+        if (
+            self._cache["k"].shape[0] != B
+            or self._cache["k"].device != anchor_hidden.device
+            or self._cache["k"].dtype != self.norm.weight.dtype
+        ):
             G, hd = self.block.n_groups, self.block.head_dim
             self._cache = {
                 "k": torch.zeros(B, G, 0, hd, device=anchor_hidden.device, dtype=self.norm.weight.dtype),
