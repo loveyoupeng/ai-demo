@@ -541,6 +541,9 @@ def apply_rope(
 ) -> torch.Tensor:
     """Apply Rotary Positional Embedding via CUDA kernel.
 
+    BF16 inputs are upcast to float32 for the kernel (compiled float/double
+    only) and cast back on return.
+
     RoPE encodes absolute position information into each query/key vector
     by applying a position-dependent rotation in 2D subspaces. Tokens at
     different positions rotate by different angles, creating a rich
@@ -598,8 +601,12 @@ def apply_rope(
     Su et al. "RoFormer: Enhanced Transformer with Rotary Position Embedding"
     https://arxiv.org/abs/2104.09864
     """
+    orig_dtype = x.dtype
+    if x.dtype == torch.bfloat16:
+        x = x.float()
     # The one place the position array is built: consecutive positions
     # starting at `position` (the caller passes the int).
     S = x.shape[1]
     positions = torch.arange(position, position + S, device=x.device, dtype=torch.long)
-    return _RoPECudaFunction.apply(x, positions, rope_dim)
+
+    return _RoPECudaFunction.apply(x, positions, rope_dim).to(orig_dtype)

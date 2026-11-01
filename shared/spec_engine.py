@@ -195,8 +195,10 @@ class SpeculativeGenerator:
         position n from s_hist and truncate the snapshot list."""
         for layer in cache:
             if "s" in layer:
-                layer["s"] = layer["s_hist"][n].clone()
-                del layer["s_hist"][n + 1 :]
+                # s_hist[i] is the state AFTER position i; keep positions
+                # 0..n-1 (like the K/V slice :n) → restore s_hist[n-1].
+                layer["s"] = layer["s_hist"][n - 1].clone()
+                del layer["s_hist"][n:]
             else:
                 layer["k"] = layer["k"][:, :, :n]
                 layer["v"] = layer["v"][:, :, :n]

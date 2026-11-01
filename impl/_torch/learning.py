@@ -111,10 +111,10 @@ def _attn_record(attn: MultiHeadAttention, ln1_out: torch.Tensor, position: int)
     H, G, hd = attn.n_heads, attn.n_groups, attn.head_dim
 
     # Projections: (B, S, D) → (B, S, ·)
-    x = ln1_out.to(torch.float64)
+    x = ln1_out.detach().cpu().to(torch.float64)  # display path runs on CPU in f64
 
     def W(lin):
-        return lin.weight.detach().to(torch.float64).T
+        return lin.weight.detach().cpu().to(torch.float64).T
 
     q_pre = x @ W(attn.q_proj)  # (B, S, H·hd)
     k_pre = x @ W(attn.k_proj)  # (B, S, G·hd)
@@ -136,13 +136,13 @@ def _attn_record(attn: MultiHeadAttention, ln1_out: torch.Tensor, position: int)
     # Raw scores + causal mask (recomputed; the record shows pre/post mask)
     scale = math.sqrt(hd)  # the scores DIVISOR
     scores = (q @ k.transpose(-1, -2)) / scale  # (B, H, S, S)
-    mask = torch.triu(torch.ones(S, S, dtype=torch.bool, device=ln1_out.device), diagonal=1)  # True where j > i
-    neg = torch.tensor(-1e4, dtype=ln1_out.dtype, device=ln1_out.device)
+    mask = torch.triu(torch.ones(S, S, dtype=torch.bool), diagonal=1)  # True where j > i (CPU f64 display)
+    neg = torch.tensor(-1e4, dtype=torch.float64)
     scores_masked = torch.where(mask, neg, scores)  # (B, H, S, S)
 
     attn_w = stable_softmax_t(scores_masked, dim=-1)  # (B, H, S, S)
     ctx = (attn_w @ v).permute(0, 2, 1, 3).reshape(B, S, H * hd)  # (B, S, H·hd)
-    attn_out = ctx @ W(attn.o_proj)  # (B, S, D)
+    attn_out = (ctx @ W(attn.o_proj)).to(ln1_out.device, ln1_out.dtype)  # (B, S, D)
 
     return attn_out, {
         "q_pre": arr(q_pre),  # (B, S, H·hd) — ln1_out @ Wq
@@ -176,6 +176,9 @@ def _init_kv_cache(attn: MultiHeadAttention, k_pre: torch.Tensor, v_pre: torch.T
     with the pass's positions so later decode steps only rotate the NEW
     token and can attend to these cached rows unchanged.
     """
+    dev = attn.q_proj.weight.device
+    k_pre = k_pre.to(dev)
+    v_pre = v_pre.to(dev)
     B, S, _ = k_pre.shape
     G, hd = attn.n_groups, attn.head_dim
     k_heads = k_pre.view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd) pre-RoPE
@@ -198,14 +201,14 @@ def _attn_step_record(
     """
     # PROD: production path is F.scaled_dot_product_attention inside
     # MultiHeadAttention.forward — the fused call is the default and unchanged.
-    # The DISPLAY path recomputes in float64 regardless of the model's dtype
-    # (BF16 serving): cast the input and the weights.
-    x = x.to(torch.float64)
+    # The DISPLAY path recomputes on CPU in float64 regardless of the model's
+    # device/dtype (BF16 serving on GPU): move the input to CPU, cast the weights.
+    x = x.detach().cpu().to(torch.float64)
     B = x.shape[0]
     H, G, hd = attn.n_heads, attn.n_groups, attn.head_dim
 
     def W(lin):
-        return lin.weight.detach().to(torch.float64).T
+        return lin.weight.detach().cpu().to(torch.float64).T
 
     q_pre = x @ W(attn.q_proj)  # (B, 1, H·hd)
     k_pre = x @ W(attn.k_proj)  # (B, 1, G·hd)
@@ -218,22 +221,31 @@ def _attn_step_record(
 
     # Append the new row to the block's cache (mutated in place, like the
     # NumPy track's forward_step).
-    cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t, hd)
-    cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t, hd)
+    cache["k"] = torch.cat([cache["k"], k.to(cache["k"].device, cache["k"].dtype)], dim=2)  # (B, G, t, hd)
+    cache["v"] = torch.cat([cache["v"], v.to(cache["v"].device, cache["v"].dtype)], dim=2)  # (B, G, t, hd)
 
     if G != H:  # GQA: broadcast each group to its query heads (display parity with _attn_record)
         k = k.repeat_interleave(H // G, dim=1)  # (B, H, 1, hd)
         v = v.repeat_interleave(H // G, dim=1)  # (B, H, 1, hd)
-    k_r = cache["k"].repeat_interleave(H // G, dim=1) if G != H else cache["k"]  # (B, H, t, hd)
-    v_r = cache["v"].repeat_interleave(H // G, dim=1) if G != H else cache["v"]  # (B, H, t, hd)
+    # the display path computes on CPU f64 — pull the cache rows to CPU for it
+    k_r = (
+        cache["k"].detach().cpu().to(torch.float64).repeat_interleave(H // G, dim=1)
+        if G != H
+        else cache["k"].detach().cpu().to(torch.float64)
+    )  # (B, H, t, hd)
+    v_r = (
+        cache["v"].detach().cpu().to(torch.float64).repeat_interleave(H // G, dim=1)
+        if G != H
+        else cache["v"].detach().cpu().to(torch.float64)
+    )  # (B, H, t, hd)
     t = k_r.shape[2]
 
     scale = math.sqrt(hd)
     scores = (q @ k_r.transpose(-1, -2)) / scale  # (B, H, 1, t) over the WHOLE cache
-    mask = torch.zeros(1, t, dtype=torch.bool, device=x.device)  # nothing masked in decode
+    mask = torch.zeros(1, t, dtype=torch.bool)  # nothing masked in decode (CPU f64 display)
     attn_w = stable_softmax_t(scores, dim=-1)  # (B, H, 1, t) — nothing masked in decode
     ctx = (attn_w @ v_r).permute(0, 2, 1, 3).reshape(B, 1, H * hd)  # (B, 1, H·hd)
-    out = ctx @ W(attn.o_proj)  # (B, 1, D)
+    out = (ctx @ W(attn.o_proj)).to(x.device, x.dtype)  # (B, 1, D)
 
     return out, {
         "q_pre": arr(q_pre),  # (B, 1, H·hd)
@@ -259,9 +271,9 @@ def _attn_step_record(
 
 def _ffn_record(mlp: SwiGLUFFN, x: torch.Tensor, out: torch.Tensor) -> FFNRecord:
     """Capture dense SwiGLU: pre_gate, gate (post-SiLU), up, gated, output."""
-    pre_gate = x @ mlp.gate_proj.detach().to(torch.float64)  # (B, S, FF)
+    pre_gate = x @ mlp.gate_proj.detach().cpu().to(torch.float64)  # (B, S, FF)
     gate = F.silu(pre_gate)  # (B, S, FF)
-    up = x @ mlp.up_proj.detach().to(torch.float64)  # (B, S, FF)
+    up = x @ mlp.up_proj.detach().cpu().to(torch.float64)  # (B, S, FF)
     gated = gate * up  # (B, S, FF)
     return {
         "pre_gate": arr(pre_gate),
@@ -276,7 +288,7 @@ def _ffn_record(mlp: SwiGLUFFN, x: torch.Tensor, out: torch.Tensor) -> FFNRecord
 def _moe_record(mlp: MixtureOfExperts, x: torch.Tensor, out: torch.Tensor) -> MoERecord:
     """Capture MoE: router scores, softmax probs, top-k selection, per-expert outputs."""
     E = mlp.n_experts
-    scores = x @ mlp.gate.weight.detach().to(torch.float64).T  # (B, S, E)
+    scores = x @ mlp.gate.weight.detach().cpu().to(torch.float64).T  # (B, S, E)
     scores_stable = scores - scores.max(dim=-1, keepdim=True).values  # (B, S, E)
     probs = stable_softmax_t(scores, dim=-1)  # (B, S, E)
     if mlp.top_k < E:
@@ -304,7 +316,9 @@ def _moe_record(mlp: MixtureOfExperts, x: torch.Tensor, out: torch.Tensor) -> Mo
     }
 
 
-def _deltanet_record(dn, ln1_out: torch.Tensor, out: torch.Tensor) -> tuple[torch.Tensor, DeltaNetRecord]:
+def _deltanet_record(
+    dn, ln1_out: torch.Tensor, out: torch.Tensor, s_init: torch.Tensor | None = None
+) -> tuple[torch.Tensor, DeltaNetRecord]:
     """Recompute the DeltaNet scan's intermediates in float64 (display path).
 
     The production path is the scan loop; the record re-derives q/k/v, the
@@ -316,11 +330,11 @@ def _deltanet_record(dn, ln1_out: torch.Tensor, out: torch.Tensor) -> tuple[torc
 
     B, S, _ = ln1_out.shape
     H, hd = dn.n_heads, dn.head_dim
-    x = ln1_out.double()
+    x = ln1_out.detach().cpu().double()  # display path runs on CPU in f64
 
     def W(lin):
 
-        return lin.weight.detach().double().T  # (in, out); x @ W == F.linear(x, W)
+        return lin.weight.detach().cpu().double().T  # (in, out); x @ W == F.linear(x, W)
 
     q = x @ W(dn.q_proj)  # (B,S,H*hd)
     k = x @ W(dn.k_proj)
@@ -330,10 +344,14 @@ def _deltanet_record(dn, ln1_out: torch.Tensor, out: torch.Tensor) -> tuple[torc
     vh = v.view(B, S, H, hd).permute(0, 2, 1, 3)
     qn = dn._l2norm(qh)
     kn = dn._l2norm(kh)
-    beta = th.sigmoid(x @ W(dn.a_proj) + dn.dt_bias.detach().double())  # (B,S,H)
+    beta = th.sigmoid(x @ W(dn.a_proj) + dn.dt_bias.detach().cpu().double())  # (B,S,H)
     beta = beta.permute(0, 2, 1)[..., None]  # (B,H,S,1)
     alpha = th.sigmoid(x @ W(dn.gate_proj))  # (B,S,D)
-    s = th.zeros(B, H, hd, hd, dtype=x.dtype, device=x.device)
+    s = (
+        s_init.detach().cpu().to(torch.float64)
+        if s_init is not None
+        else th.zeros(B, H, hd, hd, dtype=x.dtype, device=x.device)
+    )
     outs, ss = [], []
     for t in range(S):
         kt, vt, qt = kn[:, :, t], vh[:, :, t], qn[:, :, t]
@@ -360,12 +378,13 @@ def _deltanet_record(dn, ln1_out: torch.Tensor, out: torch.Tensor) -> tuple[torc
         "s_hist": arr(th.stack(ss, dim=2)),
         "out": arr(alpha * dn.norm(pre_o.to(ln1_out.dtype)).double().to(ln1_out.dtype) if False else (alpha * pre_o)),
     }
-    # the sublayer output actually used downstream: alpha * norm(pre_o) @ ... —
-    # recompute exactly as the module does, in the model's dtype
-    with th.no_grad():
-        out_t = alpha.to(ln1_out.dtype) * dn.norm(pre_o.to(ln1_out.dtype))
+    # the sublayer output actually used downstream, recomputed in f64 on CPU
+    # (RMSNorm in f64 from the raw gamma): out = alpha * (pre_o / rms * gamma)
+    gamma = dn.norm.weight.detach().cpu().double()
+    rms = th.sqrt(th.mean(pre_o * pre_o, dim=-1, keepdim=True) + dn.norm.eps)
+    out_t = alpha * (pre_o / rms * gamma)
     rec["out"] = arr(out_t)
-    return out_t, rec
+    return out_t.to(ln1_out.device, ln1_out.dtype), rec
 
 
 def _ffn_f64(mlp, x: torch.Tensor) -> torch.Tensor:
@@ -373,7 +392,7 @@ def _ffn_f64(mlp, x: torch.Tensor) -> torch.Tensor:
     import torch.nn.functional as F
 
     if isinstance(mlp, MixtureOfExperts):
-        scores = x @ mlp.gate.weight.detach().to(torch.float64).T
+        scores = x @ mlp.gate.weight.detach().cpu().to(torch.float64).T
         probs = stable_softmax_t(scores, dim=-1)
         E = mlp.n_experts
         if mlp.top_k < E:
@@ -383,20 +402,20 @@ def _ffn_f64(mlp, x: torch.Tensor) -> torch.Tensor:
         out = torch.zeros_like(x)
         for j, expert in enumerate(mlp.expert_list):
             w = probs[..., j : j + 1]
-            g = F.silu(x @ expert.gate_proj.detach().to(torch.float64))
-            u = x @ expert.up_proj.detach().to(torch.float64)
-            out = out + w * ((g * u) @ expert.down_proj.detach().to(torch.float64))
+            g = F.silu(x @ expert.gate_proj.detach().cpu().to(torch.float64))
+            u = x @ expert.up_proj.detach().cpu().to(torch.float64)
+            out = out + w * ((g * u) @ expert.down_proj.detach().cpu().to(torch.float64))
         if mlp.shared_expert_list:
             ssum = torch.zeros_like(x)
             for sh in mlp.shared_expert_list:
-                g = F.silu(x @ sh.gate_proj.detach().to(torch.float64))
-                u = x @ sh.up_proj.detach().to(torch.float64)
-                ssum = ssum + (g * u) @ sh.down_proj.detach().to(torch.float64)
+                g = F.silu(x @ sh.gate_proj.detach().cpu().to(torch.float64))
+                u = x @ sh.up_proj.detach().cpu().to(torch.float64)
+                ssum = ssum + (g * u) @ sh.down_proj.detach().cpu().to(torch.float64)
             out = out + ssum / len(mlp.shared_expert_list)
         return out
-    g = F.silu(x @ mlp.gate_proj.detach().to(torch.float64))
-    u = x @ mlp.up_proj.detach().to(torch.float64)
-    return (g * u) @ mlp.down_proj.detach().to(torch.float64)
+    g = F.silu(x @ mlp.gate_proj.detach().cpu().to(torch.float64))
+    u = x @ mlp.up_proj.detach().cpu().to(torch.float64)
+    return (g * u) @ mlp.down_proj.detach().cpu().to(torch.float64)
 
 
 def instrumented_forward(model: TorchModel, input_ids: torch.Tensor) -> tuple[ForwardRecord, dict]:
@@ -416,15 +435,15 @@ def instrumented_forward(model: TorchModel, input_ids: torch.Tensor) -> tuple[Fo
 
     # Embedding: (B, S) → (B, S, D) — display path runs in float64 regardless
     # of the model's serving dtype (BF16): cast the weights on the fly.
-    emb = model.embedding.weight.detach().to(torch.float64)[x]
+    emb = model.embedding.weight.detach().cpu().to(torch.float64)[x.detach().cpu()]
 
     # Blocks: each runs through the real component; intermediates captured.
     stream = emb
     blocks: list[BlockRecord] = []
     for block in model.stack.blocks:
         ln1 = block.input_layernorm
-        stream = stream.to(torch.float64)
-        ln1_w = ln1.weight.detach().to(torch.float64)
+        stream = stream.detach().cpu().to(torch.float64)
+        ln1_w = ln1.weight.detach().cpu().to(torch.float64)
         ln1_out = stream / torch.sqrt(torch.mean(stream * stream, dim=-1, keepdim=True) + ln1.eps) * ln1_w  # (B, S, D)
         from impl._torch.layers import GatedDeltaNet
 
@@ -435,7 +454,9 @@ def instrumented_forward(model: TorchModel, input_ids: torch.Tensor) -> tuple[Fo
         h = stream + attn_out  # (B, S, D) residual after attention
         ln2 = block.post_attention_layernorm
         ln2_out = (
-            h / torch.sqrt(torch.mean(h * h, dim=-1, keepdim=True) + ln2.eps) * ln2.weight.detach().to(torch.float64)
+            h
+            / torch.sqrt(torch.mean(h * h, dim=-1, keepdim=True) + ln2.eps)
+            * ln2.weight.detach().cpu().to(torch.float64)
         )  # (B, S, D)
         mlp = block.mlp
         ff_out = _ffn_f64(mlp, ln2_out)  # (B, S, D)
@@ -465,9 +486,9 @@ def instrumented_forward(model: TorchModel, input_ids: torch.Tensor) -> tuple[Fo
     normed = (
         stream
         / torch.sqrt(torch.mean(stream * stream, dim=-1, keepdim=True) + fn.eps)
-        * fn.weight.detach().to(torch.float64)
+        * fn.weight.detach().cpu().to(torch.float64)
     )
-    logits = normed @ model.lm_head.weight.detach().to(torch.float64).T
+    logits = normed @ model.lm_head.weight.detach().cpu().to(torch.float64).T
 
     # Display extras: the softmax distribution + top tokens at the last position.
     p = stable_softmax_t(logits, dim=-1)  # (B, S, V)
@@ -606,9 +627,6 @@ def generate_with_records(
     pos0 = len(seq) - 1 - len(p0)
     caches: list[dict] = []
     for i, block in enumerate(model.stack.blocks):
-        r = rec["blocks"][i]["attn"]
-        # (as in the NumPy track) the cache is initialized from the recorded
-        # pre-RoPE projections, so the display and the state agree exactly.
         from impl._torch.layers import GatedDeltaNet as _GDNk
 
         if isinstance(block.self_attn, _GDNk):
@@ -618,10 +636,13 @@ def generate_with_records(
             )
             hist: list = []
             if dn0 is not None:
-                s0 = torch.tensor(dn0["s_hist"][0][-1], dtype=torch.float64)
-                hist = [torch.tensor(dn0["s_hist"][0][t], dtype=torch.float64) for t in range(len(dn0["s_hist"][0]))]
+                sh = np.array(dn0["s_hist"])  # (B, H, S, hd, hd)
+                dev = block.self_attn.q_proj.weight.device
+                s0 = torch.tensor(sh[:, :, -1], dtype=torch.float64, device=dev)
+                hist = [torch.tensor(sh[:, :, t], dtype=torch.float64, device=dev) for t in range(sh.shape[2])]
             caches.append({"s": s0, "s_hist": hist})
         else:
+            r = rec["blocks"][i]["attn"]
             caches.append(
                 _init_kv_cache(block.self_attn, torch.tensor(r["k_pre"]), torch.tensor(r["v_pre"]), pos0)  # type: ignore[arg-type]
             )
@@ -630,7 +651,9 @@ def generate_with_records(
     for i in range(1, n_tokens):
         t = len(seq) - 1  # absolute position of the new token
         x1 = torch.tensor([[seq[-1]]], dtype=torch.int64)  # (1, 1)
-        emb = model.embedding.weight.detach().to(torch.float64)[x1]  # (1, 1, D) — f64 display path
+        emb = (
+            model.embedding.weight.detach().cpu().to(torch.float64)[x1.detach().cpu()]
+        )  # (1, 1, D) — CPU f64 display path
         stream = emb
         blocks: list[BlockRecord] = []
         for j, block in enumerate(model.stack.blocks):
@@ -638,31 +661,17 @@ def generate_with_records(
             ln1_out = (
                 stream
                 / torch.sqrt(torch.mean(stream * stream, dim=-1, keepdim=True) + ln1.eps)
-                * ln1.weight.detach().to(torch.float64)
+                * ln1.weight.detach().cpu().to(torch.float64)
             )  # (1, 1, D)
             from impl._torch.layers import GatedDeltaNet as _GDNs
 
             if isinstance(block.self_attn, _GDNs):
-                attn_out, attn_rec = _deltanet_record(block.self_attn, ln1_out, ln1_out.new_zeros(ln1_out.shape))
-                # feed the S-state cache for deltanet layers
-                if "s" not in caches[j]:
-                    caches[j] = {
-                        "s": torch.zeros(
-                            1,
-                            block.self_attn.n_heads,
-                            block.self_attn.head_dim,
-                            block.self_attn.head_dim,
-                            dtype=torch.float64,
-                        ),
-                        "s_hist": [],
-                    }
-                    # backfill from the prefill record
-                    dn0 = rec["blocks"][j].get("deltanet")
-                    if dn0:
-                        caches[j]["s"] = torch.tensor(dn0["s_hist"][0][-1], dtype=torch.float64)
-                        caches[j]["s_hist"] = [
-                            torch.tensor(dn0["s_hist"][0][t], dtype=torch.float64) for t in range(len(dn0["s_hist"][0]))
-                        ]
+                attn_out, attn_rec = _deltanet_record(
+                    block.self_attn, ln1_out, ln1_out.new_zeros(ln1_out.shape), s_init=caches[j].get("s")
+                )
+                # advance the recurrent state + snapshot (next step + rollback)
+                caches[j]["s"] = torch.tensor(np.array(attn_rec["s_hist"])[:, :, -1], dtype=torch.float64)
+                caches[j]["s_hist"].append(caches[j]["s"])
             else:
                 attn_out, attn_rec = _attn_step_record(block.self_attn, ln1_out, t, caches[j])  # (1, 1, D)
             h = stream + attn_out  # (1, 1, D)
@@ -670,7 +679,7 @@ def generate_with_records(
             ln2_out = (
                 h
                 / torch.sqrt(torch.mean(h * h, dim=-1, keepdim=True) + ln2.eps)
-                * ln2.weight.detach().to(torch.float64)
+                * ln2.weight.detach().cpu().to(torch.float64)
             )  # (1, 1, D)
             mlp = block.mlp
             ff_out = _ffn_f64(mlp, ln2_out)  # (1, 1, D)
@@ -698,9 +707,9 @@ def generate_with_records(
         normed = (
             stream
             / torch.sqrt(torch.mean(stream * stream, dim=-1, keepdim=True) + fn.eps)
-            * fn.weight.detach().to(torch.float64)
+            * fn.weight.detach().cpu().to(torch.float64)
         )  # (1, 1, D)
-        logits = normed @ model.lm_head.weight.detach().to(torch.float64).T  # (1, 1, V)
+        logits = normed @ model.lm_head.weight.detach().cpu().to(torch.float64).T  # (1, 1, V)
         p = stable_softmax_t(logits, dim=-1)  # (1, 1, V)
         p = p.detach()
         V = p.shape[-1]

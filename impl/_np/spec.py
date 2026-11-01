@@ -225,8 +225,11 @@ class SpeculativeGenerator:
         restore the S snapshot taken at position n from s_hist."""
         for layer in cache:
             if "s" in layer:
-                layer["s"] = layer["s_hist"][n].copy()
-                del layer["s_hist"][n + 1 :]
+                # s_hist[i] is the state AFTER position i; the K/V slice :n
+                # keeps positions 0..n-1, so restore s_hist[n-1] and drop
+                # the tail from n on.
+                layer["s"] = layer["s_hist"][n - 1].copy()
+                del layer["s_hist"][n:]
             else:
                 layer["k"] = layer["k"][:, :, :n]
                 layer["v"] = layer["v"][:, :, :n]

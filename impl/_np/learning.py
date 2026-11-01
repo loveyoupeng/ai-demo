@@ -288,9 +288,9 @@ def _block_record(block: TransformerBlock, bs: dict) -> BlockRecord:
     if isinstance(block.self_attn, GatedDeltaNet):
         st = bs["attn"]
         rec["deltanet"] = {
-            "q_pre": arr(st["q"].transpose(0, 2, 1, 3).reshape(*st["q"].shape[:2], -1)),
-            "k_pre": arr(st["k"].transpose(0, 2, 1, 3).reshape(*st["k"].shape[:2], -1)),
-            "v_pre": arr(st["v"].transpose(0, 2, 1, 3).reshape(*st["v"].shape[:2], -1)),
+            "q_pre": arr(st["q"].transpose(0, 2, 1, 3).reshape(st["q"].shape[0], st["q"].shape[2], -1)),
+            "k_pre": arr(st["k"].transpose(0, 2, 1, 3).reshape(st["k"].shape[0], st["k"].shape[2], -1)),
+            "v_pre": arr(st["v"].transpose(0, 2, 1, 3).reshape(st["v"].shape[0], st["v"].shape[2], -1)),
             "q": arr(st["qn"]),
             "k": arr(st["kn"]),
             "v": arr(st["v"]),

@@ -548,4 +548,11 @@ def scaled_dot_product_attention(
     Vaswani et al. "Attention Is All You Need" (2017)
     https://arxiv.org/abs/1706.03762
     """
-    return _CUDASDPACudaFunction.apply(q, k, v, is_causal)
+    # BF16 (the GPU tracks' running dtype) is upcast to float32 for the
+    # NVRTC softmax/weighted-sum kernels (compiled float/double only) and the
+    # output is cast back to the input dtype.
+    orig_dtype = q.dtype
+    if q.dtype == torch.bfloat16:
+        q, k, v = q.float(), k.float(), v.float()
+
+    return _CUDASDPACudaFunction.apply(q, k, v, is_causal).to(orig_dtype)

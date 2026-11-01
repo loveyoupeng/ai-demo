@@ -339,6 +339,14 @@ class _SiluCudaFunction(torch.autograd.Function):
         2. Launch silu_forward_kernel (f32) or silu_forward_f64_kernel (f64)
         3. Each thread processes one element (grid-stride loop)
         """
+        # BF16 (the GPU tracks' running dtype) is upcast to float32 FIRST —
+        # the NVRTC kernels are compiled for float/double only, and reading a
+        # bf16 buffer as float produces garbage. The output buffer is allocated
+        # AFTER the upcast so its element size matches the kernel's.
+        orig_dtype = input.dtype
+        if input.dtype == torch.bfloat16:
+            input = input.float()
+
         # Save input for backward pass (autograd context is the right place)
         ctx.save_for_backward(input)
 
@@ -350,7 +358,6 @@ class _SiluCudaFunction(torch.autograd.Function):
         num_elements = input.numel()
         block_size = 256  # 256 threads per block (standard size)
         grid_size = (num_elements + block_size - 1) // block_size  # ceiling division
-
         # Select kernel by dtype: float32 or float64
         if is_float64:
             # Float64: kernel expects const double*, double*, int
@@ -370,7 +377,7 @@ class _SiluCudaFunction(torch.autograd.Function):
                 block_x=block_size,
             )
 
-        return output
+        return output.to(orig_dtype)
 
     @staticmethod
     def backward(ctx: Any, *grad_outputs: torch.Tensor) -> tuple[None, ...]:

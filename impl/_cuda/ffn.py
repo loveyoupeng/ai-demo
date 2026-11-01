@@ -289,9 +289,12 @@ class _CUDASiLU(torch.autograd.Function):
         torch.Tensor
             Output with same shape and dtype as input.
         """
+        orig_dtype = input.dtype
+        if input.dtype == torch.bfloat16:
+            input = input.float()  # NVRTC kernels are float/double only
         ctx.save_for_backward(input)
 
-        output = torch.empty_like(input)
+        output = torch.empty_like(input)  # allocated AFTER the upcast → f32 buffer
         num_elements = input.numel()
 
         if input.dtype == torch.float64:
@@ -309,7 +312,7 @@ class _CUDASiLU(torch.autograd.Function):
                 num_elements,
             )
 
-        return output
+        return output.to(orig_dtype)
 
     @staticmethod
     def backward(ctx: Any, *grad_outputs: torch.Tensor) -> tuple[None, torch.Tensor]:

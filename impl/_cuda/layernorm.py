@@ -224,6 +224,13 @@ class _RmsNormCudaFunction(torch.autograd.Function):
         torch.Tensor
             Normalized, scaled output — same shape as input.
         """
+        # BF16 (the GPU tracks' running dtype) is upcast to float32 first —
+        # the NVRTC kernels are compiled for float/double only. Output buffer
+        # is allocated after the upcast so its element size matches.
+        orig_dtype = input.dtype
+        if input.dtype == torch.bfloat16:
+            input = input.float()
+            gamma = gamma.float()
         ctx.save_for_backward(input, gamma)
         ctx.original_shape = input.shape
         ctx.eps = eps
@@ -270,7 +277,7 @@ class _RmsNormCudaFunction(torch.autograd.Function):
 
         # Reshape back to original shape
         output = output_flat.view(original_shape)
-        return output
+        return output.to(orig_dtype)
 
     @staticmethod
     def backward(ctx: Any, *grad_outputs: torch.Tensor) -> tuple[torch.Tensor | None, ...]:

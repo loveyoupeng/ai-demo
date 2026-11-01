@@ -436,7 +436,7 @@ class CUDAModel:
         out: dict[str, np.ndarray] = {}
         for entry in reg.entries:
             t = tensors[entry.key]
-            arr = t.detach().cpu().numpy()
+            arr = t.detach().cpu().to(torch.float32).numpy()  # npz has no bf16 — store FP32
             # nn.Linear-backed params (deltanet projections) are stored (out, in)
             # while the checkpoint keeps (in, out) — transpose on the way out.
             if entry.torch_transpose and "deltanet" in entry.key and arr.ndim == 2:

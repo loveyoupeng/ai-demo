@@ -115,9 +115,13 @@ def load_learning_model(
 
         model: NumPyModel | TorchModel | Any = NumPyModel(cfg, params)
     elif backend == "torch":
+        import torch
+
         from impl._torch.layers import TorchModel as _TorchModel
 
         model = _TorchModel(cfg, params)
+        if torch.cuda.is_available():
+            model = model.cuda()  # the torch track serves on GPU when present
         # Serve in the checkpoint's own dtype (BF16 on the GPU tracks —
         # ADR: "BF16 as the running model parameter"; the record adapters
         # recompute their display path in float64 from the parameters, and
