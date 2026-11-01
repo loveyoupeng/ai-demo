@@ -1042,7 +1042,7 @@ function blockTensors(i) {
   const g2 = b.ln2.gamma;
   const h = b.h[0];
   const y2 = h.map((row, d) => row.map((v, c) => (v / rms2[d]) * g2[c])); // (S, D)
-  return { xIn, y1, h, y2, attn: b.attn, ffn: b.ffn, moe: b.moe, out: b.out[0] };
+  return { xIn, y1, h, y2, attn: b.attn, deltanet: b.deltanet, ffn: b.ffn, moe: b.moe, out: b.out[0] };
 }
 
 // ---------------------------------------------------------------------------
@@ -2030,6 +2030,22 @@ function renderInspector() {
         title.textContent = sub ? `block ${b} — feed-forward / ${sub}` : `block ${b} — feed-forward`;
         view = ffnSubView(sub || "ffn", b, bt);
       } else if (what === "cache") {
+        if (bt.deltanet) {
+          title.textContent = `block ${b} — S state (DeltaNet)`;
+          view = (body) => {
+            const d = bt.deltanet;
+            body.appendChild(formula(
+              "S_t = (1-\beta_t)\,S_{t-1}(I - \hat{k}_t\hat{k}_tᵀ) + \beta_t\,\hat{k}_t v_tᵀ",
+              "the recurrent state matrix per head — updated in place every token (no per-token history rows)"
+            ));
+            headSel(body);
+            const sh = d.s_hist[0][HEAD]; // (S, hd, hd)
+            sh.forEach((m, t) => {
+              body.appendChild(matLabel(`S after position ${t} — head ${HEAD} (hd×hd)`));
+              body.appendChild(heatGrid(m, { cell: 14, title: `S@${t}` }));
+            });
+          };
+        } else {
         title.textContent = `block ${b} — K/V cache`;
         view = (body) => {
           const a = bt.attn;
@@ -2047,6 +2063,7 @@ function renderInspector() {
           body.appendChild(heatGrid(vc[0][HEAD], { cell: 14, title: "V cache" }));
           body.appendChild(numsTable(vc[0][HEAD]));
         };
+        }
       } else {
         const isH = what === "h";
         title.textContent = `block ${b} — ${isH ? "residual after attention" : "block output"}`;
@@ -2054,7 +2071,7 @@ function renderInspector() {
           if (isH) {
             body.appendChild(formula("h = x + \\text{attn}(\\text{LN1}(x))", "the skip connection: x flows through unchanged, attention only ADDS a correction — mathematically ∂h/∂x = I + ∂attn/∂x, so gradients reach earlier blocks unshrunk (verify: cell-wise, out = left + right below)"));
             tensorBlock(body, "in", "residual x (block input)", bt.xIn, { cell: 12, names: ["S", "D"] });
-            tensorBlock(body, "in", "attn_out (from attention)", bt.attn.attn_out, { cell: 12, names: ["S", "D"] });
+            tensorBlock(body, "in", "attn_out (from mixing sublayer)", bt.deltanet ? bt.deltanet.out : bt.attn.attn_out, { cell: 12, names: ["S", "D"] });
             tensorBlock(body, "out", "h (S, D)", [bt.h], { cell: 14, names: ["S", "D"] });
           } else {
             body.appendChild(formula("\\text{out} = h + \\text{ffn}(\\text{LN2}(h))", "the block's second skip connection — the stream accumulates: out = x + attn + ffn, nothing is overwritten; out becomes the next block's input (verify cell-wise: bottom = top + middle)"));

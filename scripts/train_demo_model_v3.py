@@ -110,8 +110,8 @@ def train_tokenizer() -> Tokenizer:
     """BPE over the mixed corpus + the thinking-section specials."""
     if (RESOURCE / "bpe_tokenizer.json").exists():
         tok = Tokenizer.from_file(str(RESOURCE / "bpe_tokenizer.json"))
-        # the v3 vocabulary must know the think tags
-        if tok.token_to_id(THINK_TAG) is not None and tok.token_to_id(ANSWER_TAG) is not None:
+        # the v3 vocabulary must know ALL the special tags (think + tool)
+        if all(tok.token_to_id(t) is not None for t in (THINK_TAG, ANSWER_TAG, "<|tool_call|>", "<|tool_response|>")):
             return tok
     texts = _corpus_texts()
     tok = Tokenizer(models.BPE())
@@ -155,16 +155,23 @@ def load_corpus(tok: Tokenizer) -> tuple[list[list[int]], list[list[int]], list[
     tool_rows = json.loads((RESOURCE / "tool_calls.json").read_text())
     tool: list[list[int]] = []
     for row in tool_rows:
-        for msg in row["messages"]:
+        msgs = row["messages"]
+        # teach the full exchange: the USER question, then the assistant's
+        # <|tool_call|> JSON — the model must learn that a user turn is
+        # answered with a tool call (not text). (ADR: the pipeline doc's own
+        # "common pitfalls" section calls out exactly this.)
+        for i, msg in enumerate(msgs):
             if msg.get("tool_calls"):
-                body = "<|tool_call|>" + json.dumps([c["function"] for c in msg["tool_calls"]], ensure_ascii=False)
+                user = next((m.get("content") or "" for m in reversed(msgs[:i]) if m.get("role") == "user"), "")
+                if not user:
+                    continue
+                body = (
+                    user + "<|tool_call|>" + json.dumps([c["function"] for c in msg["tool_calls"]], ensure_ascii=False)
+                )
+                tool.append(enc(body))
             elif msg["role"] == "tool":
                 body = "<|tool_response|>" + (msg.get("content") or "")
-            elif msg.get("content"):
-                body = msg["content"]
-            else:
-                continue
-            tool.append(enc(body))
+                tool.append(enc(body))
     tool = [s for s in tool if len(s) > 8]
     print(f"corpus: {len(stories)} stories, {len(code)} code rows, {len(tool)} tool rows")
     return stories, code, tool
@@ -299,6 +306,13 @@ def run_rl_stage(think_dir: Path, out_dir: Path, tok: Tokenizer, args: argparse.
         "8",
         "--max-new-tokens",
         "80",
+        # exploration for the group-relative advantage: without temperature
+        # the G rollouts are near-identical and the advantage signal collapses
+        # (this is what flattened the RL reward to ~0 in the logs)
+        "--temperature",
+        "0.8",
+        "--top-k",
+        "20",
         "--kl-beta",
         "0.04",
         "--lr",
@@ -400,7 +414,10 @@ def main() -> int:
     if start <= 2:
         tool_m = TorchModel(cfg, dict(np.load(RESOURCE / "models" / names["sft"] / "model.npz"))).to(device).train()
         print(f"stage 3 ({args.variant}): SFT on tool calls")
-        train(tool_m, tool, epochs=args.epochs or 3, lr=5e-4, tag="tool", device=device)
+        train(
+            tool_m, tool, epochs=(args.epochs or 3) * 3, lr=5e-4, tag="tool", device=device
+        )  # tag-teaching stage gets more passes
+
         tool_m.eval()
         save_checkpoint(tool_m, names["tool"], tok, cfg)
     else:
@@ -411,7 +428,9 @@ def main() -> int:
         think_seqs = load_think_corpus(tok)
         think_m = TorchModel(cfg, dict(np.load(RESOURCE / "models" / names["tool"] / "model.npz"))).to(device).train()
         print(f"stage 4 ({args.variant}): thinking SFT (reasoning distillation — gold rationales + templates)")
-        train(think_m, think_seqs, epochs=args.epochs or 3, lr=5e-4, tag="think", device=device)
+        train(
+            think_m, think_seqs, epochs=(args.epochs or 3) * 3, lr=5e-4, tag="think", device=device
+        )  # think tags need more passes
         think_m.eval()
         save_checkpoint(think_m, names["think"], tok, cfg)
         # the distillation teaching artifact: print trace pairs
