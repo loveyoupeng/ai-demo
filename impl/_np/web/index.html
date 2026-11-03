@@ -1520,7 +1520,7 @@ function deltanetSubView(sub, bIdx, mIdx, bt) {
     body.appendChild(formula("S_t = (1-β_t)S_{t-1}(I-k̂k̂ᵀ)+β_t k̂vᵀ", "recurrent state update — click the S-scan cell for the per-position matrices"));
     body.appendChild(matLabel(`stage: ${which}`));
     headSel(body);
-    const m = { q: d.q, k: d.k, v: d.v, beta: d.beta, o: d.o, s_hist: d.s_hist }[which];
+    const m = { q: d.q, k: d.k, v: d.v, beta: d.beta, o: d.o, s_hist: d.s_hist, scan: d.s_hist }[which];
     if (!m) return;
     if (which === "scan") {
       const sh = d.s_hist[0][HEAD];
@@ -1540,6 +1540,7 @@ function deltanetSubView(sub, bIdx, mIdx, bt) {
 
 function attnSubView(sub, bIdx, mIdx, bt) {
   const a = bt.mixers[mIdx].attn;
+  const H = MODEL.config.n_heads, hd = MODEL.config.embed_dim / H;
   if (sub === "attn") {
     return (body) => {
       body.appendChild(formula(
