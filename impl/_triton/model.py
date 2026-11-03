@@ -331,7 +331,12 @@ class TritonModel(nn.Module):
         tensors = ParameterRegistry(self.config).bind(self._param_tensors())
         params: dict[str, np.ndarray] = {}
         for entry in ParameterRegistry(self.config).entries:
-            array = tensors[entry.key].detach().cpu().numpy()
+            array = tensors[entry.key].detach().cpu()
+            # Checkpoint/page storage is float32 (np.bfloat16 doesn't exist);
+            # the served model may run in BF16 (GPU tracks).
+            if array.dtype == torch.bfloat16:
+                array = array.float()
+            array = array.numpy()
             params[entry.key] = array.T if entry.torch_transpose else array
         return params
 

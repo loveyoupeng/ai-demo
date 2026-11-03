@@ -1521,7 +1521,20 @@ function deltanetSubView(sub, bIdx, mIdx, bt) {
     body.appendChild(matLabel(`stage: ${which}`));
     headSel(body);
     const m = { q: d.q, k: d.k, v: d.v, beta: d.beta, o: d.o, s_hist: d.s_hist }[which];
-    if (m) body.appendChild(numsTable(m[0][HEAD] ?? m[0]));
+    if (!m) return;
+    if (which === "scan") {
+      const sh = d.s_hist[0][HEAD];
+      sh.forEach((mm, t) => {
+        body.appendChild(matLabel(`S after position ${t} — head ${HEAD} (hd×hd=${hd}×${hd})`));
+        body.appendChild(heatGrid(mm, { cell: 16, title: `S@${t}` }));
+      });
+    } else if (which === "beta") {
+      body.appendChild(barChart(m[0][HEAD].map((r) => r[0]), m[0][HEAD].map((_, i) => `pos ${i}`)));
+    } else {
+      const mat = m[0][HEAD] ?? m[0];
+      body.appendChild(heatGrid(mat, { cell: 14, title: which, rowLabels: Array.isArray(mat[0]) ? mat.map((_, i) => i) : null }));
+      body.appendChild(numsTable(mat));
+    }
   };
 }
 
@@ -2137,7 +2150,7 @@ function renderInspector() {
     // No specific view for this node (e.g. the footer "softmax" default after
     // Generate + record): fall back to the EXPLAIN card + learned weights so
     // the inspector is never blank once a record exists.
-    const exKey0 = id.replace(/^b\d+\./, "");
+    const exKey0 = id.replace(/^b\d+\.m\d+\./, "").replace(/^b\d+\./, "");
     const exInfo0 = EXPLAIN[exKey0];
     if (exInfo0) {
       const ex = document.createElement("div");
@@ -2157,7 +2170,7 @@ function renderInspector() {
     weightsBlock(body, id).then(() => body.querySelectorAll(".formula").forEach(renderTex));
     return;
   }
-  const exKey = id.replace(/^b\d+\./, "");
+  const exKey = id.replace(/^b\d+\.m\d+\./, "").replace(/^b\d+\./, "");
   const exInfo = EXPLAIN[exKey];
   if (exInfo) {
     const ex = document.createElement("div");
