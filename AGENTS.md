@@ -34,7 +34,8 @@ link, never duplicate):
 ## Architecture & Data Flow
 
 **Model (identical in all 4 tracks):** LLaMA-style pre-norm block
-`h = x + attn(ln1(x)); out = h + mlp(ln2(h))`; RMSNorm (no biases, no weight
+(`h = x; for m in mixers: h += mixer_m(ln_m(h)); out = h + mlp(ln2(h))` —
+each block runs 3 Gated DeltaNet + 1 full-attention mixer, ADR 0007); RMSNorm (no biases, no weight
 tying), RoPE (`rope_dim=0` rotates the full head dim), causal mask, GQA via
 `n_groups` (None → MHA), dense SwiGLU FFN by default with opt-in MoE
 (`n_experts > 1`: softmax router + top-k mask + renormalize; opt-in

@@ -107,7 +107,7 @@ def _copy_in_place(tensor: torch.Tensor, value: np.ndarray) -> None:
 
 
 class CuGatedDeltaNet:
-    """Gated DeltaNet sublayer for the CUDA track (ADR 0006).
+    """Gated DeltaNet mixer for the CUDA track (ADR 0006/0007 — one of the per-block mixers).
 
     Plain-tensor owner (like ``CuTransformerBlock`` — not an nn.Module), but
     the math delegates to the torch track's ``GatedDeltaNet`` implementation

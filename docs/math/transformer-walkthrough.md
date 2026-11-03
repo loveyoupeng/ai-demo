@@ -31,7 +31,7 @@ same thing with production ops (`F.scaled_dot_product_attention`, fused kernels)
 
 ```mermaid
 flowchart TD
-    TOK["tokens (B, S)"] --> EMB["Embedding (B, S, D)"] --> BLK["block × L:<br/>RMSNorm → Attention → +<br/>RMSNorm → FFN/MoE → +"]
+    TOK["tokens (B, S)"] --> EMB["Embedding (B, S, D)"] --> BLK["block × L:<br/>per block (ADR 0007): 3× DeltaNet + 1× attention mixer,<br/>each own pre-norm + residual, then RMSNorm → FFN/MoE → +"]
     BLK --> FN["final RMSNorm"] --> LM["lm_head → logits (B, S, V)"] --> SM["softmax → next token"]
     subgraph FFN-OR-MOE ["the FFN slot inside every block (§5–§6) — exactly one of:"]
         FFN["dense SwiGLU<br/>(n_experts = 1)"]
@@ -76,15 +76,17 @@ the *output* side has its own projection, `lm_head` (§7).
 
 ## 2. The block — pre-norm with a plain additive residual
 
-Each of the `L` layers is:
+Each of the `L` layers runs `M = n_deltanet_sublayers + 1` mixing sublayers
+(ADR 0007: 3 Gated DeltaNet + 1 full attention by default), each with its own
+pre-norm, then the FFN:
 
-$$h = x + \underbrace{\mathrm{Attn}\big(\mathrm{RMSNorm}(x)\big)}_{\text{attention sublayer}},
+$$h_0 = x, \qquad h_{m+1} = h_m + \mathrm{Mixer}_m\big(\mathrm{RMSNorm}_m(h_m)\big), \quad m = 0..M-1,
 \qquad
-\mathrm{out} = h + \underbrace{\mathrm{FFN}\big(\mathrm{RMSNorm}(h)\big)}_{\text{feed-forward sublayer}}$$
+\mathrm{out} = h_M + \underbrace{\mathrm{FFN}\big(\mathrm{RMSNorm}(h_M)\big)}_{\text{feed-forward sublayer}}$$
 
-The residual stream `x` passes through **unchanged**; each sublayer sees a normalized
-copy and contributes an *update*. This pre-norm + additive residual is exactly the
-LLaMA block.
+The residual stream passes through **unchanged**; each mixer sees a
+normalized copy and contributes an *update*. This pre-norm + additive
+residual per sublayer is the LLaMA block generalized to a mixer stack.
 
 > This repo originally used a non-standard "gated residual" (a learned scalar
 > multiplying the stream). It was abandoned for the standard form —

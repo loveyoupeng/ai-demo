@@ -1,5 +1,5 @@
 # Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
-"""Gated DeltaNet for the NumPy reference implementation (ADR 0006).
+"""Gated DeltaNet for the NumPy reference implementation (ADR 0006/0007).
 
 A **linear attention** layer: instead of scoring every past token against the
 query (full attention's O(S²) score matrix), DeltaNet keeps ONE recurrent
@@ -66,6 +66,9 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
 
 class GatedDeltaNet:
     """Gated DeltaNet mixing sublayer (linear attention, recurrent state S).
+
+    One mixer inside every block (ADR 0007: a block runs n_deltanet_sublayers
+    of these followed by one full-attention mixer).
 
     Shape letters: B = batch, S = sequence length this pass, D = embed_dim,
     H = n_heads, hd = head_dim, t = cached position count, c = chunk length.

@@ -96,7 +96,7 @@ def mixer_ln_name(mixer_idx: int) -> str:
 
 
 class DeltaNet:
-    """Gated DeltaNet parameter names (ADR 0006), HF-ish convention.
+    """Gated DeltaNet mixer parameter names (ADR 0006/0007), HF-ish convention.
 
     Per DeltaNet layer: q/k/v/o projections (same roles as attention),
     a per-head forget-gate projection ``a_proj`` (D → H) with a per-head

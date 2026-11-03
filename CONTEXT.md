@@ -57,10 +57,12 @@ letters. Where each value comes from:
   autoregressively, where each position attends only to previous positions
   (causal mask). No encoder, no cross-attention.
 
-- **Block** (a.k.a. "layer"): one unit of the decoder stack. The standard
-  pre-norm layout is `h = x + attn(ln1(x)); out = h + mlp(ln2(h))`. The
-  residual stream `x` is added to the attention and FFN outputs; the layer
-  norms are applied *before* each sublayer (pre-norm), not after.
+- **Block** (a.k.a. "layer"): one unit of the decoder stack. Each block runs
+  `M = n_deltanet_sublayers + 1` mixing sublayers (ADR 0007: 3 Gated DeltaNet
+  + 1 full attention by default), each with its own pre-norm:
+  `h = x; for m: h += mixer_m(ln_m(h)); out = h + mlp(ln2(h))`. The residual
+  stream `x` is added to every mixer and FFN output; the norms are applied
+  *before* each sublayer (pre-norm), not after.
 
 - **Pre-norm**: normalization (RMSNorm) applied to the input *before* the
   sublayer (attention or FFN). The alternative is post-norm (normalize the

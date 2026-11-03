@@ -319,7 +319,7 @@ class TritonMultiHeadAttention(nn.Module):
 
 
 class TritonGatedDeltaNet(nn.Module):
-    """Gated DeltaNet on the Triton track (ADR 0006).
+    """Gated DeltaNet mixer on the Triton track (ADR 0006/0007).
 
     Same math as ``impl._torch.layers.GatedDeltaNet`` / the NumPy reference
     (``impl/_np/deltanet.py``). PROD note: the recurrent scan is plain torch

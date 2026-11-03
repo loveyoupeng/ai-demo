@@ -115,7 +115,7 @@ class MoERecord(TypedDict):
 
 
 class DeltaNetRecord(TypedDict):
-    """Gated DeltaNet capture (ADR 0006): projections, gates, recurrent
+    """Gated DeltaNet mixer capture (ADR 0006/0007): projections, gates, recurrent
     state per position, read-out."""
 
     q_pre: list

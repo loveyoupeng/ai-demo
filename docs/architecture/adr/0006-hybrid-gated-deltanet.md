@@ -1,9 +1,11 @@
-# ADR 0006: Hybrid 3:1 Gated DeltaNet — linear-attention layers beside full attention
+# ADR 0006: Gated DeltaNet as a mixing sublayer
 
-- Status: accepted
+- Status: **superseded in placement by ADR 0007** (the DeltaNet math below is
+  unchanged and still lives in `impl/_np/deltanet.py`; only the *where* moved:
+  ADR 0007 puts 3 DeltaNet mixers + 1 full-attention mixer inside EVERY block
+  instead of selecting one mixer per layer via `layer_pattern`)
 - Date: 2026-11-01
-- Supersedes: nothing (the all-full-attention model remains the default when
-  `layer_pattern` is empty)
+- Supersedes: nothing
 
 ## Context
 

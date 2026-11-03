@@ -97,9 +97,9 @@ variant dropdown switches).
 flowchart TD
     TOK["token ids (S)"] --> EMB["embedding lookup: x[s] = E[tok_s]  —  (512, 64) table → x (S, 64)"]
     EMB --> STACK
-    subgraph STACK["decoder block × 3  (pre-norm, two residual adds)"]
+    subgraph STACK["decoder block × 3  (pre-norm; per block: 3× DeltaNet + 1× attention mixer + FFN — ADR 0007)"]
         direction TB
-        X["residual stream x (S, 64)"] --> N1["LN1: RMSNorm → normed copy x̂"]
+        X["residual stream x (S, 64)"] --> N1["LN0: RMSNorm → normed copy x̂"]
         N1 --> QKV["q,k,v = x̂·Wq, x̂·Wk, x̂·Wv  —  4 heads × 16 dims"]
         QKV --> ROPE["RoPE: rotate q,k dim-pairs by angle = position × θ"]
         ROPE --> SC["scores = q·kᵀ/√16"]
@@ -109,7 +109,7 @@ flowchart TD
         CTX --> WO["attn_out = ctx·Wo  (S, 64)"]
         X ==>|skip| ADD1(("+"))
         WO --> ADD1
-        ADD1 -- "h = x + attn_out" --> N2["LN2: RMSNorm → normed copy ĥ"]
+        ADD1 -- "h = x + attn_out" --> N2["LN_after-mixers: RMSNorm → ĥ"]
         N2 --> FFN["SwiGLU FFN: (SiLU(ĥ·Wg) ⊙ ĥ·Wu)·Wd   —   64 → 256 → 64"]
         ADD1 ==>|skip| ADD2(("+"))
         FFN --> ADD2
@@ -120,10 +120,12 @@ flowchart TD
     LM --> PR["last position → softmax / argmax → next token"]
 ```
 
-Thick `==>` edges are the residual stream's skip connections; the two norms
-read *copies* (`x̂`, `ĥ`) — the stream itself is never normalized. At
-generation time each block additionally keeps a K/V cache (prefill writes the
-whole prompt, each decode appends one row), but the math above is unchanged —
+Thick `==>` edges are the residual stream's skip connections; every norm
+reads a *copy* — the stream itself is never normalized. At generation time
+each mixer keeps its own cache entry inside the block's per-layer cache list
+(the 3 DeltaNet mixers carry the recurrent S state; the attention mixer keeps
+K/V rows — prefill writes the whole prompt, each decode appends one row),
+but the math above is unchanged —
 see `NumPyModel.make_cache` / `forward_prefill` / `forward_step` in
 `impl/_np/model.py`.
 
@@ -204,7 +206,7 @@ the equation, the *why*, and the code anchor) lives in one place:
   2); the cross-backend suite covers dense/GQA/MoE parity, speculative
   decoding (chunk parity, spec-greedy ≡ plain-greedy, sidecar round-trip
   across tracks), GPU parity, and a 3-way equivalence demo;
-  `scripts.verify_equivalence` runs 9 end-to-end scenarios (incl.
+  `scripts.verify_equivalence` runs 13 end-to-end scenarios (incl.
   `spec_mtp_np_torch` / `spec_dspark_np_torch`).
 - **BF16 AMP training on the GPU tracks**: torch/triton/cuda train in
   bfloat16 (`TransformerConfig.dtype`) so matmuls run on the GPU **tensor
@@ -402,7 +404,7 @@ docs/
 ├── architecture/          # design + decisions
 │   ├── design.md          # doctrine, cross-track naming, key design decisions
 │   ├── seam_triton_to_torch.md  # the documented Triton→PyTorch shared seam
-│   └── adr/               # 0001 residual, 0002 shared experts, 0003 drafter sidecars
+│   └── adr/               # 0001 residual, 0002 shared experts, 0003 drafter sidecars, 0006/0007 DeltaNet mixers
 ├── math/                  # derivations + background
 │   ├── transformer-walkthrough.md  # forward-pass tour (incl. speculative decoding)
 │   └── training-pipeline.md        # pre-train → SFT → tool pipeline + drafter distillation
