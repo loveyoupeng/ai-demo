@@ -141,14 +141,14 @@ SCENARIOS: list[Scenario] = [
     ),
     Scenario(
         name="deltanet_np_torch",
-        description="Gated DeltaNet hybrid (ADR 0006, 3:1 'dddF' over 4 layers): NumPy reference vs PyTorch",
-        kwargs=_cfg(n_layers=4, layer_pattern="dddF"),
+        description="Gated DeltaNet mixers (ADR 0007, 3 DeltaNet + 1 full attention per block): NumPy reference vs PyTorch",
+        kwargs=_cfg(n_layers=4),
         backends=["numpy", "torch"],
     ),
     Scenario(
         name="deltanet_all_four",
-        description="Gated DeltaNet hybrid on all four tracks (full interchange incl. GPU)",
-        kwargs=_cfg(n_layers=4, layer_pattern="dddF"),
+        description="Gated DeltaNet mixers on all four tracks (full interchange incl. GPU)",
+        kwargs=_cfg(n_layers=4),
         backends=["numpy", "torch", "triton", "cuda"],
     ),
 ]
@@ -424,10 +424,7 @@ def _compare_results(  # noqa: C901 - one comparison pass per metric keeps the r
         # NumPy reference is FP32; non-Numpy backends may be BF16. Use FP32
         # tolerance (~1e-2) for BF16, float64 tolerance only for true float64 tracks.
         torch_dtype = r.get("dtype", "float32")
-        if torch_dtype == torch.float64:
-            tol = _LOGIT_TOL_FLOAT64
-        else:
-            tol = _LOGIT_TOL_FP32
+        tol = _LOGIT_TOL_FLOAT64 if torch_dtype == torch.float64 else _LOGIT_TOL_FP32
         if ld > tol:
             passed = False
 

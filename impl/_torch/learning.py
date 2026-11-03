@@ -28,7 +28,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from impl._torch.layers import MixtureOfExperts, MultiHeadAttention, SwiGLUFFN
+from impl._torch.layers import MixtureOfExperts, MultiHeadAttention, RMSNorm, SwiGLUFFN
 from shared.constants import REP_PENALTY
 from shared.torch_softmax import stable_softmax_np, stable_softmax_t
 
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         FFNRecord,
         ForwardRecord,
         GenerationRecord,
+        MixerRecord,
         MoERecord,
         NormRecord,
         RopeRecord,
@@ -437,21 +438,35 @@ def instrumented_forward(model: TorchModel, input_ids: torch.Tensor) -> tuple[Fo
     # of the model's serving dtype (BF16): cast the weights on the fly.
     emb = model.embedding.weight.detach().cpu().to(torch.float64)[x.detach().cpu()]
 
-    # Blocks: each runs through the real component; intermediates captured.
+    # Blocks: each runs its mixer chain through the real components;
+    # intermediates captured per mixer (ADR 0007).
     stream = emb
     blocks: list[BlockRecord] = []
     for block in model.stack.blocks:
-        ln1 = block.input_layernorm
-        stream = stream.detach().cpu().to(torch.float64)
-        ln1_w = ln1.weight.detach().cpu().to(torch.float64)
-        ln1_out = stream / torch.sqrt(torch.mean(stream * stream, dim=-1, keepdim=True) + ln1.eps) * ln1_w  # (B, S, D)
         from impl._torch.layers import GatedDeltaNet
 
-        if isinstance(block.self_attn, GatedDeltaNet):
-            attn_out, attn_rec = _deltanet_record(block.self_attn, ln1_out, ln1_out.new_zeros(ln1_out.shape))
-        else:
-            attn_out, attn_rec = _attn_record(block.self_attn, ln1_out, 0)  # (B, S, D) — window positions 0..S-1
-        h = stream + attn_out  # (B, S, D) residual after attention
+        stream = stream.detach().cpu().to(torch.float64)
+        mixer_recs: list[MixerRecord] = []
+        h = stream
+        for norm_raw, mixer in zip(block.mixer_norms, block.mixers, strict=True):
+            norm: RMSNorm = norm_raw  # type: ignore[assignment]
+            norm_w = norm.weight.detach().cpu().to(torch.float64)
+            ln_out = h / torch.sqrt(torch.mean(h * h, dim=-1, keepdim=True) + norm.eps) * norm_w  # (B, S, D)
+            if isinstance(mixer, GatedDeltaNet):
+                mixer_out, mixer_rec = _deltanet_record(mixer, ln_out, ln_out.new_zeros(ln_out.shape))
+            else:
+                mixer_out, mixer_rec = _attn_record(mixer, ln_out, 0)  # (B, S, D) — window positions 0..S-1
+            h = h + mixer_out  # (B, S, D) residual after this mixer
+            mrec: MixerRecord = {
+                "ln": _rmsnorm_record(norm.weight, h - mixer_out, norm.eps, ln_out),
+                "h": arr(h),
+                "out": arr(mixer_out),
+            }
+            if isinstance(mixer, GatedDeltaNet):
+                mrec["deltanet"] = mixer_rec  # type: ignore[typeddict-item]
+            else:
+                mrec["attn"] = mixer_rec  # type: ignore[typeddict-item]
+            mixer_recs.append(mrec)
         ln2 = block.post_attention_layernorm
         ln2_out = (
             h
@@ -462,17 +477,10 @@ def instrumented_forward(model: TorchModel, input_ids: torch.Tensor) -> tuple[Fo
         ff_out = _ffn_f64(mlp, ln2_out)  # (B, S, D)
         out = h + ff_out  # (B, S, D) block output
         block_rec: BlockRecord = {
-            "ln1": _rmsnorm_record(ln1.weight, stream, ln1.eps, ln1_out),
-            "h": arr(h),
+            "mixers": mixer_recs,
             "ln2": _rmsnorm_record(ln2.weight, h, ln2.eps, ln2_out),
             "out": arr(out),
         }
-        from impl._torch.layers import GatedDeltaNet as _GDN
-
-        if isinstance(block.self_attn, _GDN):
-            block_rec["deltanet"] = attn_rec  # type: ignore[typeddict-item]
-        else:
-            block_rec["attn"] = attn_rec  # type: ignore[typeddict-item]
         if hasattr(mlp, "expert_list"):  # torch MixtureOfExperts or TritonMixtureOfExperts
             block_rec["moe"] = _moe_record(mlp, ln2_out, ff_out)  # type: ignore[arg-type]
         else:
@@ -625,27 +633,28 @@ def generate_with_records(
     p0 = list(x[0].tolist())
     # the window's first absolute position (window ends at the last prompt token)
     pos0 = len(seq) - 1 - len(p0)
-    caches: list[dict] = []
+    caches: list[list[dict]] = []
     for i, block in enumerate(model.stack.blocks):
         from impl._torch.layers import GatedDeltaNet as _GDNk
 
-        if isinstance(block.self_attn, _GDNk):
-            dn0 = rec["blocks"][i].get("deltanet")
-            s0 = torch.zeros(
-                1, block.self_attn.n_heads, block.self_attn.head_dim, block.self_attn.head_dim, dtype=torch.float64
-            )
-            hist: list = []
-            if dn0 is not None:
-                sh = np.array(dn0["s_hist"])  # (B, H, S, hd, hd)
-                dev = block.self_attn.q_proj.weight.device
-                s0 = torch.tensor(sh[:, :, -1], dtype=torch.float64, device=dev)
-                hist = [torch.tensor(sh[:, :, t], dtype=torch.float64, device=dev) for t in range(sh.shape[2])]
-            caches.append({"s": s0, "s_hist": hist})
-        else:
-            r = rec["blocks"][i]["attn"]
-            caches.append(
-                _init_kv_cache(block.self_attn, torch.tensor(r["k_pre"]), torch.tensor(r["v_pre"]), pos0)  # type: ignore[arg-type]
-            )
+        layer_caches: list[dict] = []
+        for m, mixer in enumerate(block.mixers):
+            if isinstance(mixer, _GDNk):
+                dn0 = rec["blocks"][i]["mixers"][m].get("deltanet")
+                s0 = torch.zeros(1, mixer.n_heads, mixer.head_dim, mixer.head_dim, dtype=torch.float64)
+                hist: list = []
+                if dn0 is not None:
+                    sh = np.array(dn0["s_hist"])  # (B, H, S, hd, hd)
+                    dev = mixer.q_proj.weight.device
+                    s0 = torch.tensor(sh[:, :, -1], dtype=torch.float64, device=dev)
+                    hist = [torch.tensor(sh[:, :, t], dtype=torch.float64, device=dev) for t in range(sh.shape[2])]
+                layer_caches.append({"s": s0, "s_hist": hist})
+            else:
+                r = rec["blocks"][i]["mixers"][m]["attn"]
+                layer_caches.append(
+                    _init_kv_cache(mixer, torch.tensor(r["k_pre"]), torch.tensor(r["v_pre"]), pos0)  # type: ignore[arg-type]
+                )
+        caches.append(layer_caches)
 
     # ---- Steps 1..n: autoregressive decode, one new token per step
     for i in range(1, n_tokens):
@@ -657,24 +666,38 @@ def generate_with_records(
         stream = emb
         blocks: list[BlockRecord] = []
         for j, block in enumerate(model.stack.blocks):
-            ln1 = block.input_layernorm
-            ln1_out = (
-                stream
-                / torch.sqrt(torch.mean(stream * stream, dim=-1, keepdim=True) + ln1.eps)
-                * ln1.weight.detach().cpu().to(torch.float64)
-            )  # (1, 1, D)
             from impl._torch.layers import GatedDeltaNet as _GDNs
 
-            if isinstance(block.self_attn, _GDNs):
-                attn_out, attn_rec = _deltanet_record(
-                    block.self_attn, ln1_out, ln1_out.new_zeros(ln1_out.shape), s_init=caches[j].get("s")
-                )
-                # advance the recurrent state + snapshot (next step + rollback)
-                caches[j]["s"] = torch.tensor(np.array(attn_rec["s_hist"])[:, :, -1], dtype=torch.float64)
-                caches[j]["s_hist"].append(caches[j]["s"])
-            else:
-                attn_out, attn_rec = _attn_step_record(block.self_attn, ln1_out, t, caches[j])  # (1, 1, D)
-            h = stream + attn_out  # (1, 1, D)
+            mixer_recs: list[MixerRecord] = []
+            h = stream
+            for m, (norm_raw, mixer) in enumerate(zip(block.mixer_norms, block.mixers, strict=True)):
+                norm: RMSNorm = norm_raw  # type: ignore[assignment]
+                h_in = h
+                ln_out = (
+                    h
+                    / torch.sqrt(torch.mean(h * h, dim=-1, keepdim=True) + norm.eps)
+                    * norm.weight.detach().cpu().to(torch.float64)
+                )  # (1, 1, D)
+                if isinstance(mixer, _GDNs):
+                    mixer_out, mixer_rec = _deltanet_record(
+                        mixer, ln_out, ln_out.new_zeros(ln_out.shape), s_init=caches[j][m].get("s")
+                    )
+                    # advance the recurrent state + snapshot (next step + rollback)
+                    caches[j][m]["s"] = torch.tensor(np.array(mixer_rec["s_hist"])[:, :, -1], dtype=torch.float64)
+                    caches[j][m]["s_hist"].append(caches[j][m]["s"])
+                else:
+                    mixer_out, mixer_rec = _attn_step_record(mixer, ln_out, t, caches[j][m])  # (1, 1, D)
+                h = h + mixer_out  # (1, 1, D)
+                mrec: MixerRecord = {
+                    "ln": _rmsnorm_record(norm.weight, h_in, norm.eps, ln_out),
+                    "h": arr(h),
+                    "out": arr(mixer_out),
+                }
+                if isinstance(mixer, _GDNs):
+                    mrec["deltanet"] = mixer_rec  # type: ignore[typeddict-item]
+                else:
+                    mrec["attn"] = mixer_rec  # type: ignore[typeddict-item]
+                mixer_recs.append(mrec)
             ln2 = block.post_attention_layernorm
             ln2_out = (
                 h
@@ -685,17 +708,10 @@ def generate_with_records(
             ff_out = _ffn_f64(mlp, ln2_out)  # (1, 1, D)
             out = h + ff_out  # (1, 1, D)
             block_rec: BlockRecord = {
-                "ln1": _rmsnorm_record(ln1.weight, stream, ln1.eps, ln1_out),
-                "h": arr(h),
+                "mixers": mixer_recs,
                 "ln2": _rmsnorm_record(ln2.weight, h, ln2.eps, ln2_out),
                 "out": arr(out),
             }
-            from impl._torch.layers import GatedDeltaNet as _GDNd
-
-            if isinstance(block.self_attn, _GDNd):
-                block_rec["deltanet"] = attn_rec  # type: ignore[typeddict-item]
-            else:
-                block_rec["attn"] = attn_rec  # type: ignore[typeddict-item]
             if hasattr(mlp, "expert_list"):  # torch MixtureOfExperts or TritonMixtureOfExperts
                 block_rec["moe"] = _moe_record(mlp, ln2_out, ff_out)  # type: ignore[arg-type]
             else:
@@ -759,7 +775,7 @@ def generate_with_records(
 
 
 def _generate_with_spec_records(
-    model: TorchModel,
+    model: Any,
     vocab: list[str],
     prompt_ids: list[int],
     n_tokens: int,

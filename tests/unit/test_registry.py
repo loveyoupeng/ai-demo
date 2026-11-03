@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from shared.config import TransformerConfig
-from shared.constants import Attn, DeltaNet, Keys, LayerNorm, Mlp
+from shared.constants import ATTN_PROJS, Attn, DeltaNet, Keys, LayerNorm, Mlp
 from shared.registry import ParameterRegistry
 
 
@@ -50,13 +50,15 @@ class TestEntryEnumeration:
 
     def test_dense_entry_count(self) -> None:
         reg = ParameterRegistry(_dense_cfg(n_layers=2))
-        # 3 model-level + per layer: 2 norms + 4 attn + 3 ffn
-        assert len(reg.entries) == 3 + 2 * (2 + 4 + 3)
+        # 3 model-level + per layer: 1 post-norm + 4 mixer norms + 3 dn mixers x 8 + 1 attn mixer x 4 + 3 ffn projs
+        assert len(reg.entries) == 3 + 2 * (1 + 4 + 3 * 8 + 4 + 3)
 
     def test_moe_entry_count(self) -> None:
         reg = ParameterRegistry(_moe_cfg(n_experts=3))
-        # 3 model-level + per layer: 2 norms + 4 attn + 1 router + 3*E experts
-        assert len(reg.entries) == 3 + (2 + 4 + 1 + 3 * 3)
+        # 3 model-level + per layer: 1 post norm + 4 mixer norms + 3 dn x 8 + 1 attn x 4 + 1 router + 3*E expert entries
+        assert len(reg.entries) == 3 + (
+            1 + 4 + 3 * 8 + 4 + 1 + 3 * 3
+        )  # 1 post-norm + 4 mixer norms + 3 dn x 8 + 1 attn x 4 + router + 3 experts x 3 projs
 
     def test_keys_match_expected_scheme(self) -> None:
         cfg = _moe_cfg(n_experts=2)
@@ -152,9 +154,9 @@ class TestExpectedShapes:
         )
         shapes = ParameterRegistry(cfg).expected_shapes()
         hd = 8 // 4
-        assert shapes[Keys.attn(0, Attn.Q_PROJ)] == (8, 4 * hd)
-        assert shapes[Keys.attn(0, Attn.K_PROJ)] == (8, 2 * hd)
-        assert shapes[Keys.attn(0, Attn.O_PROJ)] == (4 * hd, 8)
+        assert shapes[Keys.attn(0, 3, Attn.Q_PROJ)] == (8, 4 * hd)
+        assert shapes[Keys.attn(0, 3, Attn.K_PROJ)] == (8, 2 * hd)
+        assert shapes[Keys.attn(0, 3, Attn.O_PROJ)] == (4 * hd, 8)
 
     def test_ffn_shapes(self) -> None:
         shapes = ParameterRegistry(_dense_cfg()).expected_shapes()
@@ -163,8 +165,9 @@ class TestExpectedShapes:
 
     def test_norm_shapes(self) -> None:
         shapes = ParameterRegistry(_dense_cfg()).expected_shapes()
-        assert shapes[Keys.ln(0, LayerNorm.INPUT)] == (8,)
+        assert shapes[Keys.mixer_ln(0, 0)] == (8,)
         assert shapes[Keys.ln(0, LayerNorm.POST_ATTENTION)] == (8,)
+        assert shapes[Keys.mixer_ln(0, 3)] == (8,)
 
 
 class TestTorchTransposeRule:
@@ -174,14 +177,21 @@ class TestTorchTransposeRule:
         cfg = _moe_cfg()
         reg = ParameterRegistry(cfg)
         transposed = {e.key for e in reg.entries if e.torch_transpose}
-        expected = {
-            Keys.attn(0, Attn.Q_PROJ),
-            Keys.attn(0, Attn.K_PROJ),
-            Keys.attn(0, Attn.V_PROJ),
-            Keys.attn(0, Attn.O_PROJ),
-            Keys.moe_gate(0),
-            Keys.lm_head(),
-        }
+        expected = {Keys.moe_gate(0), Keys.lm_head()}
+        for m in range(cfg.n_mixers()):
+            if cfg.mixer_kind(m) == "d":
+                for param in (
+                    DeltaNet.Q_PROJ,
+                    DeltaNet.K_PROJ,
+                    DeltaNet.V_PROJ,
+                    DeltaNet.O_PROJ,
+                    DeltaNet.A_PROJ,
+                    DeltaNet.GATE_PROJ,
+                ):
+                    expected.add(Keys.deltanet(0, m, param))
+            else:
+                for proj in ATTN_PROJS:
+                    expected.add(Keys.attn(0, m, proj))
         assert transposed == expected
 
     def test_no_transpose_for_raw_weights(self) -> None:
@@ -223,7 +233,7 @@ class TestValidate:
             reg.validate(params)
 
 
-def _hybrid_cfg(n_layers: int = 4) -> TransformerConfig:
+def _hybrid_cfg(n_layers: int = 4, n_deltanet: int = 3) -> TransformerConfig:
     return TransformerConfig.from_dict(
         {
             "vocab_size": 32,
@@ -233,32 +243,38 @@ def _hybrid_cfg(n_layers: int = 4) -> TransformerConfig:
             "n_experts": 1,
             "top_k": 1,
             "expert_dim": 16,
-            "layer_pattern": "dddF",
+            "n_deltanet_sublayers": n_deltanet,
         }
     )
 
 
 class TestHybridDeltaNetEntries:
-    def test_deltanet_keys_present_only_on_d_layers(self) -> None:
+    def test_deltanet_keys_on_d_mixers_attn_on_f_mixer(self) -> None:
         reg = ParameterRegistry(_hybrid_cfg(4))
         keys = reg.keys()
-        assert Keys.deltanet(0, DeltaNet.Q_PROJ) in keys
-        assert Keys.deltanet(3, DeltaNet.Q_PROJ) not in keys  # layer 3 is 'F'
-        assert Keys.attn(3, Attn.Q_PROJ) in keys
-        assert Keys.attn(0, Attn.Q_PROJ) not in keys  # layer 0 is 'd'
+        # every layer: mixers 0..2 are DeltaNet, mixer 3 is full attention
+        for i in range(4):
+            for m in range(3):
+                assert Keys.deltanet(i, m, DeltaNet.Q_PROJ) in keys
+                assert Keys.attn(i, m, Attn.Q_PROJ) not in keys
+                assert Keys.mixer_ln(i, m) in keys
+            assert Keys.attn(i, 3, Attn.Q_PROJ) in keys
+            assert Keys.deltanet(i, 3, DeltaNet.Q_PROJ) not in keys
 
     def test_deltanet_shapes(self) -> None:
         reg = ParameterRegistry(_hybrid_cfg(4))
         shapes = reg.expected_shapes()
         D, H = 8, 2
         hd = D // H
-        assert shapes[Keys.deltanet(1, DeltaNet.Q_PROJ)] == (D, H * hd)
-        assert shapes[Keys.deltanet(1, DeltaNet.O_PROJ)] == (H * hd, D)
-        assert shapes[Keys.deltanet(1, DeltaNet.A_PROJ)] == (D, H)
-        assert shapes[Keys.deltanet(1, DeltaNet.DT_BIAS)] == (H,)
-        assert shapes[Keys.deltanet(1, DeltaNet.GATE_PROJ)] == (D, D)
-        assert shapes[Keys.deltanet(1, DeltaNet.NORM)] == (D,)
+        assert shapes[Keys.deltanet(1, 1, DeltaNet.Q_PROJ)] == (D, H * hd)
+        assert shapes[Keys.deltanet(1, 1, DeltaNet.O_PROJ)] == (H * hd, D)
+        assert shapes[Keys.deltanet(1, 1, DeltaNet.A_PROJ)] == (D, H)
+        assert shapes[Keys.deltanet(1, 1, DeltaNet.DT_BIAS)] == (H,)
+        assert shapes[Keys.deltanet(1, 1, DeltaNet.GATE_PROJ)] == (D, D)
+        assert shapes[Keys.deltanet(1, 1, DeltaNet.NORM)] == (D,)
+        assert shapes[Keys.mixer_ln(2, 0)] == (D,)
 
     def test_all_full_config_has_no_deltanet_keys(self) -> None:
-        reg = ParameterRegistry(_dense_cfg(2))
+        reg = ParameterRegistry(_hybrid_cfg(2, n_deltanet=0))
         assert not any(".deltanet." in k for k in reg.keys())  # noqa: SIM118
+        assert Keys.attn(0, 0, Attn.Q_PROJ) in reg

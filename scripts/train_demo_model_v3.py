@@ -369,12 +369,12 @@ def main() -> int:
         {
             "vocab_size": VOCAB,
             "embed_dim": 64,
-            # ADR 0006 hybrid: every 4th layer is full attention, the other 3
-            # are Gated DeltaNet (the 3:1 pattern). Geometry stays param-matched
-            # at ~279K total: dense = 6L thin FFN(80), MoE = 3L with E=10+1
-            # shared at expert_dim=24 (282,380 total, ~56% active/token).
+            # ADR 0007 hybrid: every block runs 3 Gated DeltaNet mixers + 1
+            # full-attention mixer (the Qwen3-Next 3:1 shape). Geometry stays
+            # param-matched at ~279K total: dense = 6L thin FFN(80), MoE = 3L
+            # with E=10+1 shared at expert_dim=24 (~56% active/token).
             "n_layers": 3 if moe else 6,
-            "layer_pattern": "dddF",
+            "n_deltanet_sublayers": 3,
             "n_heads": 4,
             "context_length": CTX,
             "seed": 42,

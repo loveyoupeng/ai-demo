@@ -218,21 +218,23 @@ class SpeculativeGenerator:
         return logits[:, -1:, :], x_final[:, -1, :]
 
     @staticmethod
-    def _trim_cache(cache: list[dict], n: int) -> None:
+    def _trim_cache(cache: list[list[dict]], n: int) -> None:
         """Drop every cached position >= n (rejected draft tail).
 
-        Attention layers slice the K/V rows; DeltaNet layers (ADR 0006)
-        restore the S snapshot taken at position n from s_hist."""
+        Attention mixers slice the K/V rows; DeltaNet mixers (ADR 0007)
+        restore the S snapshot taken at position n from s_hist. Each layer's
+        cache is a per-mixer list, so both rollbacks run per mixer."""
         for layer in cache:
-            if "s" in layer:
-                # s_hist[i] is the state AFTER position i; the K/V slice :n
-                # keeps positions 0..n-1, so restore s_hist[n-1] and drop
-                # the tail from n on.
-                layer["s"] = layer["s_hist"][n - 1].copy()
-                del layer["s_hist"][n:]
-            else:
-                layer["k"] = layer["k"][:, :, :n]
-                layer["v"] = layer["v"][:, :, :n]
+            for mixer in layer:
+                if "s" in mixer:
+                    # s_hist[i] is the state AFTER position i; the K/V slice :n
+                    # keeps positions 0..n-1, so restore s_hist[n-1] and drop
+                    # the tail from n on.
+                    mixer["s"] = mixer["s_hist"][n - 1].copy()
+                    del mixer["s_hist"][n:]
+                else:
+                    mixer["k"] = mixer["k"][:, :, :n]
+                    mixer["v"] = mixer["v"][:, :, :n]
 
     def _commit(self, cache: list[dict], position: int, token: int) -> tuple[np.ndarray, np.ndarray]:
         """Append the committed anchor token to the target cache and return

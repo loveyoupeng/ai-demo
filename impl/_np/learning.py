@@ -132,11 +132,18 @@ class DeltaNetRecord(TypedDict):
     out: list
 
 
+class MixerRecord(TypedDict, total=False):
+    """One mixing sublayer's capture: ``ln`` pre-norm + one mixer record."""
+
+    ln: NormRecord
+    attn: AttnRecord  # present when this mixer is full attention
+    deltanet: DeltaNetRecord  # present when this mixer is Gated DeltaNet (ADR 0007)
+    h: list  # residual stream AFTER this mixer
+    out: list  # this mixer's own output (pre-residual)
+
+
 class BlockRecord(TypedDict, total=False):
-    ln1: NormRecord
-    attn: AttnRecord
-    deltanet: DeltaNetRecord  # present on 'd' layers (ADR 0006)
-    h: list
+    mixers: list  # per-mixer MixerRecord, M = config.n_mixers() entries
     ln2: NormRecord
     ffn: FFNRecord
     moe: MoERecord
@@ -273,20 +280,18 @@ def _moe_record(state: dict, out: np.ndarray, n_experts: int, top_k: int) -> MoE
     }
 
 
-def _block_record(block: TransformerBlock, bs: dict) -> BlockRecord:
-    """Serialize one block's raw state (filled by ``TransformerBlock``)."""
-    rec: BlockRecord = {
-        "ln1": _rmsnorm_record(block.input_layernorm.gamma, bs["x"], block.input_layernorm.eps, bs["ln1_out"]),
-        "h": arr(bs["h"]),
-        "ln2": _rmsnorm_record(
-            block.post_attention_layernorm.gamma, bs["h"], block.post_attention_layernorm.eps, bs["ln2_out"]
-        ),
-        "out": arr(bs["out"]),
-    }
+def _mixer_record(block: TransformerBlock, m: int, bs: dict) -> MixerRecord:
+    """Serialize one mixer's raw state (pre-norm, mixer state, residual)."""
     from impl._np.deltanet import GatedDeltaNet
 
-    if isinstance(block.self_attn, GatedDeltaNet):
-        st = bs["attn"]
+    norm = block.mixer_norms[m]
+    rec: MixerRecord = {
+        "ln": _rmsnorm_record(norm.gamma, bs["hs"][m], norm.eps, bs["ln_outs"][m]),
+        "h": arr(bs["hs"][m + 1]),
+        "out": arr(bs["mixer_outs"][m]),
+    }
+    st = bs["mixers"][m]
+    if isinstance(block.mixers[m], GatedDeltaNet):
         rec["deltanet"] = {
             "q_pre": arr(st["q"].transpose(0, 2, 1, 3).reshape(st["q"].shape[0], st["q"].shape[2], -1)),
             "k_pre": arr(st["k"].transpose(0, 2, 1, 3).reshape(st["k"].shape[0], st["k"].shape[2], -1)),
@@ -299,10 +304,22 @@ def _block_record(block: TransformerBlock, bs: dict) -> BlockRecord:
             "o": arr(st["o"]),
             "pre_o": arr(st["pre_o"]),
             "s_hist": arr(st["s_hist"]),
-            "out": arr(bs["attn_out"]),
+            "out": arr(bs["mixer_outs"][m]),
         }
     else:
-        rec["attn"] = _attn_record(bs["attn"], bs["attn_out"])
+        rec["attn"] = _attn_record(st, bs["mixer_outs"][m])
+    return rec
+
+
+def _block_record(block: TransformerBlock, bs: dict) -> BlockRecord:
+    """Serialize one block's raw state (filled by ``TransformerBlock``)."""
+    rec: BlockRecord = {
+        "mixers": [_mixer_record(block, m, bs) for m in range(len(block.mixers))],
+        "ln2": _rmsnorm_record(
+            block.post_attention_layernorm.gamma, bs["hs"][-1], block.post_attention_layernorm.eps, bs["ln2_out"]
+        ),
+        "out": arr(bs["out"]),
+    }
     if isinstance(block.mlp, MixtureOfExperts):
         rec["moe"] = _moe_record(bs["ff"], bs["mlp_out"], block.mlp.n_experts, block.mlp.top_k)
     else:
@@ -581,7 +598,7 @@ def _generate_with_spec_records(
     P0 = min(model.config.context_length, P)
     window = list(prompt_ids[P - P0 :])
     x = np.array([window], dtype=np.int32)  # (1, P0)
-    cache = model.make_cache(1)
+    cache: list[list[dict]] = model.make_cache(1)
     raw: dict = {}
     logits, _x_final = model.forward_chunk(x, 0, cache, record=raw)
     rec = _forward_record(model, raw, x)
@@ -611,7 +628,7 @@ def _generate_with_spec_records(
         # Replay the prefix (prompt + tokens committed before this round) on
         # a fresh cache, then record the chunk pass — the verification view.
         prefix = list(prompt_ids) + out_tokens[: pos - P]
-        pfx_cache = model.make_cache(1)
+        pfx_cache: list[list[dict]] = model.make_cache(1)
         if prefix:
             model.forward_chunk(np.array([prefix[-model.config.context_length :]], dtype=np.int32), 0, pfx_cache)
         raw = {}

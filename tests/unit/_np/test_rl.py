@@ -160,7 +160,7 @@ class TestGRPOGradient:
         for key in (
             Keys.lm_head(),
             Keys.embed(),
-            Keys.attn(0, "q_proj"),
+            Keys.attn(0, 3, "q_proj"),
             Keys.ffn(0, "gate_proj"),
         ):
             arr = params[key]
@@ -260,7 +260,7 @@ class TestGRPOStep:
         streams = np.array([[1, 2, 3, 4, 5, 6]], dtype=np.int64)
         rmask = np.zeros_like(streams)
         rmask[:, 3:] = 1
-        opt = AdamW(lr=1e-2)
+        opt = AdamW(lr=1e-3)  # small lr: with 4 mixers/block the per-step KL pull is gentler
 
         def measure_kl() -> float:
             # mean k3 over the GRADED positions only (the masking
@@ -277,7 +277,7 @@ class TestGRPOStep:
             return float(np.mean(kl_k3(plp, rlp)))
 
         kl_before = measure_kl()
-        for _ in range(20):
+        for _ in range(50):
             grpo_step(tiny_model, ref, streams, rmask, np.zeros(1), opt, g)
         assert measure_kl() < kl_before
 

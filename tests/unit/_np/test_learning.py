@@ -86,8 +86,12 @@ class TestInstrumentedForward:
             "top_tokens",
         ]
         for block in rec["blocks"]:
-            assert sorted(block.keys()) == ["attn", "h", "ln1", "ln2", "moe", "out"]
-            attn = block["attn"]
+            assert sorted(block.keys()) == ["ln2", "mixers", "moe", "out"]
+            assert len(block["mixers"]) == model.config.n_mixers()
+            for m, mx in enumerate(block["mixers"]):
+                is_dn = m < model.config.n_deltanet_sublayers
+                assert sorted(mx.keys()) == (["deltanet", "h", "ln", "out"] if is_dn else ["attn", "h", "ln", "out"])
+            attn = block["mixers"][-1]["attn"]  # the full-attention mixer
             for key in [
                 "q_pre",
                 "k_pre",
@@ -125,7 +129,7 @@ class TestInstrumentedForward:
             assert moe["n_experts"] == 3
             assert len(moe["expert_outs"]) == 3
             assert moe["shared_outs"] == []
-        for norm in [rec["final_norm"]] + [b["ln1"] for b in rec["blocks"]]:
+        for norm in [rec["final_norm"]] + [mx["ln"] for b in rec["blocks"] for mx in b["mixers"]]:
             assert sorted(norm.keys()) == ["gamma", "out", "rms"]
 
     @pytest.mark.timeout(30)
@@ -229,13 +233,13 @@ class TestGenerateWithRecords:
         assert s0["input_tokens"] == prompt
         assert s0["forward"]["positions"] == [0, 1, 2]
         # prefill record already holds the initialized cache: one row per prompt token
-        k0 = s0["forward"]["blocks"][0]["attn"]["k_cache"][0]
+        k0 = s0["forward"]["blocks"][0]["mixers"][-1]["attn"]["k_cache"][0]
         assert len(k0) == model.config.n_heads and len(k0[0]) == len(prompt)
         for i, step in enumerate(rec["steps"][1:], start=1):
             assert step["kind"] == "decode"
             assert step["input_tokens"] == [gen[i - 1]]  # only the new token is computed
             assert step["forward"]["positions"] == [len(prompt) + i - 1]
-            kc = step["forward"]["blocks"][0]["attn"]["k_cache"][0][0]
+            kc = step["forward"]["blocks"][0]["mixers"][-1]["attn"]["k_cache"][0][0]
             assert len(kc) == len(prompt) + i  # cache grew by one row per step
         assert rec["prompt"]["tokens"] == prompt
 

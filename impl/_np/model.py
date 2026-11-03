@@ -152,30 +152,30 @@ class NumPyModel:
             (Keys.lm_head(), self, "lm_head_weight"),
         ]
         for i, block in enumerate(self.stack.layers):
-            slots.append((Keys.ln(i, LayerNorm.INPUT), block.input_layernorm, "gamma"))
             slots.append((Keys.ln(i, LayerNorm.POST_ATTENTION), block.post_attention_layernorm, "gamma"))
-            attn = block.self_attn
-            if self.config.layer_kind(i) == "d":
-                # Gated DeltaNet layer (ADR 0006): its params live under Keys.deltanet.
-                for attr_key, attr_name in (
-                    (DeltaNet.Q_PROJ, "q_proj"),
-                    (DeltaNet.K_PROJ, "k_proj"),
-                    (DeltaNet.V_PROJ, "v_proj"),
-                    (DeltaNet.O_PROJ, "o_proj"),
-                    (DeltaNet.A_PROJ, "a_proj"),
-                    (DeltaNet.DT_BIAS, "dt_bias"),
-                    (DeltaNet.GATE_PROJ, "gate_proj"),
-                ):
-                    slots.append((Keys.deltanet(i, attr_key), attn, attr_name))
-                slots.append((Keys.deltanet(i, DeltaNet.NORM), attn.norm, "gamma"))  # type: ignore[union-attr]
-            else:
-                for proj, attr in (
-                    (Attn.Q_PROJ, "q_proj"),
-                    (Attn.K_PROJ, "k_proj"),
-                    (Attn.V_PROJ, "v_proj"),
-                    (Attn.O_PROJ, "o_proj"),
-                ):
-                    slots.append((Keys.attn(i, proj), attn, attr))
+            for m, (norm, mixer) in enumerate(zip(block.mixer_norms, block.mixers, strict=True)):
+                slots.append((Keys.mixer_ln(i, m), norm, "gamma"))
+                if isinstance(mixer, GatedDeltaNet):
+                    # Gated DeltaNet mixer (ADR 0007): its params live under Keys.deltanet(i, m, ...).
+                    for attr_key, attr_name in (
+                        (DeltaNet.Q_PROJ, "q_proj"),
+                        (DeltaNet.K_PROJ, "k_proj"),
+                        (DeltaNet.V_PROJ, "v_proj"),
+                        (DeltaNet.O_PROJ, "o_proj"),
+                        (DeltaNet.A_PROJ, "a_proj"),
+                        (DeltaNet.DT_BIAS, "dt_bias"),
+                        (DeltaNet.GATE_PROJ, "gate_proj"),
+                    ):
+                        slots.append((Keys.deltanet(i, m, attr_key), mixer, attr_name))
+                    slots.append((Keys.deltanet(i, m, DeltaNet.NORM), mixer.norm, "gamma"))
+                else:
+                    for proj, attr in (
+                        (Attn.Q_PROJ, "q_proj"),
+                        (Attn.K_PROJ, "k_proj"),
+                        (Attn.V_PROJ, "v_proj"),
+                        (Attn.O_PROJ, "o_proj"),
+                    ):
+                        slots.append((Keys.attn(i, m, proj), mixer, attr))
             mlp = block.mlp
             if isinstance(mlp, MixtureOfExperts):
                 slots.append((Keys.moe_gate(i), mlp, "gate"))
@@ -292,19 +292,22 @@ class NumPyModel:
             )
         return logits, {"x_in0": x_in0, "stack_out": stack_out, "position": position}
 
-    def make_cache(self, batch_size: int, quantize: bool = False) -> list[dict]:
-        """Create an empty per-layer KV cache for the per-token step path.
+    def make_cache(self, batch_size: int, quantize: bool = False) -> list[list[dict]]:
+        """Create the per-layer, per-mixer cache for the per-token step path.
 
         batch_size: how many independent sequences the cache serves (one
             row each); the cache's B axis.
         quantize: False → the naive full-precision cache (exact); True →
             the TurboQuant 1-bit cache (lossy, documented alternative).
 
-        Naive cache (quantize=False): each layer gets
+        Cache shape (ADR 0007): one LIST per layer with one dict per mixer
+        (M = config.n_mixers() entries). DeltaNet mixers get
+            {"s": (B, H, hd, hd), "s_hist": []}
+        the full-attention mixer gets
             {"k": (B, G, 0, hd), "v": (B, G, 0, hd)}
-        TurboQuant cache (quantize=True): each layer gets
-            {"bits_k": (B, H, 0, hd) int8, "scales_k": (B, H, 0, 1) float,
-             "bits_v": (B, H, 0, hd) int8, "scales_v": (B, H, 0, 1) float}
+        (TurboQuant, quantize=True: {"bits_k", "scales_k", "bits_v",
+        "scales_v"} for the attention mixer — DeltaNet mixers carry the
+        recurrent S state and are never quantized).
 
         G = the K/V head count (config.kv_heads) and hd = the head dim — the
         naive cache stores K/V *per group*, so GQA caches are H // G times
@@ -318,40 +321,52 @@ class NumPyModel:
         G = self.config.kv_heads
         hd = D // H
         dtype = self.embedding.weight.dtype
-        # Kind-aware per-layer cache (ADR 0006): 'd' layers carry the recurrent
-        # DeltaNet state {"s": (B,H,hd,hd), "s_hist": []} instead of K/V.
+        # Per-mixer caches (ADR 0007): 'd' mixers carry the recurrent
+        # DeltaNet state {"s": (B,H,hd,hd), "s_hist": []}; the 'F' mixer
+        # carries K/V.
         if not quantize:
-            caches: list[dict] = []
-            for i in range(self.config.n_layers):
-                if self.config.layer_kind(i) == "d":
-                    caches.append({"s": np.zeros((B, H, hd, hd), dtype=dtype), "s_hist": []})
-                else:
-                    caches.append(
-                        {"k": np.zeros((B, G, 0, hd), dtype=dtype), "v": np.zeros((B, G, 0, hd), dtype=dtype)}
-                    )
+            caches: list[list[dict]] = []
+            for _i in range(self.config.n_layers):
+                layer_caches: list[dict] = []
+                for m in range(self.config.n_mixers()):
+                    if self.config.mixer_kind(m) == "d":
+                        layer_caches.append({"s": np.zeros((B, H, hd, hd), dtype=dtype), "s_hist": []})
+                    else:
+                        layer_caches.append(
+                            {"k": np.zeros((B, G, 0, hd), dtype=dtype), "v": np.zeros((B, G, 0, hd), dtype=dtype)}
+                        )
+                caches.append(layer_caches)
             return caches
         empty_bits = np.zeros((B, H, 0, hd), dtype=np.int8)
         # Scales are stored per (B, H) — a single scalar per head, broadcast
         # over the sequence and head-dim axes at dequantize time.
         empty_scales = np.zeros((B, H, 0, 1), dtype=dtype)
+        turbo = {
+            "bits_k": empty_bits.copy(),
+            "scales_k": empty_scales.copy(),
+            "bits_v": empty_bits.copy(),
+            "scales_v": empty_scales.copy(),
+        }
         return [
-            {
-                "bits_k": empty_bits.copy(),
-                "scales_k": empty_scales.copy(),
-                "bits_v": empty_bits.copy(),
-                "scales_v": empty_scales.copy(),
-            }
-            for _ in range(self.config.n_layers)
+            [
+                (
+                    {"s": np.zeros((B, H, hd, hd), dtype=dtype), "s_hist": []}
+                    if self.config.mixer_kind(m) == "d"
+                    else turbo.copy()
+                )
+                for m in range(self.config.n_mixers())
+            ]
+            for _i in range(self.config.n_layers)
         ]
 
     def forward_prefill(
         self,
         input_ids: np.ndarray,
-        cache: list[dict] | None = None,
+        cache: list[list[dict]] | None = None,
         position: int = 0,
         quantize: bool = False,
         record: dict | None = None,
-    ) -> tuple[np.ndarray, list[dict]]:
+    ) -> tuple[np.ndarray, list[list[dict]]]:
         """Run a full-sequence forward and fill the per-layer KV cache.
 
         input_ids: (B, S) int token IDs — B independent sequences (they
@@ -392,7 +407,7 @@ class NumPyModel:
         stack_out = self.stack.forward(x, position, record=blocks_rec)  # (B, S, D)
         x_final = self.final_norm.forward(stack_out)  # (B, S, D)
         logits = x_final @ self.lm_head_weight  # (B, S, V)
-        # Backfill each layer's cache from this pass's attention state:
+        # Backfill each layer's per-mixer caches from this pass's mixer states:
         # K/V per group (GQA keeps it small), K already RoPE'd, V un-rotated.
         # Naive path stores per group; TurboQuant quantizes per head after
         # GQA repeat (one (bits, scale) pair per token-write) — the same
@@ -400,27 +415,28 @@ class NumPyModel:
         H = self.config.n_heads
         G = self.config.kv_heads
         for i, block_state in enumerate(blocks_rec):
-            attn_state = block_state["attn"]
-            if self.config.layer_kind(i) == "d":
-                # DeltaNet layer (ADR 0006): backfill the recurrent state and
-                # the per-position snapshot history from the captured scan.
-                cache[i]["s"] = attn_state["s_final"]  # (B, H, hd, hd)
-                cache[i]["s_hist"] = [attn_state["s_hist"][:, :, j] for j in range(attn_state["s_hist"].shape[2])]
-                continue
-            k_group = attn_state["k_group"]  # (B, G, S, hd)
-            v_group = attn_state["v_group"]  # (B, G, S, hd)
-            if quantize:
-                attn_layer = self.stack.layers[i].self_attn
-                assert not isinstance(attn_layer, GatedDeltaNet), (
-                    "TurboQuant is a KV-cache feature; DeltaNet layers carry S state"
-                )
-                k_r = np.repeat(k_group, H // G, axis=1) if G != H else k_group  # (B, H, S, hd)
-                v_r = np.repeat(v_group, H // G, axis=1) if G != H else v_group
-                cache[i]["bits_k"], cache[i]["scales_k"] = attn_layer._quantize_turbo_full(k_r)  # type: ignore[union-attr]
-                cache[i]["bits_v"], cache[i]["scales_v"] = attn_layer._quantize_turbo_full(v_r)  # type: ignore[union-attr]
-            else:
-                cache[i]["k"] = k_group
-                cache[i]["v"] = v_group
+            layer_cache = cache[i]
+            for m, mixer_state in enumerate(block_state["mixers"]):
+                mixer_cache = layer_cache[m]
+                if self.config.mixer_kind(m) == "d":
+                    # DeltaNet mixer (ADR 0007): backfill the recurrent state and
+                    # the per-position snapshot history from the captured scan.
+                    mixer_cache["s"] = mixer_state["s_final"]  # (B, H, hd, hd)
+                    mixer_cache["s_hist"] = [
+                        mixer_state["s_hist"][:, :, j] for j in range(mixer_state["s_hist"].shape[2])
+                    ]
+                    continue
+                k_group = mixer_state["k_group"]  # (B, G, S, hd)
+                v_group = mixer_state["v_group"]  # (B, G, S, hd)
+                if quantize:
+                    mixer_layer = self.stack.layers[i].mixers[m]
+                    k_r = np.repeat(k_group, H // G, axis=1) if G != H else k_group  # (B, H, S, hd)
+                    v_r = np.repeat(v_group, H // G, axis=1) if G != H else v_group
+                    mixer_cache["bits_k"], mixer_cache["scales_k"] = mixer_layer._quantize_turbo_full(k_r)  # type: ignore[union-attr]
+                    mixer_cache["bits_v"], mixer_cache["scales_v"] = mixer_layer._quantize_turbo_full(v_r)  # type: ignore[union-attr]
+                else:
+                    mixer_cache["k"] = k_group
+                    mixer_cache["v"] = v_group
         if record is not None:
             record.update(
                 {
@@ -438,7 +454,7 @@ class NumPyModel:
         self,
         input_ids: np.ndarray,
         position: int,
-        cache: list[dict],
+        cache: list[list[dict]],
         quantize: bool = False,
         record: dict | None = None,
     ) -> np.ndarray:
@@ -506,7 +522,7 @@ class NumPyModel:
         self,
         input_ids: np.ndarray,
         position: int,
-        cache: list[dict],
+        cache: list[list[dict]],
         record: dict | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Process a CHUNK of c tokens against the cached K/V (verification path).
@@ -616,23 +632,24 @@ class NumPyModel:
             Keys.lm_head(): dW_lm,
         }
         for i, block_grads in enumerate(per_layer_grads):
-            grads[Keys.ln(i, LayerNorm.INPUT)] = block_grads["input_layernorm.gamma"]
             grads[Keys.ln(i, LayerNorm.POST_ATTENTION)] = block_grads["post_attention_layernorm.gamma"]
-            if self.config.layer_kind(i) == "d":
-                for attr, name in (
-                    (DeltaNet.Q_PROJ, "q_proj"),
-                    (DeltaNet.K_PROJ, "k_proj"),
-                    (DeltaNet.V_PROJ, "v_proj"),
-                    (DeltaNet.O_PROJ, "o_proj"),
-                    (DeltaNet.A_PROJ, "a_proj"),
-                    (DeltaNet.DT_BIAS, "dt_bias"),
-                    (DeltaNet.GATE_PROJ, "gate_proj"),
-                    (DeltaNet.NORM, "norm"),
-                ):
-                    grads[Keys.deltanet(i, attr)] = block_grads[f"deltanet.{name}"]
-            else:
-                for proj in ATTN_PROJS:
-                    grads[Keys.attn(i, proj)] = block_grads[f"self_attn.{proj}"]
+            for m in range(self.config.n_mixers()):
+                grads[Keys.mixer_ln(i, m)] = block_grads[f"mixer_norms.{m}.gamma"]
+                if self.config.mixer_kind(m) == "d":
+                    for attr, name in (
+                        (DeltaNet.Q_PROJ, "q_proj"),
+                        (DeltaNet.K_PROJ, "k_proj"),
+                        (DeltaNet.V_PROJ, "v_proj"),
+                        (DeltaNet.O_PROJ, "o_proj"),
+                        (DeltaNet.A_PROJ, "a_proj"),
+                        (DeltaNet.DT_BIAS, "dt_bias"),
+                        (DeltaNet.GATE_PROJ, "gate_proj"),
+                        (DeltaNet.NORM, "norm"),
+                    ):
+                        grads[Keys.deltanet(i, m, attr)] = block_grads[f"mixers.{m}.deltanet.{name}"]
+                else:
+                    for proj in ATTN_PROJS:
+                        grads[Keys.attn(i, m, proj)] = block_grads[f"mixers.{m}.self_attn.{proj}"]
             block = self.stack.layers[i]
             if isinstance(block.mlp, MixtureOfExperts):
                 grads[Keys.moe_gate(i)] = block_grads["mlp.gate"]

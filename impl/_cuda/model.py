@@ -49,7 +49,7 @@ from shared.constants import Attn, DeltaNet, Keys, LayerNorm, Mlp
 from shared.registry import ParameterRegistry
 
 
-def _cuda_to_device(model: CUDAModel, device: torch.device | str) -> None:
+def _cuda_to_device(model: CUDAModel, device: torch.device | str) -> None:  # noqa: C901 — per-mixer walks
     """Move every CUDAModel tensor to ``device`` by relocating its storage.
 
     ``tensor.data = tensor.data.to(device)`` (not ``tensor = tensor.to(...)``)
@@ -62,13 +62,17 @@ def _cuda_to_device(model: CUDAModel, device: torch.device | str) -> None:
         for attr in list(block.__dict__.values()):
             if isinstance(attr, torch.Tensor):
                 attr.data = attr.data.to(device)
-        dn = getattr(block, "deltanet", None)
-        if dn is not None:
-            for p in dn._impl.parameters():
-                p.data = p.data.to(device)
+            elif isinstance(attr, list):
+                for item in attr:
+                    if isinstance(item, torch.Tensor):
+                        item.data = item.data.to(device)
+        for mixer in block.mixers:
+            if mixer is not None:
+                for p in mixer._impl.parameters():
+                    p.data = p.data.to(device)
 
 
-def _cuda_to_dtype(model: CUDAModel, dtype: torch.dtype) -> None:
+def _cuda_to_dtype(model: CUDAModel, dtype: torch.dtype) -> None:  # noqa: C901 — per-mixer walks
     """Cast every CUDAModel tensor to ``dtype`` (storage relocation, same
     idiom as :func:`_cuda_to_device` — the block's ``__dict__`` traversal
     catches the stacked expert tensors a per-attribute list would miss)."""
@@ -78,10 +82,14 @@ def _cuda_to_dtype(model: CUDAModel, dtype: torch.dtype) -> None:
         for attr in list(block.__dict__.values()):
             if isinstance(attr, torch.Tensor):
                 attr.data = attr.data.to(dtype)
-        dn = getattr(block, "deltanet", None)
-        if dn is not None:
-            for p in dn._impl.parameters():
-                p.data = p.data.to(dtype)
+            elif isinstance(attr, list):
+                for item in attr:
+                    if isinstance(item, torch.Tensor):
+                        item.data = item.data.to(dtype)
+        for mixer in block.mixers:
+            if mixer is not None:
+                for p in mixer._impl.parameters():
+                    p.data = p.data.to(dtype)
 
 
 class CUDAModel:
@@ -233,38 +241,42 @@ class CUDAModel:
         """
         return torch.device("cuda")
 
-    def make_cache(self, batch_size: int) -> list[dict[str, torch.Tensor]]:
-        """Create an empty per-layer KV cache for the per-token step path.
+    def make_cache(self, batch_size: int) -> list[list[dict[str, torch.Tensor]]]:
+        """Create the per-layer, per-mixer cache for the per-token step path.
 
         Same shape contract as the other tracks (which mirror
-        ``impl._np.model.NumPyModel.make_cache``): each layer gets
+        ``impl._np.model.NumPyModel.make_cache``): one LIST per layer with
+        one dict per mixer — DeltaNet mixers get
+        {"s": (B, H, hd, hd), "s_hist": []}; the attention mixer gets
         {"k": (B, G, 0, hd), "v": (B, G, 0, hd)} — K/V *per group*.
 
-        Returns: one dict per block (n_layers entries).
+        Returns: one list per block (n_layers entries).
         """
         B = batch_size
         G = self.config.kv_heads
+        H = self.config.n_heads
         hd = self.config.head_dim
         device = self.device
         dtype = self.lm_head_weight.dtype
-        caches: list[dict[str, Any]] = []
-        for i in range(self.config.n_layers):
-            if self.config.layer_kind(i) == "d":
-                caches.append(
-                    {"s": torch.zeros(B, self.config.n_heads, hd, hd, device=device, dtype=dtype), "s_hist": []}
-                )
-            else:
-                caches.append(
-                    {
-                        "k": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
-                        "v": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
-                    }
-                )
+        caches: list[list[dict[str, Any]]] = []
+        for _i in range(self.config.n_layers):
+            layer_caches: list[dict[str, Any]] = []
+            for m in range(self.config.n_mixers()):
+                if self.config.mixer_kind(m) == "d":
+                    layer_caches.append({"s": torch.zeros(B, H, hd, hd, device=device, dtype=dtype), "s_hist": []})
+                else:
+                    layer_caches.append(
+                        {
+                            "k": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+                            "v": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+                        }
+                    )
+            caches.append(layer_caches)
         return caches
 
     def forward_prefill(
-        self, input_ids: torch.Tensor, cache: list[dict[str, torch.Tensor]] | None = None, position: int = 0
-    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
+        self, input_ids: torch.Tensor, cache: list[list[dict[str, torch.Tensor]]] | None = None, position: int = 0
+    ) -> tuple[torch.Tensor, list[list[dict[str, torch.Tensor]]]]:
         """Run a full-sequence forward and fill the per-layer KV cache.
 
         Mirrors ``impl._torch.layers.TorchModel.forward_prefill`` (which
@@ -285,29 +297,34 @@ class CUDAModel:
         # as a device pointer.
         device = self.device
         input_ids = input_ids.to(device)
-        states: list[dict[str, torch.Tensor]] = []
+        states: list[list[dict[str, Any]]] = []
         x = self.embedding_weights.to(device)[input_ids]  # (B, S, D)
-        # Capture each block's attention state while forwarding (no second pass).
+        # Capture each block's per-mixer state while forwarding (no second pass).
         for block in self.stacking.blocks:
             block_res = block.forward_state(x, position)
             x = block_res.value
-            states.append(block_res.ctx.display)
+            states.append(block_res.ctx.display)  # type: ignore[arg-type]
         x = _rmsnorm(x, self.final_norm_gamma.to(device), eps=self.config.norm_eps)  # (B, S, D)
         logits = x @ self.lm_head_weight.to(device)  # (B, S, V)
-        for i, attn_state in enumerate(states):
-            if self.config.layer_kind(i) == "d":
-                cache[i]["s"] = attn_state["s_final"]
-                cache[i]["s_hist"] = [attn_state["s_hist"][:, :, j] for j in range(attn_state["s_hist"].shape[2])]  # type: ignore[assignment]
-            else:
-                cache[i]["k"] = attn_state["k_group"]  # (B, G, S, hd)
-                cache[i]["v"] = attn_state["v_group"]  # (B, G, S, hd)
+        for i, mixer_states in enumerate(states):
+            layer_cache = cache[i]
+            for m, mixer_state in enumerate(mixer_states):
+                mixer_cache: dict[str, Any] = layer_cache[m]
+                if self.config.mixer_kind(m) == "d":
+                    mixer_cache["s"] = mixer_state["s_final"]
+                    mixer_cache["s_hist"] = [
+                        mixer_state["s_hist"][:, :, j] for j in range(mixer_state["s_hist"].shape[2])
+                    ]  # type: ignore[assignment]
+                else:
+                    mixer_cache["k"] = mixer_state["k_group"]  # (B, G, S, hd)
+                    mixer_cache["v"] = mixer_state["v_group"]  # (B, G, S, hd)
         return logits, cache
 
     def forward_step(
         self,
         input_ids: torch.Tensor,
         position: int,
-        cache: list[dict[str, torch.Tensor]],
+        cache: list[list[dict[str, torch.Tensor]]],
     ) -> torch.Tensor:
         """Process ONE token per batch row against the cached K/V.
 
@@ -329,11 +346,13 @@ class CUDAModel:
         device = self.device
         input_ids = input_ids.to(device)
         for entry in cache:
-            if "s" in entry:
-                entry["s"] = entry["s"].to(device)
-            else:
-                entry["k"] = entry["k"].to(device)
-                entry["v"] = entry["v"].to(device)
+            for mixer_cache_raw in entry:
+                mixer_cache: dict[str, Any] = mixer_cache_raw
+                if "s" in mixer_cache:
+                    mixer_cache["s"] = mixer_cache["s"].to(device)
+                else:
+                    mixer_cache["k"] = mixer_cache["k"].to(device)
+                    mixer_cache["v"] = mixer_cache["v"].to(device)
         x = self.embedding_weights.to(device)[input_ids]  # (B, 1, D)
         stack_out = self.stacking.forward_step(x, position, cache)  # (B, 1, D)
         x_final = _rmsnorm(stack_out, self.final_norm_gamma.to(device), eps=self.config.norm_eps)  # (B, 1, D)
@@ -343,7 +362,7 @@ class CUDAModel:
         self,
         input_ids: torch.Tensor,
         position: int,
-        cache: list[dict[str, torch.Tensor]],
+        cache: list[list[dict[str, torch.Tensor]]],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Process a CHUNK of c tokens against the cached K/V (verification path).
 
@@ -368,11 +387,13 @@ class CUDAModel:
         device = self.device
         input_ids = input_ids.to(device)
         for entry in cache:
-            if "s" in entry:
-                entry["s"] = entry["s"].to(device)
-            else:
-                entry["k"] = entry["k"].to(device)  # same dicts, mutated in place
-                entry["v"] = entry["v"].to(device)
+            for mixer_cache_raw in entry:
+                mixer_cache: dict[str, Any] = mixer_cache_raw
+                if "s" in mixer_cache:
+                    mixer_cache["s"] = mixer_cache["s"].to(device)
+                else:
+                    mixer_cache["k"] = mixer_cache["k"].to(device)  # same dicts, mutated in place
+                    mixer_cache["v"] = mixer_cache["v"].to(device)
         x = self.embedding_weights.to(device)[input_ids]  # (B, c, D)
         stack_out = self.stacking.forward_chunk(x, position, cache)  # (B, c, D)
         x_final = _rmsnorm(stack_out, self.final_norm_gamma.to(device), eps=self.config.norm_eps)  # (B, c, D)
@@ -391,23 +412,25 @@ class CUDAModel:
             Keys.lm_head(): self.lm_head_weight,
         }
         for i, block in enumerate(self.stacking.blocks):
-            t[Keys.ln(i, LayerNorm.INPUT)] = block.input_layernorm_gamma
             t[Keys.ln(i, LayerNorm.POST_ATTENTION)] = block.post_attention_layernorm_gamma
-            if hasattr(block, "deltanet"):
-                dn = block.deltanet
-                t[Keys.deltanet(i, DeltaNet.Q_PROJ)] = block.q_proj
-                t[Keys.deltanet(i, DeltaNet.K_PROJ)] = block.k_proj
-                t[Keys.deltanet(i, DeltaNet.V_PROJ)] = block.v_proj
-                t[Keys.deltanet(i, DeltaNet.O_PROJ)] = block.o_proj
-                t[Keys.deltanet(i, DeltaNet.A_PROJ)] = dn.a_proj
-                t[Keys.deltanet(i, DeltaNet.GATE_PROJ)] = dn.gate_proj
-                t[Keys.deltanet(i, DeltaNet.DT_BIAS)] = dn.dt_bias
-                t[Keys.deltanet(i, DeltaNet.NORM)] = dn.norm_gamma
-            else:
-                t[Keys.attn(i, Attn.Q_PROJ)] = block.q_proj
-                t[Keys.attn(i, Attn.K_PROJ)] = block.k_proj
-                t[Keys.attn(i, Attn.V_PROJ)] = block.v_proj
-                t[Keys.attn(i, Attn.O_PROJ)] = block.o_proj
+            for m in range(self.config.n_mixers()):
+                t[Keys.mixer_ln(i, m)] = block.mixer_norm_gammas[m]
+                if block.mixers[m] is not None:
+                    dn = block.mixers[m]
+                    t[Keys.deltanet(i, m, DeltaNet.Q_PROJ)] = dn.q_proj
+                    t[Keys.deltanet(i, m, DeltaNet.K_PROJ)] = dn.k_proj
+                    t[Keys.deltanet(i, m, DeltaNet.V_PROJ)] = dn.v_proj
+                    t[Keys.deltanet(i, m, DeltaNet.O_PROJ)] = dn.o_proj
+                    t[Keys.deltanet(i, m, DeltaNet.A_PROJ)] = dn.a_proj
+                    t[Keys.deltanet(i, m, DeltaNet.GATE_PROJ)] = dn.gate_proj
+                    t[Keys.deltanet(i, m, DeltaNet.DT_BIAS)] = dn.dt_bias
+                    t[Keys.deltanet(i, m, DeltaNet.NORM)] = dn.norm_gamma
+                else:
+                    q, k, v, o = block.attn_projs[m]
+                    t[Keys.attn(i, m, Attn.Q_PROJ)] = q
+                    t[Keys.attn(i, m, Attn.K_PROJ)] = k
+                    t[Keys.attn(i, m, Attn.V_PROJ)] = v
+                    t[Keys.attn(i, m, Attn.O_PROJ)] = o
             if self.config.has_moe():
                 t[Keys.moe_gate(i)] = block.router
                 for e in range(self.config.n_experts):

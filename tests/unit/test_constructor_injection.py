@@ -107,7 +107,7 @@ def test_numpy_fresh_model_has_identity_gains() -> None:
 
     model = NumPyModel(_DENSE)
     assert np.all(model.final_norm.gamma == 1.0)
-    assert all(np.all(block.input_layernorm.gamma == 1.0) for block in model.stack.layers)
+    assert all(np.all(norm.gamma == 1.0) for block in model.stack.layers for norm in block.mixer_norms)
 
 
 def test_numpy_mismatched_injection_fails_fast() -> None:

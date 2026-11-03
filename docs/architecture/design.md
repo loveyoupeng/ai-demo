@@ -53,16 +53,18 @@ Known deltas, kept consciously:
 
 ## Architecture
 
-### Hybrid layer pattern (ADR 0006)
+### Per-block mixing sublayers (ADR 0007)
 
-`TransformerConfig.layer_pattern` (e.g. `"dddF"`, repeating over `n_layers`)
-picks each layer's mixing sublayer: **'F'** = full RoPE attention, **'d'** =
-Gated DeltaNet (linear attention — a per-head recurrent state `S (hd, hd)`
-updated by the delta rule, O(hd²) per token, no history read). The 3:1
-DeltaNet:attention ratio is the Qwen3-Next/Kimi-Linear hybrid shape. DeltaNet
-layers carry `{"s", "s_hist"}` in their cache instead of K/V rows; spec
-verification scans DeltaNet layers sequentially and snapshots S per position
-for rollback (greedy spec stays lossless). See ADR 0006 and
+`TransformerConfig.n_deltanet_sublayers` (default 3) makes EVERY block run
+`n_deltanet_sublayers` Gated DeltaNet mixers followed by ONE full RoPE
+attention mixer (`mixer_kinds() == ["d","d","d","F"]`), each with its own
+pre-norm: `h = x; for m: h += mixer_m(RMSNorm_m(h)); out = h + FFN(RMSNorm(h))`.
+**'d' mixers** are linear attention (per-head recurrent state `S (hd, hd)`
+updated by the delta rule, O(hd²) per token, no history read); the **'F'
+mixer** is the existing full attention. Each layer's cache is a LIST of
+per-mixer dicts (`{"s","s_hist"}` ×3 + `{"k","v"}` ×1); spec verification
+scans the DeltaNet mixers sequentially and snapshots S per position for
+rollback (greedy spec stays lossless). See ADR 0006/0007 and
 `impl/_np/deltanet.py` (the math reference, with analytic BPTT backward).
 
 

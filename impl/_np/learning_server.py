@@ -44,7 +44,7 @@ from shared.config import TransformerConfig
 from shared.constants import REP_PENALTY
 
 if TYPE_CHECKING:
-    from impl._torch.layers import TorchModel
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -72,13 +72,15 @@ def count_active_params(cfg: TransformerConfig) -> int:
     n = V * D  # embedding
     n += D  # final norm gamma
     n += D * V  # lm_head
-    n += L * (2 * D)  # two norm gammas per layer
-    for i in range(L):
-        if cfg.layer_kind(i) == "d":
-            # DeltaNet (ADR 0006): q/k/v/o at H heads + a_proj (D*H) + gate_proj (D*D)
-            n += 4 * D * H * hd + D * H + D * D + H + D  # q/k/v/o + a_proj + gate_proj + dt_bias + norm
-        else:
-            n += 4 * D * D  # q/k/v/o at MHA size
+    n += L * (D + D)  # post-attention norm gamma + (per-mixer norms counted below)
+    n += L * cfg.n_mixers() * D  # one pre-norm gamma per mixer (ADR 0007)
+    for _i in range(L):
+        for m in range(cfg.n_mixers()):
+            if cfg.mixer_kind(m) == "d":
+                # DeltaNet mixer (ADR 0007): q/k/v/o at H heads + a_proj (D*H) + gate_proj (D*D)
+                n += 4 * D * H * hd + D * H + D * D + H + D  # q/k/v/o + a_proj + gate_proj + dt_bias + norm
+            else:
+                n += 4 * D * D  # q/k/v/o at MHA size
     if cfg.has_moe():
         FF, E = cfg.expert_dim, cfg.n_experts
         routed = cfg.top_k
@@ -97,7 +99,7 @@ def count_active_params(cfg: TransformerConfig) -> int:
 
 def load_learning_model(
     model_dir: str, backend: Backend = "numpy"
-) -> tuple[NumPyModel | TorchModel, list[str] | None, TransformerConfig, Tokenizer | None]:
+) -> tuple[Any, list[str] | None, TransformerConfig, Tokenizer | None]:
     """Load a checkpoint (+ sidecars: vocab.json + tokenizer.json) into one of
     the four tracks (numpy/torch/triton/cuda).
 
@@ -113,7 +115,7 @@ def load_learning_model(
     if backend == "numpy":
         from impl._np.model import NumPyModel
 
-        model: NumPyModel | TorchModel | Any = NumPyModel(cfg, params)
+        model: Any = NumPyModel(cfg, params)
     elif backend == "torch":
         import torch
 
@@ -127,7 +129,8 @@ def load_learning_model(
         # recompute their display path in float64 from the parameters, and
         # drafter_from_sidecar casts the drafter to the target's dtype, so
         # BF16 serving is dtype-clean end to end). NumPy never uses BF16.
-        model.eval()
+        torch_model = model  # type: ignore[assignment]
+        torch_model.eval()
     elif backend == "triton":
         from impl._triton.model import TritonModel
 
@@ -245,7 +248,7 @@ def _sample(
 class _LearningHandler(BaseHTTPRequestHandler):
     """Static file + JSON API handler with the model(s) bound at construction."""
 
-    model: NumPyModel | TorchModel  # the "default" model (the old backend semantics)
+    model: Any  # NumPyModel | TorchModel | TritonModel | CUDAModel (the "default" model)
     backend: str  # default backend (= startup -backend)
     vocab: list[str] | None
     tokenizer: Tokenizer | None  # main model's BPE (None on old char-only demos)
@@ -464,7 +467,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
             "n_params_active": count_active_params(cfg),
             "has_moe": cfg.has_moe(),
             "has_deltanet": cfg.has_deltanet(),
-            "layer_kinds": [cfg.layer_kind(i) for i in range(cfg.n_layers)],
+            "mixer_kinds": cfg.mixer_kinds(),
             "spec_available": self._spec_available(),
             "default_spec": self.default_spec if self.default_spec in self._spec_available() else "plain",
             "spec_block_size": self._spec_block_sizes(),
@@ -996,7 +999,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
 
 
 def make_handler(
-    model: NumPyModel | TorchModel,
+    model: Any,
     vocab: list[str] | None,
     backend: str = "numpy",
     web_dir: Path = WEB_DIR,
@@ -1032,7 +1035,7 @@ def make_handler(
 
 
 def start_server(
-    model: NumPyModel | TorchModel,
+    model: Any,
     vocab: list[str] | None,
     host: str = "0.0.0.0",
     port: int = 8080,

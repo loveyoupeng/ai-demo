@@ -10,12 +10,20 @@ Naming follows the industry convention used by HuggingFace Llama / Mixtral
 models, so every key is directly searchable on the web:
 
     model.embed_tokens                                  (V, D)
-    model.layers.{i}.self_attn.q_proj.weight            (D, H*hd)
-    model.layers.{i}.self_attn.k_proj.weight            (D, G*hd)
-    model.layers.{i}.self_attn.v_proj.weight            (D, G*hd)
-    model.layers.{i}.self_attn.o_proj.weight            (H*hd, D)
-    model.layers.{i}.input_layernorm.weight             (D,)
-    model.layers.{i}.post_attention_layernorm.weight    (D,)
+    model.layers.{i}.mixers.{m}.input_layernorm.weight   (D,)     per-mixer pre-norm
+    model.layers.{i}.mixers.{m}.self_attn.q_proj.weight (D, H*hd)  mixer m = full attention
+    model.layers.{i}.mixers.{m}.self_attn.k_proj.weight (D, G*hd)
+    model.layers.{i}.mixers.{m}.self_attn.v_proj.weight (D, G*hd)
+    model.layers.{i}.mixers.{m}.self_attn.o_proj.weight (H*hd, D)
+    model.layers.{i}.mixers.{m}.deltanet.q_proj.weight  (D, H*hd)  mixer m = Gated DeltaNet
+    model.layers.{i}.mixers.{m}.deltanet.k_proj.weight  (D, H*hd)
+    model.layers.{i}.mixers.{m}.deltanet.v_proj.weight  (D, H*hd)
+    model.layers.{i}.mixers.{m}.deltanet.o_proj.weight  (H*hd, D)
+    model.layers.{i}.mixers.{m}.deltanet.a_proj.weight  (D, H)
+    model.layers.{i}.mixers.{m}.deltanet.dt_bias.weight (H,)
+    model.layers.{i}.mixers.{m}.deltanet.gate_proj.weight (D, D)
+    model.layers.{i}.mixers.{m}.deltanet.norm.weight   (D,)
+    model.layers.{i}.post_attention_layernorm.weight    (D,)     norm before the FFN
     model.layers.{i}.mlp.gate_proj.weight               (D, FF)   dense SwiGLU
     model.layers.{i}.mlp.up_proj.weight                 (D, FF)
     model.layers.{i}.mlp.down_proj.weight               (FF, D)
@@ -27,9 +35,11 @@ models, so every key is directly searchable on the web:
     model.lm_head.weight                                (D, V)
 
 where D = embed_dim, V = vocab_size, H = n_heads, G = n_groups (K/V heads),
-hd = head_dim, FF = expert_dim, E = n_experts, i = layer index, j = expert
-index. The model uses no bias terms (Llama convention), so every key ends in
-``.weight``.
+hd = head_dim, FF = expert_dim, E = n_experts, i = layer index, m = mixer
+(mixing-sublayer) index within the block, j = expert index. Every block runs
+``n_deltanet_sublayers`` DeltaNet mixers followed by one full-attention mixer
+(ADR 0007), each mixer with its own pre-norm. The model uses no bias terms
+(Llama convention), so every key ends in ``.weight``.
 """
 
 from __future__ import annotations
@@ -69,8 +79,20 @@ FFN_PROJS: tuple[str, str, str] = (Mlp.GATE_PROJ, Mlp.UP_PROJ, Mlp.DOWN_PROJ)
 class LayerNorm:
     """Per-block normalization names (Llama convention)."""
 
-    INPUT: str = "input_layernorm"  # norm before attention
+    INPUT: str = "input_layernorm"  # pre-norm before a mixing sublayer (mixer m)
     POST_ATTENTION: str = "post_attention_layernorm"  # norm before feed-forward
+
+
+class Mixer:
+    """Per-mixer sub-namespace names (ADR 0007: a block's mixing sublayers)."""
+
+    SELF_ATTN: str = "self_attn"  # full-attention mixer's projections
+    DELTANET: str = "deltanet"  # Gated DeltaNet mixer's params
+
+
+def mixer_ln_name(mixer_idx: int) -> str:
+    """HF-ish per-mixer pre-norm attribute name: ``mixers.{m}.input_layernorm``."""
+    return f"mixers.{mixer_idx}.{LayerNorm.INPUT}"
 
 
 class DeltaNet:
@@ -132,16 +154,23 @@ class Keys:
         return f"model.layers.{layer_idx}"
 
     @staticmethod
-    def attn(layer_idx: int, proj: str) -> str:
-        """Attention projection key, e.g. ``Keys.attn(0, Attn.Q_PROJ)``
-        → ``model.layers.0.self_attn.q_proj.weight``."""
-        return f"model.layers.{layer_idx}.self_attn.{proj}.weight"
+    def attn(layer_idx: int, mixer_idx: int, proj: str) -> str:
+        """Attention projection key of mixing sublayer ``mixer_idx``, e.g.
+        ``Keys.attn(0, 3, Attn.Q_PROJ)`` →
+        ``model.layers.0.mixers.3.self_attn.q_proj.weight``."""
+        return f"model.layers.{layer_idx}.mixers.{mixer_idx}.{Mixer.SELF_ATTN}.{proj}.weight"
 
     @staticmethod
     def ln(layer_idx: int, which: str) -> str:
-        """Per-block normalization key, e.g. ``Keys.ln(0, LayerNorm.INPUT)``
-        → ``model.layers.0.input_layernorm.weight``."""
+        """Per-block normalization key, e.g. ``Keys.ln(0, LayerNorm.POST_ATTENTION)``
+        → ``model.layers.0.post_attention_layernorm.weight``."""
         return f"model.layers.{layer_idx}.{which}.weight"
+
+    @staticmethod
+    def mixer_ln(layer_idx: int, mixer_idx: int) -> str:
+        """Per-mixer pre-norm key →
+        ``model.layers.{i}.mixers.{m}.input_layernorm.weight``."""
+        return f"model.layers.{layer_idx}.{mixer_ln_name(mixer_idx)}.weight"
 
     @staticmethod
     def ffn(layer_idx: int, proj: str) -> str:
@@ -167,10 +196,11 @@ class Keys:
         return f"model.layers.{layer_idx}.mlp.shared_experts.{shared_idx}.{proj}.weight"
 
     @staticmethod
-    def deltanet(layer_idx: int, param: str) -> str:
-        """Gated DeltaNet parameter key, e.g. ``Keys.deltanet(0, DeltaNet.Q_PROJ)``
-        → ``model.layers.0.deltanet.q_proj.weight``."""
-        return f"model.layers.{layer_idx}.deltanet.{param}.weight"
+    def deltanet(layer_idx: int, mixer_idx: int, param: str) -> str:
+        """Gated DeltaNet parameter key of mixing sublayer ``mixer_idx``, e.g.
+        ``Keys.deltanet(0, 1, DeltaNet.Q_PROJ)`` →
+        ``model.layers.0.mixers.1.deltanet.q_proj.weight``."""
+        return f"model.layers.{layer_idx}.mixers.{mixer_idx}.{Mixer.DELTANET}.{param}.weight"
 
 
 # ── Generation / decoding ─────────────────────────────────────────────────────

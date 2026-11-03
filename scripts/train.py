@@ -26,6 +26,7 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
+from typing import cast
 
 import torch
 
@@ -188,7 +189,7 @@ def _config_from_dict(config: dict) -> TransformerConfig:
         seed=config.get("seed", 42),
         # BF16 AMP: tensor-core matmuls on the GPU tracks (~2x FP32 on Ampere+);
         # checkpoints store FP32 regardless (see docs/architecture/design.md).
-        dtype=torch.bfloat16,
+        dtype=cast("type | None", torch.bfloat16),
     )
 
 

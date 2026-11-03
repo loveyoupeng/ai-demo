@@ -109,11 +109,12 @@ class TestTransformerBlockForward:
         loss = output.sum()
         loss.backward()
 
-        # Attention: all projection weights should have non-zero gradients.
-        for name, param in block.self_attn.named_parameters():
-            assert param.grad is not None, f"{name} has no gradient"
-            grad_norm = param.grad.norm().item()
-            assert grad_norm > 1e-9, f"{name} gradient norm {grad_norm} too small"
+        # Mixers: every mixer's projection weights should have non-zero gradients.
+        for m, mixer in enumerate(block.mixers):
+            for name, param in mixer.named_parameters():
+                assert param.grad is not None, f"mixer {m} {name} has no gradient"
+                grad_norm = param.grad.norm().item()
+                assert grad_norm > 1e-9, f"mixer {m} {name} gradient norm {grad_norm} too small"
 
         # FFN/MoE: router (MoE) or dense weights all get gradients
         moe_grad_norms = []

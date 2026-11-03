@@ -73,35 +73,28 @@ class DecoderStack:
         return out
 
     def forward_step(
-        self, x: np.ndarray, position: int, cache: list[dict], quantize: bool = False, record: list[dict] | None = None
+        self,
+        x: np.ndarray,
+        position: int,
+        cache: list[list[dict]],
+        quantize: bool = False,
+        record: list[dict] | None = None,
     ) -> np.ndarray:
         """Process ONE new token through all blocks (KV-cached path).
 
         x: (B, 1, D) the new token's vector — ONE new position per sequence.
         position: the absolute token index (for RoPE; must equal the
             caches' current depth).
-        cache: the per-layer cache LIST (one dict per block, in block
-            order; mutated in place).
-        quantize: TurboQuant switch (threaded to every block's attention).
+        cache: the per-layer cache LISTS (one list of per-mixer dicts per
+            block, in block order; ``cache[i][m]`` mutated in place).
+        quantize: TurboQuant switch (threaded to the attention mixer of
+            every block).
         record: optional per-block record list.
 
         Returns: (B, 1, D) the stack output for the new token. Contract:
         equal to the matching slice of ``forward`` over the full sequence
         (the exact KV-step guarantee); every cache ends holding positions
         0..position.
-        """
-        """Process ONE new token through all blocks (KV-cached path).
-
-        x: (B, 1, D) the new token's vector.
-        position: the absolute token index (RoPE).
-        cache: per-layer cache dicts (one per block), mutated in place.
-        quantize: if True, append the new K/V to each layer's cache in 1-bit
-            TurboQuant form and dequantize the full cached tensor before
-            attention; if False, append the full-precision K/V (default).
-        record: optional per-block state dicts (one per layer) filled with the
-            step's intermediates (see ``TransformerBlock.forward_step``).
-
-        Returns: (B, 1, D) the stack output for the new token.
         """
         out = x
         for i, block in enumerate(self.layers):
@@ -111,17 +104,16 @@ class DecoderStack:
         return out
 
     def forward_chunk(
-        self, x: np.ndarray, position: int, cache: list[dict], record: list[dict] | None = None
+        self, x: np.ndarray, position: int, cache: list[list[dict]], record: list[dict] | None = None
     ) -> np.ndarray:
         """Process a CHUNK of c tokens through all blocks (KV-cached path).
 
-        Mirrors ``forward_step`` with the attention core swapped for the
-        chunk form: one pass appends every chunk token's K/V per layer and
-        scores all chunk positions in parallel — the verification pass.
+        Mirrors ``forward_step`` with each mixer's chunk form.
 
         x: (B, c, D). position: absolute index of the chunk's first token.
-        cache: the per-layer cache list (mutated in place). record: optional
-        per-block record list (same as ``forward_step``'s).
+        cache: the per-layer cache lists (``cache[i][m]`` per mixer,
+            mutated in place). record: optional per-block record list (same
+            as ``forward_step``'s).
 
         Returns: (B, c, D).
         """

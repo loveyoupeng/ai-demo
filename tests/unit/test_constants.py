@@ -8,6 +8,7 @@ from shared.constants import (
     ATTN_PROJS,
     FFN_PROJS,
     Attn,
+    DeltaNet,
     Keys,
     LayerNorm,
     Mlp,
@@ -57,12 +58,21 @@ def test_keys_layer() -> None:
 
 
 def test_keys_attn() -> None:
-    assert Keys.attn(0, Attn.Q_PROJ) == "model.layers.0.self_attn.q_proj.weight"
-    assert Keys.attn(1, Attn.O_PROJ) == "model.layers.1.self_attn.o_proj.weight"
+    assert Keys.attn(0, 3, Attn.Q_PROJ) == "model.layers.0.mixers.3.self_attn.q_proj.weight"
+    assert Keys.attn(1, 0, Attn.O_PROJ) == "model.layers.1.mixers.0.self_attn.o_proj.weight"
+
+
+def test_keys_mixer_ln() -> None:
+    assert Keys.mixer_ln(0, 0) == "model.layers.0.mixers.0.input_layernorm.weight"
+    assert Keys.mixer_ln(2, 3) == "model.layers.2.mixers.3.input_layernorm.weight"
+
+
+def test_keys_deltanet() -> None:
+    assert Keys.deltanet(0, 1, DeltaNet.Q_PROJ) == "model.layers.0.mixers.1.deltanet.q_proj.weight"
 
 
 def test_keys_ln() -> None:
-    assert Keys.ln(0, LayerNorm.INPUT) == "model.layers.0.input_layernorm.weight"
+    assert Keys.ln(0, LayerNorm.POST_ATTENTION) == "model.layers.0.post_attention_layernorm.weight"
     assert Keys.ln(1, LayerNorm.POST_ATTENTION) == "model.layers.1.post_attention_layernorm.weight"
 
 

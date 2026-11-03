@@ -210,11 +210,12 @@ the dev loop.
 - `shared/config.py` — `TransformerConfig`: single source of truth for every
   dimension (GQA, RoPE, MoE); validated in `__post_init__`, derived fields
   computed.
-- **Hybrid 3:1 Gated DeltaNet (ADR 0006)**: `TransformerConfig.layer_pattern`
-  (e.g. `"dddF"`) picks per-layer mixing — 'd' = Gated DeltaNet (recurrent
-  `S` state in the cache, sequential chunk scan), 'F' = full RoPE attention.
-  NumPy = math reference with analytic BPTT backward (`impl/_np/deltanet.py`);
-  torch/triton/cuda = framework equivalents. Page renders a `deltanet` module.
+- **Per-block mixers (ADR 0007)**: `TransformerConfig.n_deltanet_sublayers`
+  (default 3) makes every block run 3 Gated DeltaNet mixers + 1 full RoPE
+  attention mixer (`mixer_kinds() == ["d","d","d","F"]`), each with its own
+  pre-norm. NumPy = math reference with analytic BPTT backward
+  (`impl/_np/deltanet.py`); torch/triton/cuda = framework equivalents. Page
+  renders one `deltanet`/`attn` module per mixer inside each block.
 - `shared/constants.py` + `shared/registry.py` — the checkpoint contract
   (HF-Llama key scheme; format owner with `validate()`).
 - `impl/_np/model.py` — reference `NumPyModel` (forward, analytic backward,

@@ -30,11 +30,14 @@ class TestTritonModelNamingParity:
 
     def test_model_level_keys_match_torch(self) -> None:
         """TritonModel and TorchModel expose identical parameter key names."""
-        triton_params = _keys(TritonModel(_cfg()))
-        torch_params = _keys(TorchModel(_cfg()))
+        from shared.registry import ParameterRegistry
 
-        assert triton_params == torch_params, (
-            f"Key sets differ.\nonly in triton: {sorted(triton_params - torch_params)}\nonly in torch: {sorted(torch_params - triton_params)}"
+        cfg = _cfg()
+        triton_keys = set(ParameterRegistry(cfg).bind(TritonModel(cfg)._param_tensors()).keys())
+        torch_keys = set(ParameterRegistry(cfg).bind(TorchModel(cfg)._param_tensors()).keys())
+
+        assert triton_keys == torch_keys, (
+            f"Registry key sets differ.\nonly in triton: {sorted(triton_keys - torch_keys)}\nonly in torch: {sorted(torch_keys - triton_keys)}"
         )
 
     def test_model_level_final_ln_matches(self) -> None:

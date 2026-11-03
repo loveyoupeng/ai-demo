@@ -270,7 +270,7 @@ each step recomputes only the new token's K/V (one row appended per block):
   cache and only the last `context_length` tokens in the softmax window at prefill;
   the learning page documents this window → full-history semantics explicitly.
 
-## 8b. Gated DeltaNet — linear attention in a 3:1 hybrid (ADR 0006)
+## 8b. Gated DeltaNet — linear attention mixers inside every block (ADR 0006/0007)
 
 Full attention is O(S²) to build the score matrix and O(S) per decode token.
 A **DeltaNet** layer keeps ONE recurrent state matrix `S` per head
@@ -284,10 +284,11 @@ o_t    = S_t q̂_t                          # read-out, O(hd²)
 out    = sigmoid(x_t W_g) ⊙ RMSNorm(o_t W_o)
 ```
 
-`layer_pattern = "dddF"` puts 3 DeltaNet layers per 1 full-attention layer.
-The cache for a 'd' layer is `{"s", "s_hist"}` (state + per-position
-snapshots) instead of K/V rows; spec verification scans 'd' layers
-sequentially and restores S at the accepted prefix on rollback (lossless).
+`n_deltanet_sublayers = 3` puts 3 DeltaNet mixers + 1 full-attention mixer
+INSIDE every block (`mixer_kinds() == ["d","d","d","F"]`). Each mixer's cache
+entry is `{"s", "s_hist"}` (state + per-position snapshots) instead of K/V
+rows; spec verification scans the DeltaNet mixers sequentially and restores
+S at the accepted prefix on rollback (lossless).
 Code: `impl/_np/deltanet.py` (reference + analytic backward),
 `impl/_torch/layers.py::GatedDeltaNet`, triton/cuda mirrors.
 

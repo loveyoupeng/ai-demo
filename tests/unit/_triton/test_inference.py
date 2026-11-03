@@ -47,21 +47,25 @@ class SimpleModel(nn.Module):
         self.embedding = nn.Embedding(vocab_size, embed_dim)
         self.linear = nn.Linear(embed_dim, vocab_size)
 
-    def make_cache(self, batch_size):
+    def make_cache(self, batch_size: int) -> list[list[dict[str, torch.Tensor]]]:
         hd = self.embedding.embedding_dim
-        return [{"k": torch.zeros(batch_size, 1, 0, hd), "v": torch.zeros(batch_size, 1, 0, hd)} for _ in range(1)]
+        return [[{"k": torch.zeros(batch_size, 1, 0, hd), "v": torch.zeros(batch_size, 1, 0, hd)}]]
 
-    def forward_prefill(self, input_ids, cache=None):
+    def forward_prefill(
+        self, input_ids: torch.Tensor, cache: list[list[dict[str, torch.Tensor]]] | None = None
+    ) -> tuple[torch.Tensor, list[list[dict[str, torch.Tensor]]]]:
         if cache is None:
             cache = self.make_cache(input_ids.shape[0])
         logits = self.linear(self.embedding(input_ids))
         return logits, cache
 
-    def forward_step(self, input_ids, position, cache):
+    def forward_step(
+        self, input_ids: torch.Tensor, position: int, cache: list[list[dict[str, torch.Tensor]]]
+    ) -> torch.Tensor:
         # Deterministic per-token logits; append to the cache so the step
         # path is exercised.
         emb = self.embedding(input_ids)  # (B, 1, E)
-        cache[0]["k"] = torch.cat([cache[0]["k"], emb.unsqueeze(1).permute(0, 2, 1, 3)], dim=2)
+        cache[0][0]["k"] = torch.cat([cache[0][0]["k"], emb.unsqueeze(1).permute(0, 2, 1, 3)], dim=2)
         return self.linear(emb)  # (B, 1, V)
 
 

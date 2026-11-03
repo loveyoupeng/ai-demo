@@ -80,10 +80,10 @@ class _ChunkModel(Protocol):
         appends the chunk's K/V and scores all c positions; returns
         (logits (B, c, V), x_final (B, c, D)) — the verification path."""
 
-    def make_cache(self, batch_size: int) -> list[dict[str, torch.Tensor]]: ...
+    def make_cache(self, batch_size: int) -> list[list[dict[str, torch.Tensor]]]: ...
 
     def forward_chunk(
-        self, input_ids: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]
+        self, input_ids: torch.Tensor, position: int, cache: list[list[dict[str, torch.Tensor]]]
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 
@@ -174,7 +174,9 @@ class SpeculativeGenerator:
         self.drafter = drafter
 
     # ── helpers ────────────────────────────────────────────────────────────
-    def _prefill(self, prompt: torch.Tensor, cache: list[dict[str, torch.Tensor]]) -> tuple[torch.Tensor, torch.Tensor]:
+    def _prefill(
+        self, prompt: torch.Tensor, cache: list[list[dict[str, torch.Tensor]]]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Prefill = one full chunk pass over the prompt on an empty cache.
 
         forward_chunk over the whole prompt at position 0 IS the plain
@@ -187,24 +189,27 @@ class SpeculativeGenerator:
         return logits[:, -1:, :], x_final[:, -1, :]
 
     @staticmethod
-    def _trim_cache(cache: list[dict[str, Any]], n: int) -> None:
+    def _trim_cache(cache: list[list[dict[str, Any]]], n: int) -> None:
         """Drop every cached position >= n (rejected draft tail).
 
-        Attention layers slice the K/V rows; DeltaNet layers (ADR 0006)
+        Attention mixers slice the K/V rows; DeltaNet mixers (ADR 0007)
         cannot slice the recurrent S — restore the snapshot taken at
-        position n from s_hist and truncate the snapshot list."""
+        position n from s_hist and truncate the snapshot list. Each layer's
+        cache is a per-mixer list, so both rollbacks run per mixer."""
         for layer in cache:
-            if "s" in layer:
-                # s_hist[i] is the state AFTER position i; keep positions
-                # 0..n-1 (like the K/V slice :n) → restore s_hist[n-1].
-                layer["s"] = layer["s_hist"][n - 1].clone()
-                del layer["s_hist"][n:]
-            else:
-                layer["k"] = layer["k"][:, :, :n]
-                layer["v"] = layer["v"][:, :, :n]
+            for mixer_raw in layer:
+                mixer: dict[str, Any] = mixer_raw
+                if "s" in mixer:
+                    # s_hist[i] is the state AFTER position i; keep positions
+                    # 0..n-1 (like the K/V slice :n) → restore s_hist[n-1].
+                    mixer["s"] = mixer["s_hist"][n - 1].clone()
+                    del mixer["s_hist"][n:]
+                else:
+                    mixer["k"] = mixer["k"][:, :, :n]
+                    mixer["v"] = mixer["v"][:, :, :n]
 
     def _commit(
-        self, cache: list[dict[str, torch.Tensor]], position: int, token: int
+        self, cache: list[list[dict[str, torch.Tensor]]], position: int, token: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Append the committed anchor token to the target cache and return
         (its logits (1, 1, V), its final-norm hidden (1, D)) — the next
@@ -221,8 +226,9 @@ class SpeculativeGenerator:
         block, so its K/V row and its hidden state do not exist until this
         pass — production MTP serving has the same shape.
         """
-        # first layer's cache picks the device — DeltaNet layers carry "s" instead of "k"
-        first = cache[0]
+        # first layer's first mixer cache picks the device — DeltaNet mixers
+        # carry "s" instead of "k"
+        first: dict[str, Any] = cache[0][0]
         device = first["k"].device if "k" in first else first["s"].device
         token_ids = torch.tensor([[token]], dtype=torch.long, device=device)
         logits, x_final = self.model.forward_chunk(token_ids, position, cache)

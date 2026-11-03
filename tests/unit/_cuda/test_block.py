@@ -44,12 +44,10 @@ class TestBlockInit:
         """All expected attributes must be present."""
         block = CuTransformerBlock(_block_cfg(), seed=42)
         required = [
-            "input_layernorm_gamma",
+            "mixer_norm_gammas",
             "post_attention_layernorm_gamma",
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
+            "mixers",
+            "attn_projs",
             "router",
             "expert_gate_proj",
             "expert_up_proj",
@@ -57,33 +55,39 @@ class TestBlockInit:
         ]
         for attr in required:
             assert hasattr(block, attr), f"Missing attribute: {attr}"
-            assert isinstance(getattr(block, attr), torch.Tensor), f"{attr} is not Tensor"
+        for g in block.mixer_norm_gammas:
+            assert isinstance(g, torch.Tensor), "mixer norm gamma is not Tensor"
+        assert isinstance(block.post_attention_layernorm_gamma, torch.Tensor)
 
     def test_ln_gamma_shape(self) -> None:
-        """RMSNorm gamma: (D,)."""
+        """RMSNorm gamma: (D,) per mixer + post-attention."""
         D = 32
         block = CuTransformerBlock(_block_cfg(embed_dim=D), seed=42)
-        assert block.input_layernorm_gamma.shape == (D,)
+        assert len(block.mixer_norm_gammas) == block.config.n_mixers()
+        for g in block.mixer_norm_gammas:
+            assert g.shape == (D,)
+            assert torch.allclose(g, torch.ones(D))
         assert block.post_attention_layernorm_gamma.shape == (D,)
-        assert torch.allclose(block.input_layernorm_gamma, torch.ones(D))
         assert torch.allclose(block.post_attention_layernorm_gamma, torch.ones(D))
 
     def test_mha_weight_shapes(self) -> None:
-        """Q/K/V/O projections: (D, H*hd) / (D, G*hd) / (H*hd, D)."""
+        """Q/K/V/O projections: (D, H*hd) / (D, G*hd) / (H*hd, D) on the attention mixer."""
         D, H, G, hd = 32, 4, 4, 8
         block = CuTransformerBlock(_block_cfg(embed_dim=D, n_heads=H, n_groups=G), seed=42)
-        assert block.q_proj.shape == (D, H * hd)
-        assert block.k_proj.shape == (D, G * hd)
-        assert block.v_proj.shape == (D, G * hd)
-        assert block.o_proj.shape == (H * hd, D)
+        q, k, v, o = block.attn_projs[-1]
+        assert q.shape == (D, H * hd)
+        assert k.shape == (D, G * hd)
+        assert v.shape == (D, G * hd)
+        assert o.shape == (H * hd, D)
 
     def test_gqa_k_v_shapes(self) -> None:
-        """GQA: k/v have n_groups heads, q has n_heads heads."""
+        """GQA: k/v have n_groups heads, q has n_heads heads (attention mixer)."""
         D, H, G = 32, 6, 3
         block = CuTransformerBlock(_block_cfg(embed_dim=D, n_heads=H, n_groups=G), seed=42)
-        assert block.q_proj.shape == (D, 6 * (D // 6))
-        assert block.k_proj.shape == (D, 3 * (D // 6))
-        assert block.v_proj.shape == (D, 3 * (D // 6))
+        q, k, v, _o = block.attn_projs[-1]
+        assert q.shape == (D, 6 * (D // 6))
+        assert k.shape == (D, 3 * (D // 6))
+        assert v.shape == (D, 3 * (D // 6))
 
     def test_moe_weight_shapes(self) -> None:
         """MoE: router (D, E); expert gate/up (E, D, FF); expert down (E, FF, D)."""
@@ -209,10 +213,18 @@ class TestBlockForward:
             _block_cfg(embed_dim=16, n_heads=2, n_experts=1, top_k=1, expert_dim=32, rope_dim=0, seed=0), seed=0
         )
         with torch.no_grad():
-            block.q_proj.zero_()
-            block.k_proj.zero_()
-            block.v_proj.zero_()
-            block.o_proj.zero_()
+            for m, mixer in enumerate(block.mixers):
+                if mixer is not None:
+                    mixer.q_proj.zero_()
+                    mixer.k_proj.zero_()
+                    mixer.v_proj.zero_()
+                    mixer.o_proj.zero_()
+                else:
+                    q, k, v, o = block.attn_projs[m]
+                    q.zero_()
+                    k.zero_()
+                    v.zero_()
+                    o.zero_()
             block.gate_proj.zero_()
             block.up_proj.zero_()
             block.down_proj.zero_()

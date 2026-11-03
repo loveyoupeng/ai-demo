@@ -28,24 +28,24 @@ class TinyStepModel(torch.nn.Module):
         self.emb = torch.nn.Embedding(vocab_size, 8)
         self.fc = torch.nn.Linear(8, vocab_size)
 
-    def make_cache(self, batch_size: int) -> list[dict[str, torch.Tensor]]:
-        return [{"k": torch.zeros(batch_size, 1, 0, 8), "v": torch.zeros(batch_size, 1, 0, 8)} for _ in range(1)]
+    def make_cache(self, batch_size: int) -> list[list[dict[str, torch.Tensor]]]:
+        return [[{"k": torch.zeros(batch_size, 1, 0, 8), "v": torch.zeros(batch_size, 1, 0, 8)}]]
 
     def forward_prefill(
-        self, input_ids: torch.Tensor, cache: list[dict[str, torch.Tensor]] | None = None
-    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
+        self, input_ids: torch.Tensor, cache: list[list[dict[str, torch.Tensor]]] | None = None
+    ) -> tuple[torch.Tensor, list[list[dict[str, torch.Tensor]]]]:
         if cache is None:
             cache = self.make_cache(input_ids.shape[0])
         logits = self.fc(self.emb(input_ids))
         return logits, cache
 
     def forward_step(
-        self, input_ids: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]
+        self, input_ids: torch.Tensor, position: int, cache: list[list[dict[str, torch.Tensor]]]
     ) -> torch.Tensor:
         # Deterministic per-token logits: token id → a distinct logit row.
         logits = self.fc(self.emb(input_ids))  # (B, 1, V)
         # Append to the cache so the step path is exercised.
-        cache[0]["k"] = torch.cat([cache[0]["k"], self.emb(input_ids).unsqueeze(1).permute(0, 2, 1, 3)], dim=2)
+        cache[0][0]["k"] = torch.cat([cache[0][0]["k"], self.emb(input_ids).unsqueeze(1).permute(0, 2, 1, 3)], dim=2)
         return logits
 
 

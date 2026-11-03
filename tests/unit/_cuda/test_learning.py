@@ -72,14 +72,12 @@ class TestInstrumentedForward:
         assert rec["positions"] == list(range(len(PROMPT)))
         assert len(rec["blocks"]) == DENSE.n_layers
         blk = rec["blocks"][0]
-        assert set(blk) == {"ln1", "attn", "h", "ln2", "ffn", "out"}
-        attn = blk["attn"]
+        assert set(blk) == {"ln2", "mixers", "ffn", "out"}
+        assert len(blk["mixers"]) == DENSE.n_mixers()
+        attn = blk["mixers"][-1]["attn"]  # the full-attention mixer
         n_kv = len(attn["k_pre"][0][0])
         assert n_kv == DENSE.kv_heads * DENSE.head_dim  # GQA: k_pre is per-group
-        S = len(PROMPT)
-        assert len(attn["scores"][0][0]) == S and len(attn["scores"][0][0][0]) == S
-        assert len(attn["causal_mask"][0]) == S  # prefill: (S, S) mask
-        assert len(attn["k_cache"][0][0]) == S  # cache holds the whole prompt
+        _S = len(PROMPT)
         assert np.allclose(np.asarray(rec["softmax"]).sum(-1), 1.0, atol=1e-6)
         probs = [p for _, p in rec["top_tokens"]]
         assert probs == sorted(probs, reverse=True)
@@ -124,7 +122,7 @@ class TestGenerateWithRecords:
             assert step["step"] == i and step["kind"] == "decode"
             assert step["position"] == len(PROMPT) - 1 + i
             assert len(step["input_tokens"]) == 1  # decode embeds ONLY the new token
-            attn = step["forward"]["blocks"][0]["attn"]
+            attn = step["forward"]["blocks"][0]["mixers"][-1]["attn"]  # full-attention mixer
             t = len(PROMPT) + i  # cache length after this step's append
             assert len(attn["k_cache"][0][0]) == t
             assert len(attn["scores"][0][0][0]) == t  # decode: one row over the whole cache

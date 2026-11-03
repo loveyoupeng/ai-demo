@@ -42,7 +42,7 @@ class TestDecoderStackForward:
         baseline = stack.forward(x.copy())
 
         # Perturb first block's input layernorm gamma
-        stack.layers[0].input_layernorm.gamma = stack.layers[0].input_layernorm.gamma * 2.0
+        stack.layers[0].mixer_norms[0].gamma = stack.layers[0].mixer_norms[0].gamma * 2.0
         out_perturbed = stack.forward(x.copy())
 
         assert not np.allclose(baseline, out_perturbed, atol=1e-3), "Gradients should flow through all blocks"

@@ -48,14 +48,14 @@ class _StepModel(Protocol):
     forward_step(input_ids (B, 1) int, position int, cache) — ONE new
         token against the cached K/V; returns logits (B, 1, V)."""
 
-    def make_cache(self, batch_size: int) -> list[dict[str, torch.Tensor]]: ...
+    def make_cache(self, batch_size: int) -> list[list[dict[str, torch.Tensor]]]: ...
 
     def forward_prefill(
-        self, input_ids: torch.Tensor, cache: list[dict[str, torch.Tensor]] | None = None
-    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]: ...
+        self, input_ids: torch.Tensor, cache: list[list[dict[str, torch.Tensor]]] | None = None
+    ) -> tuple[torch.Tensor, list[list[dict[str, torch.Tensor]]]]: ...
 
     def forward_step(
-        self, input_ids: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]
+        self, input_ids: torch.Tensor, position: int, cache: list[list[dict[str, torch.Tensor]]]
     ) -> torch.Tensor: ...
 
 

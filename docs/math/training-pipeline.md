@@ -15,12 +15,13 @@ Shape letters used below (full definitions: [CONTEXT.md](../../CONTEXT.md) →
 sequence length (token positions in one pass), **D** = `embed_dim` (model
 width), **V** = `vocab_size`.
 
-## Architecture note — 3:1 Gated DeltaNet hybrid (ADR 0006)
+## Architecture note — per-block mixers (ADR 0007)
 
-Every demo model now runs `layer_pattern = "dddF"`: 3 of every 4 layers are
-Gated DeltaNet (linear attention, recurrent `S` state), 1 is full RoPE
-attention. The pipeline stages below are unchanged — the hybrid only changes
-which mixing sublayer each layer runs. See the walkthrough §8b and ADR 0006.
+Every demo model runs `n_deltanet_sublayers = 3`: each block contains 3
+Gated DeltaNet mixers (linear attention, recurrent `S` state) + 1 full RoPE
+attention mixer. The pipeline stages below are unchanged — the hybrid only
+changes which mixing sublayers each block runs. See the walkthrough §8b and
+ADRs 0006/0007.
 
 ## Stage 1 — Pre-Training (what it is)
 

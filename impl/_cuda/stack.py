@@ -150,7 +150,7 @@ class CuDecoderStack:
             states[i] = block_res.ctx.display  # {block index: k_group/v_group}
         return Result.capture(out, {}, {}, states)
 
-    def forward_step(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
+    def forward_step(self, x: torch.Tensor, position: int, cache: list[list[dict[str, torch.Tensor]]]) -> torch.Tensor:
         """Process ONE new token through all blocks (KV-cached path).
 
         Mirrors ``impl._torch.layers.DecoderStack.forward_step``: each block
@@ -167,7 +167,7 @@ class CuDecoderStack:
             out = block.forward_step(out, position, cache[i])
         return out
 
-    def forward_chunk(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: list[list[dict[str, torch.Tensor]]]) -> torch.Tensor:
         """Process a CHUNK of c tokens through all blocks (KV-cached path).
 
         Mirrors ``impl._torch.layers.DecoderStack.forward_chunk`` (which

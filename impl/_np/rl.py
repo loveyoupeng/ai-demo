@@ -149,7 +149,7 @@ def rollout(
     seqs = np.tile(prompt_ids, (G, 1))  # (G, S)
     out = np.zeros((G, T), dtype=np.int64)
     done = np.zeros(G, dtype=bool)
-    cache = model.make_cache(G)
+    cache: list[list[dict]] = model.make_cache(G)
     logits, _ = model.forward_prefill(seqs, cache=cache)  # (G, S, V)
     nxt_logits: np.ndarray = logits[:, -1, :]  # (G, V) — after the prompt
     for t in range(T):

@@ -2,12 +2,12 @@
 # Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """Learning mode — host the interactive transformer visualization page.
 
-Served checkpoints are the 3:1 Gated DeltaNet hybrid (ADR 0006,
-``layer_pattern="dddF"``): 3 of every 4 layers run linear attention with a
-recurrent S state, 1 runs full RoPE attention. The page renders a
-``deltanet`` module per 'd' layer (projections, forget/output gates, the
-per-position S matrices, the read-out) and labels that layer's cache node
-"S state". BF16 is the running serving dtype on the torch/triton/cuda
+Served checkpoints run per-block mixers (ADR 0007,
+``n_deltanet_sublayers=3``): every block contains 3 linear-attention mixers
+(Gated DeltaNet, recurrent S state) + 1 full RoPE attention mixer. The page
+renders a ``deltanet``/``attn`` module per mixer (projections, forget/output
+gates, the per-position S matrices, the read-out) and labels each mixer's
+cache node "S state" or "K/V cache". BF16 is the running serving dtype on the
 backends (the page's records recompute the displayed math in float64);
 NumPy computes the reference in float64/float32.
 

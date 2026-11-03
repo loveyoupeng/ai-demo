@@ -111,8 +111,9 @@ def _moe_selections(model: NumPyModel, input_ids: np.ndarray) -> list[np.ndarray
         if not isinstance(mlp, MixtureOfExperts):
             continue
         # Recompute the FFN input exactly as the block forward does.
-        h = block.input_layernorm.forward(x)
-        h = h + block.self_attn.forward(h, position)
+        h = x
+        for norm, mixer in zip(block.mixer_norms, block.mixers, strict=True):
+            h = h + mixer.forward(norm.forward(h), position)
         h = block.post_attention_layernorm.forward(h)
         scores = h @ mlp.gate  # (B, S, E)
         scores = scores - np.max(scores, axis=-1, keepdims=True)

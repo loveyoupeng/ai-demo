@@ -73,7 +73,7 @@ class TestTransformerBlockWiring:
 
         block = TritonTransformerBlock(_block_cfg())
         D = block.config.embed_dim
-        assert block.input_layernorm.weight.shape == (D,)
+        assert block.mixer_norms[0].weight.shape == (D,)  # the first mixer's pre-norm
         assert block.post_attention_layernorm.weight.shape == (D,)
 
     @pytest.mark.timeout(60)
@@ -87,15 +87,17 @@ class TestTransformerBlockWiring:
         loss = out.sum()
         loss.backward()
 
-        attn_grad = block.self_attn.q_proj.weight.grad  # type: ignore[attr-defined]
+        attn_grad = block.mixers[-1].q_proj.weight.grad  # the full-attention mixer  # type: ignore[attr-defined]
         assert attn_grad is not None and float(attn_grad.norm()) > 1e-6  # type: ignore[union-attr]
+        dn_grad = block.mixers[0]._impl.q_proj.weight.grad  # type: ignore[attr-defined]
+        assert dn_grad is not None and float(dn_grad.norm()) > 1e-6  # type: ignore[union-attr]
         if hasattr(block.mlp, "expert_list"):
             mlp_grad = block.mlp.expert_list[0].gate_proj.grad  # type: ignore[attr-defined]
         else:
             mlp_grad = block.mlp.gate_proj.grad  # type: ignore[attr-defined]
         assert mlp_grad is not None, "FFN/MoE gradient should exist"
-        ln_grad = block.input_layernorm.weight.grad
-        assert ln_grad is not None, "Layernorm gradient should exist"
+        ln_grad = block.mixer_norms[0].weight.grad
+        assert ln_grad is not None, "Mixer-norm gradient should exist"
 
     @pytest.mark.timeout(60)
     def test_attn_and_mlp_both_active(self):
@@ -107,7 +109,7 @@ class TestTransformerBlockWiring:
         out = block(x)
         # Zero the attention output weights -> attention suppressed -> output changes
         with torch.no_grad():
-            block.self_attn.o_proj.weight.zero_()  # type: ignore[union-attr]
+            block.mixers[-1].o_proj.weight.zero_()  # zero the attention mixer's output  # type: ignore[union-attr]
         out_no_attn = block(x)
         assert not torch.allclose(out, out_no_attn, atol=1e-3), "Attention should contribute to output"
         assert torch.isfinite(out).all()
@@ -129,13 +131,19 @@ class TestTransformerBlockWiring:
         tr_block = TritonTransformerBlock(cfg)
 
         # Copy weights attribute by attribute (FFN/MoE are raw (in,out) in triton).
-        tr_block.input_layernorm.weight.data = torch_block.input_layernorm.weight.data.float().to("cuda")
-        tr_block.post_attention_layernorm.weight.data = torch_block.post_attention_layernorm.weight.data.float().to(
-            "cuda"
-        )
-        for name in ["q_proj", "k_proj", "v_proj", "o_proj"]:
-            w = getattr(torch_block.self_attn, name).weight.data.float()
-            getattr(tr_block.self_attn, name).weight.data = w.to("cuda")
+        for _m, (tmix, rmix) in enumerate(zip(torch_block.mixers, tr_block.mixers, strict=True)):
+            src = tmix
+            dst = rmix._impl if hasattr(rmix, "_impl") else rmix
+            for n, w in src.named_parameters():
+                mod = dst
+                parts = n.split(".")
+                for part in parts[:-1]:
+                    mod = getattr(mod, part)
+                leaf = getattr(mod, parts[-1])
+                if isinstance(leaf, torch.nn.Parameter):
+                    leaf.data = w.data.float().to("cuda")
+                else:
+                    leaf.weight.data = w.data.float().to("cuda")
 
         t_ffn = torch_block.mlp
         r_ffn = tr_block.mlp

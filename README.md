@@ -172,12 +172,13 @@ the equation, the *why*, and the code anchor) lives in one place:
   reference), PyTorch (autograd + `F.scaled_dot_product_attention` +
   `torch.optim`), Triton (FlashAttention-style online-softmax kernel), CUDA
   (NVRTC kernels for RMSNorm, RoPE, attention, FFN).
-- **Hybrid 3:1 Gated DeltaNet** (ADR 0006): `layer_pattern="dddF"` — 3 linear-attention
-  (Gated DeltaNet, recurrent `S` state) layers per 1 full RoPE attention layer, on all
-  four backends; NumPy carries the analytic backward (BPTT), the page renders and
-  inspects every DeltaNet intermediate.
+- **Per-block mixing sublayers** (ADR 0007): `n_deltanet_sublayers=3` — every
+  block runs 3 linear-attention (Gated DeltaNet, recurrent `S` state) mixers
+  + 1 full RoPE attention mixer, each with its own pre-norm, on all four
+  backends; NumPy carries the analytic backward (BPTT), the page renders and
+  inspects every mixer's intermediates.
 - **Standard architecture**: pre-norm LLaMA block
-  (`h = x + attn(ln1(x)); out = h + mlp(ln2(h))`), RMSNorm, GQA, RoPE,
+  (`h = x; for m: h += mixer_m(ln_m(h)); out = h + mlp(ln2(h))`), RMSNorm, GQA, RoPE,
   SwiGLU (dense by default; MoE is opt-in), causal mask, no weight tying, no
   biases.
 - **KV cache**: the per-token step path is exact (`forward_prefill` +

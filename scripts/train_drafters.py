@@ -96,7 +96,7 @@ def rollouts(
             continue
         tokens: list[int] = list(seq)
         hiddens: list[np.ndarray] = []
-        cache = model.make_cache(1)
+        cache: list[list[dict]] = model.make_cache(1)
         # Prefill via forward_chunk: logits + the final-norm hidden stream
         # in one pass (chunk parity guarantees it equals the plain forward).
         logits, x_final = model.forward_chunk(np.array([seq], dtype=np.int32), 0, cache)

@@ -41,7 +41,8 @@ class TestMHANamingParity:
         )
 
         # All mha params should be .weight (nn.Linear style, no bias)
-        mha_params = [k for k, _ in torch_model.named_parameters() if "self_attn" in k]
+        last_m = torch_model.config.n_mixers() - 1
+        mha_params = [k for k, _ in torch_model.named_parameters() if "self_attn" in k and f".self_attn.{last_m}." in k]
 
         for k in mha_params:
             # Keys should be .weight (nn.Linear style)
@@ -51,10 +52,10 @@ class TestMHANamingParity:
 
         # Check specific keys exist
         expected_keys = [
-            "stack.layers.0.self_attn.q_proj.weight",
-            "stack.layers.0.self_attn.k_proj.weight",
-            "stack.layers.0.self_attn.v_proj.weight",
-            "stack.layers.0.self_attn.o_proj.weight",
+            "stack.layers.0.self_attn.3.q_proj.weight",
+            "stack.layers.0.self_attn.3.k_proj.weight",
+            "stack.layers.0.self_attn.3.v_proj.weight",
+            "stack.layers.0.self_attn.3.o_proj.weight",
         ]
         for k in expected_keys:
             assert k in dict(torch_model.named_parameters()), f"TorchModel should have parameter key '{k}'"
@@ -78,7 +79,8 @@ class TestMHANamingParity:
         triton_params = dict(triton_model.named_parameters())
 
         # All mha params should be .weight (Linear style, no bias)
-        mha_params = [k for k, _ in triton_params.items() if "self_attn" in k]
+        last_m = triton_model.config.n_mixers() - 1
+        mha_params = [k for k, _ in triton_params.items() if "self_attn" in k and f".self_attn.{last_m}." in k]
 
         for k in mha_params:
             # Keys should be .weight suffixes
@@ -88,10 +90,10 @@ class TestMHANamingParity:
 
         # Check specific keys exist — should match Torch naming exactly
         expected_keys = [
-            "stack.layers.0.self_attn.q_proj.weight",
-            "stack.layers.0.self_attn.k_proj.weight",
-            "stack.layers.0.self_attn.v_proj.weight",
-            "stack.layers.0.self_attn.o_proj.weight",
+            "stack.layers.0.self_attn.3.q_proj.weight",
+            "stack.layers.0.self_attn.3.k_proj.weight",
+            "stack.layers.0.self_attn.3.v_proj.weight",
+            "stack.layers.0.self_attn.3.o_proj.weight",
         ]
         for k in expected_keys:
             assert k in triton_params, f"TritonModel should have parameter key '{k}' (matches TorchModel naming)"

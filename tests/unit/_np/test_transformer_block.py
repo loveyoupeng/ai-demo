@@ -83,8 +83,8 @@ class TestTransformerBlockForward:
         baseline = block.forward(x.copy())
 
         # Perturb the first RMSNorm (input layernorm) gamma
-        ln1_gamma_orig = block.input_layernorm.gamma.copy()
-        block.input_layernorm.gamma = ln1_gamma_orig * 2.0
+        ln1_gamma_orig = block.mixer_norms[0].gamma.copy()
+        block.mixer_norms[0].gamma = ln1_gamma_orig * 2.0
 
         out_perturbed = block.forward(x.copy())
 

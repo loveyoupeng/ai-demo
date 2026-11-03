@@ -108,8 +108,8 @@ class TestCUDAStepParity:
 
         x = th.randint(0, 64, (1, 4), dtype=th.int64, device="cuda")
         with th.no_grad():
-            _, t_cache = torch_model.forward_prefill(x[:, :-1], torch_model.make_cache(1))
-            _, c_cache = cuda_model.forward_prefill(x[:, :-1], cuda_model.make_cache(1))
+            _, t_cache = torch_model.forward_prefill(x[:, :-1], cache=torch_model.make_cache(1))
+            _, c_cache = cuda_model.forward_prefill(x[:, :-1], cache=cuda_model.make_cache(1))
             torch_last = torch_model.forward_step(x[:, [-1]], 3, t_cache)
             cuda_last = cuda_model.forward_step(x[:, [-1]], 3, c_cache)
         assert th.allclose(torch_last, cuda_last, rtol=1e-3, atol=1e-3), "torch and CUDA step logits must agree"
@@ -519,12 +519,14 @@ class TestCUDAForwardCrossEnd:
         grad_accumulated = False
         grad_finite = True
         for block in cd_m.stacking.blocks:
-            if hasattr(block, "q_proj") and block.q_proj.grad is not None:
-                grad_accumulated = True
-                if not th.isfinite(block.q_proj.grad).all():
-                    grad_finite = False
-                if th.all(block.q_proj.grad == 0):
-                    grad_accumulated = False
+            for m, mixer in enumerate(block.mixers):
+                q_proj = mixer.q_proj if mixer is not None else block.attn_projs[m][0]
+                if q_proj.grad is not None:
+                    grad_accumulated = True
+                    if not th.isfinite(q_proj.grad).all():
+                        grad_finite = False
+                    if th.all(q_proj.grad == 0):
+                        grad_accumulated = False
 
         assert grad_accumulated, "At least one block should have gradients"
         assert grad_finite, "All gradients should be finite"
@@ -571,10 +573,12 @@ class TestCUDABackwardParity:
         # After backward, blocks should have .grad attributes
         grad_found = False
         for block in cd_m.stacking.blocks:
-            if hasattr(block, "q_proj") and block.q_proj.grad is not None:
-                grad_found = True
-                assert not th.all(block.q_proj.grad == 0), "q_proj.grad should be non-zero"
-                break
+            for m, mixer in enumerate(block.mixers):
+                q_proj = mixer.q_proj if mixer is not None else block.attn_projs[m][0]
+                if q_proj.grad is not None:
+                    grad_found = True
+                    assert not th.all(q_proj.grad == 0), "q_proj.grad should be non-zero"
+                    break
 
         assert grad_found, "At least one block should have q_proj.grad"
 
@@ -608,8 +612,10 @@ class TestCUDABackwardParity:
         loss.backward()
 
         for block in cd_m.stacking.blocks:
-            if hasattr(block, "q_proj") and block.q_proj.grad is not None:
-                assert th.isfinite(block.q_proj.grad).all(), "q_proj.grad should be finite"
+            for m, mixer in enumerate(block.mixers):
+                q_proj = mixer.q_proj if mixer is not None else block.attn_projs[m][0]
+                if q_proj.grad is not None:
+                    assert th.isfinite(q_proj.grad).all(), "q_proj.grad should be finite"
 
     def test_gradient_values_match(self) -> None:
         """Gradients on same-input with same-model produce same gradients."""
@@ -662,8 +668,8 @@ class TestCUDABackwardParity:
         loss2 = cross_entropy(logits2.reshape(-1, logits2.shape[-1]), batch_target.reshape(-1))
         loss2.backward()
 
-        g1 = cd1.stacking.blocks[0].q_proj.grad
-        g2 = cd2.stacking.blocks[0].q_proj.grad
+        g1 = cd1.stacking.blocks[0].attn_projs[-1][0].grad
+        g2 = cd2.stacking.blocks[0].attn_projs[-1][0].grad
         assert g1 is not None, "q_proj.grad should exist after backward"
         assert g2 is not None, "q_proj.grad should exist after backward"
 

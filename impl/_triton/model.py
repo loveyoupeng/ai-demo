@@ -98,7 +98,7 @@ class TritonModel(nn.Module):
         # kernels' matmuls then run on the GPU tensor cores in BF16 (~2x FP32 on
         # Ampere+); the checkpoint itself stays FP32 (see design.md
         # "Precision & tensor cores"; serving casts back to float32).
-        if config.dtype is not None:
+        if isinstance(config.dtype, torch.dtype):
             self.to(dtype=config.dtype)
 
     @classmethod
@@ -117,38 +117,42 @@ class TritonModel(nn.Module):
         model.load_from_numpy_dict(arrays)
         return model
 
-    def make_cache(self, batch_size: int) -> list[dict[str, torch.Tensor]]:
-        """Create an empty per-layer KV cache for the per-token step path.
+    def make_cache(self, batch_size: int) -> list[list[dict[str, torch.Tensor]]]:
+        """Create the per-layer, per-mixer cache for the per-token step path.
 
         Same shape contract as ``impl._torch.layers.TorchModel.make_cache``
-        (which mirrors ``impl._np.model.NumPyModel.make_cache``): each layer
-        gets {"k": (B, G, 0, hd), "v": (B, G, 0, hd)} — K/V *per group*.
+        (which mirrors ``impl._np.model.NumPyModel.make_cache``): one LIST
+        per layer with one dict per mixer — DeltaNet mixers get
+        {"s": (B, H, hd, hd), "s_hist": []}; the attention mixer gets
+        {"k": (B, G, 0, hd), "v": (B, G, 0, hd)} — K/V *per group*.
 
-        Returns: one dict per block (n_layers entries).
+        Returns: one list per block (n_layers entries).
         """
         B = batch_size
         G = self.config.kv_heads
-        hd = self.embed_dim // self.config.n_heads
+        H = self.config.n_heads
+        hd = self.embed_dim // H
         device = self.embedding.weight.device
         dtype = self.embedding.weight.dtype
-        caches: list[dict[str, Any]] = []
-        for i in range(self.config.n_layers):
-            if self.config.layer_kind(i) == "d":
-                caches.append(
-                    {"s": torch.zeros(B, self.config.n_heads, hd, hd, device=device, dtype=dtype), "s_hist": []}
-                )
-            else:
-                caches.append(
-                    {
-                        "k": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
-                        "v": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
-                    }
-                )
+        caches: list[list[dict[str, Any]]] = []
+        for _i in range(self.config.n_layers):
+            layer_caches: list[dict[str, Any]] = []
+            for m in range(self.config.n_mixers()):
+                if self.config.mixer_kind(m) == "d":
+                    layer_caches.append({"s": torch.zeros(B, H, hd, hd, device=device, dtype=dtype), "s_hist": []})
+                else:
+                    layer_caches.append(
+                        {
+                            "k": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+                            "v": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+                        }
+                    )
+            caches.append(layer_caches)
         return caches
 
     def forward_prefill(
-        self, input_ids: torch.Tensor, cache: list[dict[str, torch.Tensor]] | None = None, position: int = 0
-    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
+        self, input_ids: torch.Tensor, cache: list[list[dict[str, torch.Tensor]]] | None = None, position: int = 0
+    ) -> tuple[torch.Tensor, list[list[dict[str, torch.Tensor]]]]:
         """Run a full-sequence forward and fill the per-layer KV cache.
 
         Mirrors ``impl._torch.layers.TorchModel.forward_prefill`` (which
@@ -165,28 +169,33 @@ class TritonModel(nn.Module):
         B, S = input_ids.shape
         if cache is None:
             cache = self.make_cache(B)
-        states: list[dict[str, torch.Tensor]] = []
+        states: list[list[dict[str, Any]]] = []
         x = self.embedding(input_ids)  # (B, S, D)
         for block in self.stack.blocks:
             block_res = block.forward_state(x, position)
             x = block_res.value
-            states.append(block_res.ctx.display)
+            states.append(block_res.ctx.display)  # type: ignore[arg-type]
         x_final = self.final_norm(x)  # (B, S, D)
         logits = self.lm_head(x_final)  # (B, S, V)
-        for i, attn_state in enumerate(states):
-            if self.config.layer_kind(i) == "d":
-                cache[i]["s"] = attn_state["s_final"]
-                cache[i]["s_hist"] = [attn_state["s_hist"][:, :, j] for j in range(attn_state["s_hist"].shape[2])]  # type: ignore[index]
-            else:
-                cache[i]["k"] = attn_state["k_group"]  # (B, G, S, hd)
-                cache[i]["v"] = attn_state["v_group"]  # (B, G, S, hd)
+        for i, mixer_states in enumerate(states):
+            layer_cache = cache[i]
+            for m, mixer_state in enumerate(mixer_states):
+                mixer_cache: dict[str, Any] = layer_cache[m]
+                if self.config.mixer_kind(m) == "d":
+                    mixer_cache["s"] = mixer_state["s_final"]
+                    mixer_cache["s_hist"] = [
+                        mixer_state["s_hist"][:, :, j] for j in range(mixer_state["s_hist"].shape[2])
+                    ]  # type: ignore[assignment]
+                else:
+                    mixer_cache["k"] = mixer_state["k_group"]  # (B, G, S, hd)
+                    mixer_cache["v"] = mixer_state["v_group"]  # (B, G, S, hd)
         return logits, cache
 
     def forward_step(
         self,
         input_ids: torch.Tensor,
         position: int,
-        cache: list[dict[str, torch.Tensor]],
+        cache: list[list[dict[str, torch.Tensor]]],
     ) -> torch.Tensor:
         """Process ONE token per batch row against the cached K/V.
 
@@ -210,7 +219,7 @@ class TritonModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         position: int,
-        cache: list[dict[str, torch.Tensor]],
+        cache: list[list[dict[str, torch.Tensor]]],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Process a CHUNK of c tokens against the cached K/V (verification path).
 
@@ -273,27 +282,27 @@ class TritonModel(nn.Module):
             Keys.lm_head(): self.lm_head.weight,
         }
         for layer_idx, block in enumerate(self.stack.blocks):
-            t[Keys.ln(layer_idx, LayerNorm.INPUT)] = block.input_layernorm.weight
             t[Keys.ln(layer_idx, LayerNorm.POST_ATTENTION)] = block.post_attention_layernorm.weight
-            attn = block.self_attn
-            if isinstance(attn, TritonGatedDeltaNet):
-                inner = attn._impl
-                t[Keys.deltanet(layer_idx, DeltaNet.Q_PROJ)] = inner.q_proj.weight
-                t[Keys.deltanet(layer_idx, DeltaNet.K_PROJ)] = inner.k_proj.weight
-                t[Keys.deltanet(layer_idx, DeltaNet.V_PROJ)] = inner.v_proj.weight
-                t[Keys.deltanet(layer_idx, DeltaNet.O_PROJ)] = inner.o_proj.weight
-                t[Keys.deltanet(layer_idx, DeltaNet.A_PROJ)] = inner.a_proj.weight
-                t[Keys.deltanet(layer_idx, DeltaNet.GATE_PROJ)] = inner.gate_proj.weight
-                t[Keys.deltanet(layer_idx, DeltaNet.DT_BIAS)] = inner.dt_bias
-                t[Keys.deltanet(layer_idx, DeltaNet.NORM)] = inner.norm.weight
-            else:
-                for proj, module in (
-                    (Attn.Q_PROJ, attn.q_proj),
-                    (Attn.K_PROJ, attn.k_proj),
-                    (Attn.V_PROJ, attn.v_proj),
-                    (Attn.O_PROJ, attn.o_proj),
-                ):
-                    t[Keys.attn(layer_idx, proj)] = module.weight
+            for m, (norm, mixer) in enumerate(zip(block.mixer_norms, block.mixers, strict=True)):
+                t[Keys.mixer_ln(layer_idx, m)] = norm.weight  # type: ignore[assignment]
+                if isinstance(mixer, TritonGatedDeltaNet):
+                    inner = mixer._impl
+                    t[Keys.deltanet(layer_idx, m, DeltaNet.Q_PROJ)] = inner.q_proj.weight
+                    t[Keys.deltanet(layer_idx, m, DeltaNet.K_PROJ)] = inner.k_proj.weight
+                    t[Keys.deltanet(layer_idx, m, DeltaNet.V_PROJ)] = inner.v_proj.weight
+                    t[Keys.deltanet(layer_idx, m, DeltaNet.O_PROJ)] = inner.o_proj.weight
+                    t[Keys.deltanet(layer_idx, m, DeltaNet.A_PROJ)] = inner.a_proj.weight
+                    t[Keys.deltanet(layer_idx, m, DeltaNet.GATE_PROJ)] = inner.gate_proj.weight
+                    t[Keys.deltanet(layer_idx, m, DeltaNet.DT_BIAS)] = inner.dt_bias
+                    t[Keys.deltanet(layer_idx, m, DeltaNet.NORM)] = inner.norm.weight
+                else:
+                    for proj, module in (
+                        (Attn.Q_PROJ, mixer.q_proj),
+                        (Attn.K_PROJ, mixer.k_proj),
+                        (Attn.V_PROJ, mixer.v_proj),
+                        (Attn.O_PROJ, mixer.o_proj),
+                    ):
+                        t[Keys.attn(layer_idx, m, proj)] = module.weight
             mlp = block.mlp
             if isinstance(mlp, TritonMixtureOfExperts):
                 t[Keys.moe_gate(layer_idx)] = mlp.gate.weight

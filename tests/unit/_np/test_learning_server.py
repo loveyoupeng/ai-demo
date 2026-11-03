@@ -129,7 +129,8 @@ class TestLearningServer:
         step = j["steps"][0]
         fwd = step["forward"]
         assert len(fwd["logits"][0][-1]) == len(VOCAB)
-        assert "attn" in fwd["blocks"][0]
+        assert "mixers" in fwd["blocks"][0]
+        assert "attn" in fwd["blocks"][0]["mixers"][-1]  # the full-attention mixer
         # the record must be a valid, self-contained JSON document
         assert json.loads(json.dumps(j))["generated"]["tokens"] == j["generated"]["tokens"]
 

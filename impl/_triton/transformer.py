@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Mapping
+from typing import Any
 
 import numpy as np
 import torch
@@ -333,12 +334,13 @@ class TritonGatedDeltaNet(nn.Module):
         embed_dim: int,
         n_heads: int,
         layer_index: int | None = None,
+        mixer_index: int | None = None,
         params: Mapping[str, np.ndarray] | None = None,
     ) -> None:
         super().__init__()
         from impl._torch.layers import GatedDeltaNet
 
-        self._impl = GatedDeltaNet(embed_dim, n_heads, layer_index=layer_index, params=params)
+        self._impl = GatedDeltaNet(embed_dim, n_heads, layer_index=layer_index, mixer_index=mixer_index, params=params)
         # register the inner module's parameters under this module
         self.add_module("impl", self._impl)
 
@@ -606,27 +608,40 @@ class TritonTransformerBlock(nn.Module):
         i = layer_index
         p = params  # short alias; None → the training path (all keys below unused)
 
-        # nn.RMSNorm exposes its gain as ``weight`` (D,), init ones
-        self.input_layernorm = nn.RMSNorm(D, eps=config.norm_eps)
+        # nn.RMSNorm exposes its gain as ``weight`` (D,), init ones.
+        # One pre-norm PER MIXER (ADR 0007) + the post-attention norm.
+        self.mixer_norms = nn.ModuleList([nn.RMSNorm(D, eps=config.norm_eps) for _ in range(config.n_mixers())])
         self.post_attention_layernorm = nn.RMSNorm(D, eps=config.norm_eps)
         if p is not None:
-            copy_in_place(self.input_layernorm.weight, p[Keys.ln(i, LayerNorm.INPUT)])
+            for m, norm in enumerate(self.mixer_norms):
+                copy_in_place(norm.weight, p[Keys.mixer_ln(i, m)])  # type: ignore[arg-type]
             copy_in_place(self.post_attention_layernorm.weight, p[Keys.ln(i, LayerNorm.POST_ATTENTION)])
-        if config.layer_kind(i) == "d":
-            self.self_attn: TritonMultiHeadAttention | TritonGatedDeltaNet = TritonGatedDeltaNet(
-                embed_dim=D,
-                n_heads=config.n_heads,
-                layer_index=i if p is not None else None,
-                params=p,
-            )
-        else:
-            self.self_attn = TritonMultiHeadAttention(
-                config,
-                q_proj=None if p is None else p[Keys.attn(i, Attn.Q_PROJ)],
-                k_proj=None if p is None else p[Keys.attn(i, Attn.K_PROJ)],
-                v_proj=None if p is None else p[Keys.attn(i, Attn.V_PROJ)],
-                o_proj=None if p is None else p[Keys.attn(i, Attn.O_PROJ)],
-            )
+        # Mixing sublayers (ADR 0007): n_deltanet_sublayers Gated DeltaNet
+        # mixers followed by ONE full RoPE attention mixer.
+        mixers: list[TritonMultiHeadAttention | TritonGatedDeltaNet] = []
+        for m in range(config.n_mixers()):
+            if config.mixer_kind(m) == "d":
+                mixers.append(
+                    TritonGatedDeltaNet(
+                        embed_dim=D,
+                        n_heads=config.n_heads,
+                        layer_index=i if p is not None else None,
+                        mixer_index=m if p is not None else None,
+                        params=p,
+                    )
+                )
+            else:
+                mixers.append(
+                    TritonMultiHeadAttention(
+                        config,
+                        q_proj=None if p is None else p[Keys.attn(i, m, Attn.Q_PROJ)],
+                        k_proj=None if p is None else p[Keys.attn(i, m, Attn.K_PROJ)],
+                        v_proj=None if p is None else p[Keys.attn(i, m, Attn.V_PROJ)],
+                        o_proj=None if p is None else p[Keys.attn(i, m, Attn.O_PROJ)],
+                    )
+                )
+        self.mixers: list[TritonMultiHeadAttention | TritonGatedDeltaNet] = mixers
+        self.self_attn = nn.ModuleList(mixers)
         if config.has_moe():
             self.mlp: TritonSwiGLUFFN | TritonMixtureOfExperts = TritonMixtureOfExperts(
                 embed_dim=D,
@@ -647,68 +662,72 @@ class TritonTransformerBlock(nn.Module):
             )
 
     def forward(self, x: torch.Tensor, position: int = 0) -> torch.Tensor:
-        """Block forward. x: (B, S, D) → out: (B, S, D)."""
-        self._move_to_device(x)
-        # Stream 1: attention with pre-norm and residual.
-        attn_out = self.self_attn(self.input_layernorm(x), position)  # (B, S, D)
-        h = x + attn_out  # (B, S, D)
+        """Block forward. x: (B, S, D) → out: (B, S, D).
 
-        # Stream 2: feed-forward (dense or MoE) with pre-norm and residual.
+        h = x; for each mixer m: h = h + mixers[m](mixer_norms[m](h));
+        out = h + mlp(post_attention_layernorm(h))."""
+        self._move_to_device(x)
+        h = x
+        for norm, mixer in zip(self.mixer_norms, self.mixers, strict=True):
+            h = h + mixer(norm(h), position)  # (B, S, D)
         ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, S, D)
         return h + ff_out  # (B, S, D)
 
-    def forward_state(self, x: torch.Tensor, position: int = 0) -> Result[torch.Tensor, dict]:
-        """Block forward plus the attention K/V state the cache needs.
+    def forward_state(self, x: torch.Tensor, position: int = 0) -> Result[torch.Tensor, list[dict]]:
+        """Block forward plus the per-mixer cache state the prefill needs.
 
         Mirrors ``impl._torch.layers.TransformerBlock.forward_state``:
         ``forward`` calls this and drops the state; the prefill path
-        requests it and backfills the per-layer cache — no second pass.
+        requests it and backfills the per-mixer caches — no second pass.
         Same ``Result`` contract (shared/result.py).
 
-        ``.value`` = out (B, S, D); ``.ctx.display`` = {"k_group":
-        (B, G, S, hd), "v_group": (B, G, S, hd)}.
+        ``.value`` = out (B, S, D); ``.ctx.display`` = the list of per-mixer
+        displays — {"k_group", "v_group"} for the attention mixer,
+        {"s_final", "s_hist"} for each DeltaNet mixer.
         """
-        attn_res = self.self_attn.forward_state(self.input_layernorm(x), position)
-        h = x + attn_res.value  # (B, S, D)
+        h = x
+        displays: list[dict[str, Any]] = []
+        for norm, mixer in zip(self.mixer_norms, self.mixers, strict=True):
+            mixer_res = mixer.forward_state(norm(h), position)
+            h = h + mixer_res.value  # (B, S, D)
+            displays.append(mixer_res.ctx.display)
         ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, S, D)
-        return Result.capture(h + ff_out, {}, dict(attn_res.ctx.display))
+        return Result.capture(h + ff_out, {}, displays)  # type: ignore[arg-type]
 
-    def forward_step(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Process ONE new token against this block's cached K/V (KV-cached path).
+    def forward_step(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
+        """Process ONE new token against this block's per-mixer caches.
 
-        Mirrors ``impl._torch.layers.TransformerBlock.forward_step``: the
-        token's K/V are appended to ``cache`` before attention runs
-        (single-token attention, O(1) per token).
+        Mirrors ``impl._torch.layers.TransformerBlock.forward_step``: each
+        mixer's cache entry (``cache[m]``) is updated in place.
 
         x: (B, 1, D) the new token's embedding at absolute ``position``.
-        cache: this layer's dict {"k": (B, G, t, hd), "v": (B, G, t, hd)},
-            mutated in place.
+        cache: this block's per-mixer cache list, mutated in place.
 
         Returns: out (B, 1, D).
         """
         self._move_to_device(x)
-        attn_out = self.self_attn.forward_step(self.input_layernorm(x), position, cache)  # (B, 1, D)
-        h = x + attn_out  # (B, 1, D)
+        h = x
+        for m, (norm, mixer) in enumerate(zip(self.mixer_norms, self.mixers, strict=True)):
+            h = h + mixer.forward_step(norm(h), position, cache[m])  # (B, 1, D)
         ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, 1, D)
         return h + ff_out  # (B, 1, D)
 
-    def forward_chunk(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
         """Process a CHUNK of c tokens through this block (KV-cached path).
 
-        Mirrors ``impl._torch.layers.TransformerBlock.forward_chunk`` (which
-        mirrors ``impl._np.block.TransformerBlock.forward_chunk``): the
-        chunk's K/V are appended to ``cache`` in one pass and every chunk
-        position is scored in parallel (causal within the chunk).
+        Mirrors ``impl._torch.layers.TransformerBlock.forward_chunk``: each
+        mixer's chunk form runs against ``cache[m]``.
 
         x: (B, c, D) the chunk's vectors. position: the absolute index of
-        the chunk's first token. cache: this layer's attention cache,
+        the chunk's first token. cache: this block's per-mixer cache list,
         mutated in place.
 
         Returns: out (B, c, D).
         """
         self._move_to_device(x)
-        attn_out = self.self_attn.forward_chunk(self.input_layernorm(x), position, cache)  # (B, c, D)
-        h = x + attn_out  # (B, c, D)
+        h = x
+        for m, (norm, mixer) in enumerate(zip(self.mixer_norms, self.mixers, strict=True)):
+            h = h + mixer.forward_chunk(norm(h), position, cache[m])  # (B, c, D)
         ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, c, D)
         return h + ff_out  # (B, c, D)
 
@@ -716,13 +735,17 @@ class TritonTransformerBlock(nn.Module):
         """Move all block parameters to x's device/dtype."""
         device = x.device
         dtype = x.dtype if x.dtype.is_floating_point or x.dtype.is_complex else None
+        for norm in self.mixer_norms:
+            if dtype is None:
+                norm.to(device)
+            else:
+                norm.to(device, dtype)
         if dtype is None:
-            self.input_layernorm.to(device)
             self.post_attention_layernorm.to(device)
         else:
-            self.input_layernorm.to(device, dtype)
             self.post_attention_layernorm.to(device, dtype)
-        self.self_attn._move_to_device(x)
+        for mixer in self.mixers:
+            mixer._move_to_device(x)
         self.mlp._move_to_device(x)
 
 
@@ -751,22 +774,22 @@ class TritonDecoderStack(nn.Module):
 
     def reset_parameters(self) -> None:
         for block in self.blocks:
-            attn = block.self_attn
-            if isinstance(attn, TritonGatedDeltaNet):
-                for lin in (
-                    attn._impl.q_proj,
-                    attn._impl.k_proj,
-                    attn._impl.v_proj,
-                    attn._impl.o_proj,
-                    attn._impl.a_proj,
-                    attn._impl.gate_proj,
-                ):
-                    lin.reset_parameters()
-            else:
-                attn.q_proj.reset_parameters()
-                attn.k_proj.reset_parameters()
-                attn.v_proj.reset_parameters()
-                attn.o_proj.reset_parameters()
+            for mixer in block.mixers:
+                if isinstance(mixer, TritonGatedDeltaNet):
+                    for lin in (
+                        mixer._impl.q_proj,
+                        mixer._impl.k_proj,
+                        mixer._impl.v_proj,
+                        mixer._impl.o_proj,
+                        mixer._impl.a_proj,
+                        mixer._impl.gate_proj,
+                    ):
+                        lin.reset_parameters()
+                else:
+                    mixer.q_proj.reset_parameters()
+                    mixer.k_proj.reset_parameters()
+                    mixer.v_proj.reset_parameters()
+                    mixer.o_proj.reset_parameters()
             block.mlp.reset_parameters()
 
     def forward(self, x: torch.Tensor, position: int = 0) -> torch.Tensor:
@@ -797,7 +820,7 @@ class TritonDecoderStack(nn.Module):
             states[i] = block_res.ctx.display  # {block index: k_group/v_group}
         return Result.capture(out, {}, {}, states)
 
-    def forward_step(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
+    def forward_step(self, x: torch.Tensor, position: int, cache: list[list[dict[str, torch.Tensor]]]) -> torch.Tensor:
         """Process ONE new token through all blocks (KV-cached path).
 
         Mirrors ``impl._torch.layers.DecoderStack.forward_step``: each block
@@ -815,7 +838,7 @@ class TritonDecoderStack(nn.Module):
             out = block.forward_step(out, position, cache[i])
         return out
 
-    def forward_chunk(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: list[list[dict[str, torch.Tensor]]]) -> torch.Tensor:
         """Process a CHUNK of c tokens through all blocks (KV-cached path).
 
         Mirrors ``impl._torch.layers.DecoderStack.forward_chunk`` (which

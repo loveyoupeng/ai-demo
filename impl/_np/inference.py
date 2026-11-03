@@ -150,7 +150,7 @@ class TextGenerator:
         # quantize=True backfills the cache in 1-bit TurboQuant form (lossy;
         # int8 storage ≈4x smaller than the float cache);
         # quantize=False backfills the full-precision cache (exact).
-        cache = self.model.make_cache(batch_size, quantize=self.quantize)
+        cache: list[list[dict]] = self.model.make_cache(batch_size, quantize=self.quantize)
         prefill_logits, _ = self.model.forward_prefill(sequence, cache, quantize=self.quantize)  # (B, S, V)
 
         # Per-row emitted tokens (repeat guard, cf. shared/generator.py —
@@ -249,7 +249,7 @@ class TextGenerator:
         # quantize=True backfills the cache in 1-bit TurboQuant form (lossy;
         # int8 storage ≈4x smaller than the float cache);
         # quantize=False backfills the full-precision cache (exact).
-        cache = self.model.make_cache(batch_size, quantize=self.quantize)
+        cache: list[list[dict]] = self.model.make_cache(batch_size, quantize=self.quantize)
         prefill_logits, _ = self.model.forward_prefill(sequence, cache, quantize=self.quantize)  # (B, S, V)
 
         # Per-row emitted tokens (repeat guard; rows are independent).

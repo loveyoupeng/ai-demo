@@ -76,10 +76,11 @@ class TestDecoderStackForward:
         block_module: list[torch.nn.Module] = list(stack.layers)  # noqa: TID251
         for layer_idx in range(len(block_module)):
             block: torch.nn.Module = block_module[layer_idx]
-            for name, param in block.self_attn.named_parameters():  # pyright: ignore
-                assert param.grad is not None, f"layer {layer_idx} attn {name} has no gradient"
-                grad_norm = param.grad.norm().item()
-                assert grad_norm > 1e-9, f"layer {layer_idx} attn {name} grad norm {grad_norm} too small"
+            for m, mixer in enumerate(block.mixers):  # pyright: ignore
+                for name, param in mixer.named_parameters():  # pyright: ignore
+                    assert param.grad is not None, f"layer {layer_idx} mixer {m} {name} has no gradient"
+                    grad_norm = param.grad.norm().item()
+                    assert grad_norm > 1e-9, f"layer {layer_idx} mixer {m} {name} grad norm {grad_norm} too small"
 
             # At least some FFN/MoE params must have gradients
             for name, param in block.mlp.named_parameters():  # pyright: ignore

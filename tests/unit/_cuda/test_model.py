@@ -152,10 +152,11 @@ class TestDecoderStackInit:
     def test_blocks_have_correct_device(self, decoder_stack) -> None:
         """All block weights are on CPU (move to CUDA on forward)."""
         for block in decoder_stack.blocks:
-            assert block.q_proj.device.type == "cpu"
-            assert block.k_proj.device.type == "cpu"
-            assert block.v_proj.device.type == "cpu"
-            assert block.input_layernorm_gamma.device.type == "cpu"
+            q, k, v, _o = block.attn_projs[-1]
+            assert q.device.type == "cpu"
+            assert k.device.type == "cpu"
+            assert v.device.type == "cpu"
+            assert block.mixer_norm_gammas[0].device.type == "cpu"
 
     def test_rope_disabled(self, base_config) -> None:
         """DecoderStack with rope_dim=0 creates blocks without RoPE."""
@@ -270,7 +271,8 @@ class TestDecoderStackGradients:
         loss = result.sum()
         loss.backward()
         for block in decoder_stack.blocks:
-            assert block.input_layernorm_gamma.grad is not None
-            assert not torch.isnan(block.input_layernorm_gamma.grad).any()
+            for g in block.mixer_norm_gammas:
+                assert g.grad is not None
+                assert not torch.isnan(g.grad).any()
             assert block.post_attention_layernorm_gamma.grad is not None
             assert not torch.isnan(block.post_attention_layernorm_gamma.grad).any()

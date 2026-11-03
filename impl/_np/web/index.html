@@ -499,34 +499,39 @@ const PARAM_KEYS = {
   "fnorm": ["model.norm.weight"],
 };
 function blockParamKeys(nodeId) {
-  // nodeId like "b0.attn.q" / "b0.ffn.gate" / "b0.ln1" / "drafter.inproj"
-  const m = nodeId.match(/^b(\d+)\.(.+)$/);
-  if (!m) return PARAM_KEYS[nodeId] || null;
-  const [_, n, sub] = m;
+  // nodeId like "b0.m2.attn.q" / "b0.m0.deltanet.q" / "b0.ffn.gate" / "drafter.inproj"
+  const m = nodeId.match(/^b(\d+)\.m(\d+)\.(.+)$/);
+  if (m) {
+    const [_, n, mm, sub] = m;
+    const M = `model.layers.${n}.mixers.${mm}`;
+    const t = sub.replace(/^attn\./, "self_attn.").replace(/^deltanet\./, "deltanet.");
+    const map = {
+      "ln": [`${M}.input_layernorm.weight`],
+      "attn": [`${M}.self_attn.q_proj.weight`, `${M}.self_attn.k_proj.weight`, `${M}.self_attn.v_proj.weight`, `${M}.self_attn.o_proj.weight`],
+      "deltanet": [`${M}.deltanet.q_proj.weight`, `${M}.deltanet.k_proj.weight`, `${M}.deltanet.v_proj.weight`, `${M}.deltanet.o_proj.weight`, `${M}.deltanet.a_proj.weight`, `${M}.deltanet.gate_proj.weight`],
+      "self_attn.q": [`${M}.self_attn.q_proj.weight`],
+      "self_attn.k": [`${M}.self_attn.k_proj.weight`],
+      "self_attn.v": [`${M}.self_attn.v_proj.weight`],
+      "self_attn.o": [`${M}.self_attn.o_proj.weight`],
+      "deltanet.q": [`${M}.deltanet.q_proj.weight`],
+      "deltanet.k": [`${M}.deltanet.k_proj.weight`],
+      "deltanet.v": [`${M}.deltanet.v_proj.weight`],
+      "deltanet.o": [`${M}.deltanet.o_proj.weight`],
+      "deltanet.beta": [`${M}.deltanet.a_proj.weight`, `${M}.deltanet.dt_bias.weight`],
+      "deltanet.gate": [`${M}.deltanet.gate_proj.weight`, `${M}.deltanet.norm.weight`],
+    };
+    return map[t] !== undefined ? map[t] : (map[sub] !== undefined ? map[sub] : null);
+  }
+  const m2 = nodeId.match(/^b(\d+)\.(.+)$/);
+  if (!m2) return PARAM_KEYS[nodeId] || null;
+  const [_, n, sub] = m2;
   const L = `model.layers.${n}`;
-  const t = sub.replace(/^attn\./, "self_attn.").replace(/^ffn\./, "mlp.").replace(/^deltanet\./, "deltanet.");
   const map = {
-    "ln1": [`${L}.input_layernorm.weight`],
-    "attn": [`${L}.self_attn.q_proj.weight`, `${L}.self_attn.k_proj.weight`, `${L}.self_attn.v_proj.weight`, `${L}.self_attn.o_proj.weight`],
-    "deltanet": [`${L}.deltanet.q_proj.weight`, `${L}.deltanet.k_proj.weight`, `${L}.deltanet.v_proj.weight`, `${L}.deltanet.o_proj.weight`, `${L}.deltanet.a_proj.weight`, `${L}.deltanet.gate_proj.weight`],
     "ffn": [`${L}.mlp.gate_proj.weight`, `${L}.mlp.up_proj.weight`, `${L}.mlp.down_proj.weight`],
     "moe": [`${L}.mlp.gate.weight`],
     "h": [],
     "out": [],
-    "cache": [],
     "ln2": [`${L}.post_attention_layernorm.weight`],
-    "self_attn.q": [`${L}.self_attn.q_proj.weight`],
-    "self_attn.k": [`${L}.self_attn.k_proj.weight`],
-    "self_attn.v": [`${L}.self_attn.v_proj.weight`],
-    "self_attn.o": [`${L}.self_attn.o_proj.weight`],
-    "deltanet.q": [`${L}.deltanet.q_proj.weight`],
-    "deltanet.k": [`${L}.deltanet.k_proj.weight`],
-    "deltanet.v": [`${L}.deltanet.v_proj.weight`],
-    "deltanet.o": [`${L}.deltanet.o_proj.weight`],
-    "deltanet.beta": [`${L}.deltanet.a_proj.weight`, `${L}.deltanet.dt_bias.weight`],
-    "deltanet.gate": [`${L}.deltanet.gate_proj.weight`, `${L}.deltanet.norm.weight`],
-    "self_attn.router": [`${L}.mlp.gate.weight`],
-    "self_attn.experts": [`${L}.mlp.experts.0.gate_proj.weight`, `${L}.mlp.experts.0.up_proj.weight`, `${L}.mlp.experts.0.down_proj.weight`],
     "mlp.gate": [`${L}.mlp.gate_proj.weight`],
     "mlp.up": [`${L}.mlp.up_proj.weight`],
     "mlp.mul": [`${L}.mlp.gate_proj.weight`, `${L}.mlp.up_proj.weight`],
@@ -538,7 +543,7 @@ function blockParamKeys(nodeId) {
     "mlp.shared": (() => { const ks = []; for (let i = 0; i < (MODEL.config.n_shared_experts || 0); i++) for (const pr of ["gate", "up", "down"]) ks.push(`${L}.mlp.shared_experts.${i}.${pr}_proj.weight`); return ks; })(),
     "mlp.experts": (() => { const ks = []; for (let e = 0; e < (MODEL.config.n_experts || 0); e++) for (const pr of ["gate", "up", "down"]) ks.push(`${L}.mlp.experts.${e}.${pr}_proj.weight`); return ks; })(),
   };
-  return map[t] !== undefined ? map[t] : (map[sub] !== undefined ? map[sub] : null);
+  return map[sub] !== undefined ? map[sub] : null;
 }
 
 async function weightsBlock(parent, nodeId) {
@@ -1042,14 +1047,19 @@ function blockTensors(i) {
   const f = fwd();
   const b = f.blocks[i];
   const xIn = i === 0 ? f.embedding[0] : f.blocks[i - 1].out[0]; // (S, D)
-  const rms1 = b.ln1.rms[0].map((v) => (Array.isArray(v) ? v[0] : v)); // (S,)
-  const g1 = b.ln1.gamma;
-  const y1 = xIn.map((row, d) => row.map((v, c) => (v / rms1[d]) * g1[c])); // (S, D)
+  // per-mixer normed inputs + residual streams, recomputed client-side
+  const mixers = (b.mixers || []).map((mx, m) => {
+    const hIn = m === 0 ? xIn : (b.mixers[m - 1].h[0]);
+    const rms = mx.ln.rms[0].map((v) => (Array.isArray(v) ? v[0] : v)); // (S,)
+    const g = mx.ln.gamma;
+    const y = hIn.map((row, d) => row.map((v, c) => (v / rms[d]) * g[c])); // (S, D)
+    return { ln: mx.ln, y, h: mx.h[0], attn: mx.attn, deltanet: mx.deltanet, out: mx.out[0] };
+  });
+  const hLast = mixers.length ? mixers[mixers.length - 1].h : xIn;
   const rms2 = b.ln2.rms[0].map((v) => (Array.isArray(v) ? v[0] : v));
   const g2 = b.ln2.gamma;
-  const h = b.h[0];
-  const y2 = h.map((row, d) => row.map((v, c) => (v / rms2[d]) * g2[c])); // (S, D)
-  return { xIn, y1, h, y2, attn: b.attn, deltanet: b.deltanet, ffn: b.ffn, moe: b.moe, out: b.out[0] };
+  const y2 = hLast.map((row, d) => row.map((v, c) => (v / rms2[d]) * g2[c])); // (S, D)
+  return { xIn, mixers, h: hLast, y2, ffn: b.ffn, moe: b.moe, out: b.out[0] };
 }
 
 // ---------------------------------------------------------------------------
@@ -1077,7 +1087,8 @@ function buildDiagram() {
   const c = MODEL.config;
   const holder = $("diagram-holder");
   holder.innerHTML = "";
-  const footY = HEAD_H + c.n_layers * (BLOCK_H + BLOCK_GAP);
+  const NMIX0 = (c.n_deltanet_sublayers ?? 3) + 1;
+  const footY = HEAD_H + c.n_layers * (NMIX0 * 96 + ROW_H + ROW_GAP + BLOCK_GAP);
   const specOn = (typeof SPEC_MODE !== "undefined" ? SPEC_MODE : "plain") !== "plain";
   const totalH = footY + 150 + (specOn ? 175 : 0);
   SVG = svgEl("svg", { id: "diagram", viewBox: `0 0 ${LW} ${totalH}` });
@@ -1094,34 +1105,43 @@ function buildDiagram() {
       FLOW[`${base}.${s}`] = { pred: [j === 0 ? inId : `${base}.${cells[j - 1]}`], succ: [j === cells.length - 1 ? outId : `${base}.${cells[j + 1]}`] };
     });
   };
-  FLOW.emb = { pred: [], succ: ["b0.ln1"] };
-  FLOW.pos = { pred: [], succ: ["b0.attn"] }; // the position-signal source (dashed edge into block 0's attention)
+  const MIXER_KINDS = MODEL.mixer_kinds || ["d", "d", "d", "F"];
+  const NMIX = (c.n_deltanet_sublayers ?? 3) + 1;
+  FLOW.emb = { pred: [], succ: ["b0.m0.ln"] };
+  FLOW.pos = { pred: [], succ: [`b0.m${NMIX - 1}.attn`] }; // positions enter the FULL-ATTENTION mixer (dashed edge)
   for (let i = 0; i < c.n_layers; i++) {
     const prev = i === 0 ? "emb" : `b${i - 1}.out`;
-    const a = (s) => `b${i}.attn.${s}`;
-    const kind = (MODEL.layer_kinds || [])[i] || "F";
-    const mix = kind === "d" ? `b${i}.deltanet` : `b${i}.attn`;
-    FLOW[`b${i}.ln1`] = { pred: [prev], succ: [mix] };
-    FLOW[mix] = { pred: [`b${i}.ln1`], succ: [`b${i}.h`] };
-    FLOW[a("q")] = { pred: [`b${i}.attn`], succ: [a("rope")] };
-    FLOW[a("k")] = { pred: [`b${i}.attn`], succ: [a("rope")] };
-    FLOW[a("v")] = { pred: [`b${i}.attn`], succ: [a("o")] };
-    FLOW[a("rope")] = { pred: [a("q"), a("k")], succ: [a("scores")] };
-    FLOW[a("scores")] = { pred: [a("rope")], succ: [a("mask")] };
-    FLOW[a("mask")] = { pred: [a("scores")], succ: [a("softmax")] };
-    FLOW[a("softmax")] = { pred: [a("mask")], succ: [a("o")] };
-    FLOW[a("o")] = { pred: [a("softmax"), a("v")], succ: [`b${i}.h`] };
-    if (kind === "d") {
-      const d = (s) => `b${i}.deltanet.${s}`;
-      FLOW[d("q")] = { pred: [mix], succ: [d("norm")] };
-      FLOW[d("k")] = { pred: [mix], succ: [d("norm")] };
-      FLOW[d("v")] = { pred: [mix], succ: [d("scan")] };
-      FLOW[d("beta")] = { pred: [mix], succ: [d("scan")] };
-      FLOW[d("norm")] = { pred: [d("q"), d("k")], succ: [d("scan")] };
-      FLOW[d("scan")] = { pred: [d("norm"), d("v"), d("beta")], succ: [d("gate")] };
-      FLOW[d("gate")] = { pred: [d("scan")], succ: [`b${i}.h`] };
+    let prevMix = prev;
+    for (let m = 0; m < NMIX; m++) {
+      const kind = MIXER_KINDS[m] || "F";
+      const ln = `b${i}.m${m}.ln`, mix = kind === "d" ? `b${i}.m${m}.deltanet` : `b${i}.m${m}.attn`;
+      const hId = m + 1 < NMIX ? `b${i}.m${m}.h` : `b${i}.h`;
+      const a = (s) => `${mix}.${s}`;
+      FLOW[ln] = { pred: [prevMix], succ: [mix] };
+      FLOW[mix] = { pred: [ln], succ: [hId] };
+      FLOW[a("q")] = { pred: [mix], succ: [a("rope")] };
+      FLOW[a("k")] = { pred: [mix], succ: [a("rope")] };
+      FLOW[a("v")] = { pred: [mix], succ: [a("o")] };
+      FLOW[a("rope")] = { pred: [a("q"), a("k")], succ: [a("scores")] };
+      FLOW[a("scores")] = { pred: [a("rope")], succ: [a("mask")] };
+      FLOW[a("mask")] = { pred: [a("scores")], succ: [a("softmax")] };
+      FLOW[a("softmax")] = { pred: [a("mask")], succ: [a("o")] };
+      FLOW[a("o")] = { pred: [a("softmax"), a("v")], succ: [hId] };
+      if (kind === "d") {
+        const d = (s) => `${mix}.${s}`;
+        FLOW[d("q")] = { pred: [mix], succ: [d("norm")] };
+        FLOW[d("k")] = { pred: [mix], succ: [d("norm")] };
+        FLOW[d("v")] = { pred: [mix], succ: [d("scan")] };
+        FLOW[d("beta")] = { pred: [mix], succ: [d("scan")] };
+        FLOW[d("norm")] = { pred: [d("q"), d("k")], succ: [d("scan")] };
+        FLOW[d("scan")] = { pred: [d("norm"), d("v"), d("beta")], succ: [d("gate")] };
+        FLOW[d("gate")] = { pred: [d("scan")], succ: [hId] };
+      }
+      if (m + 1 < NMIX) FLOW[hId] = { pred: [mix], succ: [`b${i}.m${m + 1}.ln`] };
+      FLOW[`b${i}.m${m}.cache`] = { pred: [], succ: [] };
+      prevMix = hId;
     }
-    FLOW[`b${i}.h`] = { pred: [mix], succ: [`b${i}.ln2`] };
+    FLOW[`b${i}.h`] = { pred: [prevMix], succ: [`b${i}.ln2`] };
     FLOW[`b${i}.ln2`] = { pred: [`b${i}.h`], succ: [`b${i}.ffn`] };
     FLOW[`b${i}.ffn`] = { pred: [`b${i}.ln2`], succ: [`b${i}.out`] };
     if (MODEL.has_moe) {
@@ -1138,8 +1158,7 @@ function buildDiagram() {
       FLOW[f("mul")] = { pred: [f("gate"), f("up")], succ: [f("down")] };
       FLOW[f("down")] = { pred: [f("mul")], succ: [`b${i}.out`] };
     }
-    FLOW[`b${i}.out`] = { pred: [`b${i}.ffn`], succ: [i + 1 < c.n_layers ? `b${i + 1}.ln1` : "fnorm"] };
-    FLOW[`b${i}.cache`] = { pred: [], succ: [] };
+    FLOW[`b${i}.out`] = { pred: [`b${i}.ffn`], succ: [i + 1 < c.n_layers ? `b${i + 1}.m0.ln` : "fnorm"] };
   }
   FLOW.fnorm = { pred: [`b${c.n_layers - 1}.out`], succ: ["lmhead"] };
   FLOW.lmhead = { pred: ["fnorm"], succ: ["softmax"] };
@@ -1260,96 +1279,95 @@ function buildDiagram() {
 
   // ---- blocks ---------------------------------------------------------------
   const blockTops = [];
+  const MIX_H = 86, MIX_GAP = 10;  // per-mixer strip height inside a block
+  const MBLK_H = NMIX * MIX_H + (NMIX - 1) * MIX_GAP;  // mixer stack height
+  const blockStep = MBLK_H + ROW_H + ROW_GAP + BLOCK_GAP;
   for (let i = 0; i < c.n_layers; i++) {
-    const kind = (MODEL.layer_kinds || [])[i] || "F";
-    const mix = kind === "d" ? `b${i}.deltanet` : `b${i}.attn`;
-    const by = HEAD_H + i * (BLOCK_H + BLOCK_GAP);
+    const by = HEAD_H + i * blockStep;
     blockTops.push(by);
     const lbl = svgEl("text", { class: "blklabel", x: ML, y: by - 8 });
-    lbl.textContent = `block ${i}`;
+    lbl.textContent = `block ${i} — ${NMIX} mixers (${c.n_deltanet_sublayers ?? 3}× DeltaNet + 1× attention) + FFN`;
     SVG.appendChild(lbl);
-    const r1 = by, r2 = by + ROW_H + ROW_GAP;
-    const mid1 = r1 + ROW_H / 2, mid2 = r2 + ROW_H / 2;
-
-    // row 1: ln1 → attention → h
-    module(`b${i}.ln1`, CX_L, r1, CW_L, ROW_H, "LN 1 · RMSNorm", [[["rms", `b${i}.ln1`], ["×γ", `b${i}.ln1`]]]);
-    // row 0 cells are parallel branches (q/k/v from the same input; RoPE only
-    // rotates q and k), so draw no arrows there; row 1 is a true chain.
-    if (kind === "d") {
-      module(`b${i}.deltanet`, CX_C, r1, CW_C, ROW_H, "Gated DeltaNet (linear attention)", [
-        [["Q=xWq", `b${i}.deltanet.q`], ["K=xWk", `b${i}.deltanet.k`], ["V=xWv", `b${i}.deltanet.v`], ["β=σ(a·x+b)", `b${i}.deltanet.beta`]],
-        [["L2norm q,k", `b${i}.deltanet.norm`, true], ["S-scan", `b${i}.deltanet.scan`, true], ["α·norm(Sq)", `b${i}.deltanet.gate`, true], ["·Wo", `b${i}.deltanet.o`]],
-      ], [[], null]);
-    } else {
-      module(`b${i}.attn`, CX_C, r1, CW_C, ROW_H, "attention", [
-        [["Q=xWq", `b${i}.attn.q`], ["K=xWk", `b${i}.attn.k`], ["V=xWv", `b${i}.attn.v`], ["RoPE", `b${i}.attn.rope`]],
-        [["QKᵀ/√d", `b${i}.attn.scores`], ["mask", `b${i}.attn.mask`, true], ["softmax", `b${i}.attn.softmax`, true], ["A·V → Wo", `b${i}.attn.o`]],
-      ], [[], null]);
+    let y = by;
+    // ---- mixer chain: for m in 0..M-1: LN_m → mixer_m → h_m (residual) ----
+    for (let m = 0; m < NMIX; m++) {
+      const kind = MIXER_KINDS[m] || "F";
+      const ln = `b${i}.m${m}.ln`, mix = kind === "d" ? `b${i}.m${m}.deltanet` : `b${i}.m${m}.attn`;
+      const hId = m + 1 < NMIX ? `b${i}.m${m}.h` : `b${i}.h`;
+      const mid = y + MIX_H / 2;
+      module(ln, CX_L, y, CW_L, MIX_H, `LN${m} · RMSNorm`, [[["rms", ln], ["×γ", ln]]]);
+      if (kind === "d") {
+        module(mix, CX_C, y, CW_C, MIX_H, "Gated DeltaNet (linear attention)", [
+          [["Q=xWq", `${mix}.q`], ["K=xWk", `${mix}.k`], ["V=xWv", `${mix}.v`], ["β=σ(a·x+b)", `${mix}.beta`]],
+          [["L2norm q,k", `${mix}.norm`, true], ["S-scan", `${mix}.scan`, true], ["α·norm(Sq)", `${mix}.gate`, true], ["·Wo", `${mix}.o`]],
+        ], [[], null]);
+      } else {
+        module(mix, CX_C, y, CW_C, MIX_H, "attention", [
+          [["Q=xWq", `${mix}.q`], ["K=xWk", `${mix}.k`], ["V=xWv", `${mix}.v`], ["RoPE", `${mix}.rope`]],
+          [["QKᵀ/√d", `${mix}.scores`], ["mask", `${mix}.mask`, true], ["softmax", `${mix}.softmax`, true], ["A·V → Wo", `${mix}.o`]],
+        ], [[], null]);
+      }
+      node(hId, CX_R, y, CW_R, MIX_H, m + 1 < NMIX ? `h = prev + mix${m}` : "h = prev + attn", "residual sum");
+      edge([[CX_L + CW_L, mid], [CX_C - 3, mid]], { from: ln, to: mix });
+      edge([[CX_C + CW_C, mid], [CX_R - 3, mid]], { from: mix, to: hId });
+      // mixer cache side node
+      const cacheX = 756, cacheW = 144;
+      const cId = `b${i}.m${m}.cache`;
+      if (kind === "d") {
+        node(cId, cacheX, y, cacheW, MIX_H, "S state", "recurrent (hd×hd) state per head — updated in place each token");
+      } else {
+        node(cId, cacheX, y, cacheW, MIX_H, "K/V cache", "K,V of every position so far — +1 row per token");
+      }
+      edge([[CX_C + CW_C + 4, mid], [cacheX - 3, mid]], { dashed: true, from: mix, to: cId });
+      if (m + 1 < NMIX) {
+        // h_m → next mixer's LN (down the right column, back to the left)
+        edge([[CX_R + CW_R / 2, y + MIX_H], [CX_R + CW_R / 2, y + MIX_H + MIX_GAP / 2], [CX_L + CW_L / 2, y + MIX_H + MIX_GAP / 2], [CX_L + CW_L / 2, y + MIX_H + MIX_GAP - 3]],
+          { from: hId, to: `b${i}.m${m + 1}.ln` });
+      }
+      y += MIX_H + MIX_GAP;
     }
-    node(`b${i}.h`, CX_R, r1, CW_R, ROW_H, "h = x + attn", "residual sum");
+    const r2 = by + MBLK_H;  // FFN row
+    const mid2 = r2 + ROW_H / 2;
 
     // row 2: ln2 → ffn/moe → out
     module(`b${i}.ln2`, CX_L, r2, CW_L, ROW_H, "LN 2 · RMSNorm", [[["rms", `b${i}.ln2`], ["×γ", `b${i}.ln2`]]]);
     if (MODEL.has_moe) {
-      // cells: router chain ends at Σ; the shared expert is a parallel branch
-      // (drawn last, no arrows — it joins at Σ per FLOW)
       const moeCells = [
         ["router", `b${i}.ffn.router`], ["top-k", `b${i}.ffn.topk`, true], ["renorm", `b${i}.ffn.weights`, true],
         [`experts ×${c.n_experts}`, `b${i}.ffn.experts`], ["Σ wⱼ·Eⱼ(x)", `b${i}.ffn.sum`],
       ];
-      // each expert is a full SwiGLU FFN — the same widen → SiLU-gate →
-      // narrow math as the dense module; make that visible in the label.
       let moeArrows = null;
       if (c.n_shared_experts > 0) {
         moeCells.push([`shared ×${c.n_shared_experts}`, `b${i}.ffn.shared`]);
-        moeArrows = [[[0, 1], [1, 2], [2, 3], [3, 4]]]; // shared (cell 5) gets no arrows: ungated branch
+        moeArrows = [[[0, 1], [1, 2], [2, 3], [3, 4]]];
       }
       module(`b${i}.ffn`, CX_C, r2, CW_C, ROW_H, "MoE feed-forward — each expert: widen D→FF · SiLU-gate ⊙ · narrow FF→D", [moeCells], moeArrows);
     } else {
-      // gate and up are parallel branches that meet at gate⊙up: only mul→down is a chain arrow.
       module(`b${i}.ffn`, CX_C, r2, CW_C, ROW_H, "FFN · SwiGLU", [
         [["gate=SiLU", `b${i}.ffn.gate`, true], ["up=XWu", `b${i}.ffn.up`], ["gate⊙up", `b${i}.ffn.mul`], ["·Wd", `b${i}.ffn.down`]],
       ], [[[2, 3]]]);
     }
     node(`b${i}.out`, CX_R, r2, CW_R, ROW_H, "out = h + ffn", "block output");
 
-    // numbered flow edges (1-7 per block)
-    edge([[CX_L + CW_L, mid1], [CX_C - 3, mid1]], { num: 2, numAt: [CX_C - 30, mid1 - 12], from: `b${i}.ln1`, to: (MODEL.layer_kinds||[])[i] === 'd' ? `b${i}.deltanet` : `b${i}.attn` });
-    edge([[CX_C + CW_C, mid1], [CX_R - 3, mid1]], { num: 3, numAt: [CX_R - 24, mid1 - 12], from: (MODEL.layer_kinds||[])[i] === 'd' ? `b${i}.deltanet` : `b${i}.attn`, to: `b${i}.h` });
     edge([[CX_L + CW_L, mid2], [CX_C - 3, mid2]], { num: 5, numAt: [CX_C - 30, mid2 - 12], from: `b${i}.ln2`, to: `b${i}.ffn` });
     edge([[CX_C + CW_C, mid2], [CX_R - 3, mid2]], { num: 6, numAt: [CX_R - 24, mid2 - 12], from: `b${i}.ffn`, to: `b${i}.out` });
-    // h (bottom) → down → left → LN2 top (residual loop)
-    edge([[CX_R + CW_R / 2, r1 + ROW_H], [CX_R + CW_R / 2, r1 + ROW_H + ROW_GAP / 2], [CX_L + CW_L / 2, r1 + ROW_H + ROW_GAP / 2], [CX_L + CW_L / 2, r2 - 3]],
-      { num: 4, numAt: [(CX_L + CX_R + CW_R) / 2, r1 + ROW_H + ROW_GAP / 2 - 10], from: `b${i}.h`, to: `b${i}.ln2` });
-    // block output → next block LN1 (or final norm)
-    const nextTop = i + 1 < c.n_layers ? HEAD_H + (i + 1) * (BLOCK_H + BLOCK_GAP) : footY + 18;
+    // h (last mixer) → down → left → LN2 top (residual loop)
+    const hBot = by + MBLK_H - MIX_GAP;
+    edge([[CX_R + CW_R / 2, hBot + MIX_H], [CX_R + CW_R / 2, hBot + MIX_H + ROW_GAP / 2], [CX_L + CW_L / 2, hBot + MIX_H + ROW_GAP / 2], [CX_L + CW_L / 2, r2 - 3]],
+      { num: 4, numAt: [(CX_L + CX_R + CW_R) / 2, hBot + MIX_H + ROW_GAP / 2 - 10], from: `b${i}.h`, to: `b${i}.ln2` });
+    // block output → next block m0.ln (or final norm)
+    const nextTop = i + 1 < c.n_layers ? HEAD_H + (i + 1) * blockStep : footY + 18;
     edge([[CX_R + CW_R / 2, r2 + ROW_H], [CX_R + CW_R / 2, r2 + ROW_H + BLOCK_GAP / 2], [CX_L + CW_L / 2, r2 + ROW_H + BLOCK_GAP / 2], [CX_L + CW_L / 2, nextTop - 3]],
-      { num: 7, numAt: [(CX_L + CX_R + CW_R) / 2, r2 + ROW_H + BLOCK_GAP / 2 + 12], from: `b${i}.out`, to: i + 1 < c.n_layers ? `b${i + 1}.ln1` : "fnorm" });
-
-    // ---- K/V cache (right column, spans both rows) -------------------------
-    // Prefill stores the prompt's K/V here; each decode reads the cache and
-    // appends the new row (S_cache grows by one per generated token).
-    const cacheX = 756, cacheW = 144;
-    if (kind === "d") {
-      node(`b${i}.cache`, cacheX, r1, cacheW, BLOCK_H, "S state", "the recurrent (hd×hd) state per head — updated in place each token (no per-token history rows)");
-    } else {
-      node(`b${i}.cache`, cacheX, r1, cacheW, BLOCK_H, "K/V cache", "stores K,V of every position so far — grows by 1 row per token (no recomputation)");
-    }
-    // attention → cache: store K,V (dashed side channel, not the main flow)
-    edge([[490, r1 + ROW_H], [490, r1 + ROW_H + ROW_GAP * 0.35], [750, r1 + ROW_H + ROW_GAP * 0.35], [750, r1 + 34], [cacheX - 3, r1 + 34]], { dashed: true, from: mix, to: `b${i}.cache` });
-    // cache → attention: the cached K,V are read for the next-token attention
-    edge([[cacheX - 3, r2 + 74], [750, r2 + 74], [750, r1 + ROW_H + ROW_GAP * 0.8], [450, r1 + ROW_H + ROW_GAP * 0.8], [450, r1 + ROW_H + 3]], { dashed: true, from: `b${i}.cache`, to: mix });
-    const cl = svgEl("text", { class: "t-sub", x: 748, y: r1 + ROW_H + ROW_GAP * 0.35 - 4, "text-anchor": "middle" });
-    cl.textContent = "store K,V / read cached K,V";
-    SVG.appendChild(cl);
+      { num: 7, numAt: [(CX_L + CX_R + CW_R) / 2, r2 + ROW_H + BLOCK_GAP / 2 + 12], from: `b${i}.out`, to: i + 1 < c.n_layers ? `b${i + 1}.m0.ln` : "fnorm" });
   }
 
   // header → block 0 (1: embed → ln1; dashed: positions → attention)
   edge([[embX + embW / 2, headY + 56], [embX + embW / 2, HEAD_H - 14], [CX_L + CW_L / 2, HEAD_H - 14], [CX_L + CW_L / 2, blockTops[0] - 3]],
-    { num: 1, numAt: [embX + embW / 2 - 24, HEAD_H - 14], from: "emb", to: "b0.ln1" });
-  // positions enter ATTENTION (row 1 right side), not the embedding
-  edge([[posX + 8, headY + 56], [posX + 8, 130], [CX_C + CW_C + 8, 130], [CX_C + CW_C - 3, 130]],
-    { dashed: true, numAt: null, from: "pos", to: "b0.attn" });
+    { num: 1, numAt: [embX + embW / 2 - 24, HEAD_H - 14], from: "emb", to: "b0.m0.ln" });
+  // positions enter the FULL-ATTENTION mixer (last mixer of block 0)
+  const lastM = NMIX0 - 1;
+  edge([[posX + 8, headY + 56], [posX + 8, HEAD_H + lastM * 96 + 43], [CX_C + CW_C + 8, HEAD_H + lastM * 96 + 43], [CX_C + CW_C - 3, HEAD_H + lastM * 96 + 43]],
+    { dashed: true, numAt: null, from: "pos", to: `b0.m${lastM}.attn` });
 
   // ---- footer: final norm → lm_head → softmax -----------------------------
   const fy = footY;
@@ -1469,15 +1487,15 @@ function headSel(body) {
   body.appendChild(headSelEl);
 }
 
-function deltanetSubView(sub, bIdx, bt) {
-  const d = bt.deltanet;
-  if (!d) return (body) => body.appendChild(formula("S_t = (1-β_t)S_{t-1}(I-k_t k_tᵀ) + β_t k_t v_tᵀ", "this layer keeps NO per-token history — only the recurrent S — so decode is O(hd²) per token instead of O(t)"));
+function deltanetSubView(sub, bIdx, mIdx, bt) {
+  const d = bt.mixers[mIdx].deltanet;
+  if (!d) return (body) => body.appendChild(formula("S_t = (1-β_t)S_{t-1}(I-k_t k_tᵀ) + β_t k_t v_tᵀ", "this mixer keeps NO per-token history — only the recurrent S — so decode is O(hd²) per token instead of O(t)"));
   const H = MODEL.config.n_heads, hd = MODEL.config.embed_dim / H;
   if (sub === "deltanet") {
     return (body) => {
       body.appendChild(formula("S_t = (1-β_t)\,S_{t-1}(I - \hat{k}_t \hat{k}_tᵀ) + β_t\,\hat{k}_t v_tᵀ,\quad o_t = S_t \hat{q}_t", "the delta rule: subtract the key's old value (via k̂k̂ᵀ with L2-normalized k̂) before writing the new one; read-out o_t = S_t q̂ is O(hd²), no token ever looks back"));
       body.appendChild(formula("β_t = σ(a·x_t + b),\quad out = σ(x_t W_g) ⊙ RMSNorm(o_t W_o)", "per-head forget gate β and output gate α — the 'gated' in Gated DeltaNet"));
-      tensorBlock(body, "in", "input x (LN1 output)", bt.y1, { cell: 12, names: ["S", "D"] });
+      tensorBlock(body, "in", `input x (LN${mIdx} output)`, bt.mixers[mIdx].y, { cell: 12, names: ["S", "D"] });
       headSel(body);
       const q = d.q[0][HEAD], k = d.k[0][HEAD], v = d.v[0][HEAD], beta = d.beta[0][HEAD];
       body.appendChild(matLabel(`q̂ (L2-normalized q), head ${HEAD} (S, d=${hd})`));
@@ -1507,9 +1525,8 @@ function deltanetSubView(sub, bIdx, bt) {
   };
 }
 
-function attnSubView(sub, bIdx, bt) {
-  const a = bt.attn;
-  const H = MODEL.config.n_heads, hd = MODEL.config.embed_dim / H;
+function attnSubView(sub, bIdx, mIdx, bt) {
+  const a = bt.mixers[mIdx].attn;
   if (sub === "attn") {
     return (body) => {
       body.appendChild(formula(
@@ -1517,7 +1534,7 @@ function attnSubView(sub, bIdx, bt) {
         "three projections of the SAME input give each position three roles; the √d divisor keeps pre-softmax scores near unit variance — click an inner stage (Q, K, V, RoPE, QKᵀ/√d, mask, softmax, A·V) for its numbers"
       ));
       body.appendChild(formula("A = \\text{softmax}(s),\\qquad \\text{ctx} = A\\,v,\\qquad \\text{out} = \\text{ctx}\\,W_o", "per head: (S, d) each; A's rows are mixing recipes (sum to 1), ctx is the mixed content, W_o merges all heads back to width D"));
-      tensorBlock(body, "in", "input x (LN1 output)", bt.y1, { cell: 12, names: ["S", "D"] });
+      tensorBlock(body, "in", `input x (LN${mIdx} output)`, bt.mixers[mIdx].y, { cell: 12, names: ["S", "D"] });
       headSel(body);
       const q = a.q[0][HEAD], k = a.k[0][HEAD], sm = a.scores_masked[0][HEAD], aw = a.attn_weights[0][HEAD];
       body.appendChild(matLabel(`q post-RoPE, head ${HEAD} (S, d=${hd})`));
@@ -1734,7 +1751,7 @@ function ffnSubView(sub, bIdx, bt) {
 // ("b2.attn.rope" → "attn.rope"). Shown at the top of the inspector, before
 // the formula and the tensors.
 const EXPLAIN = {
-  deltanet: { what: "Gated DeltaNet: a LINEAR-attention layer. Instead of scoring every past token (O(S²)), it keeps ONE recurrent state matrix S per head and updates it in place: each token only writes into S, never reads the history.", why: "This is the 3:1 hybrid pattern (ADR 0006): 3 of every 4 layers are DeltaNet, 1 is full attention — the Qwen3-Next/Kimi-Linear shape. DeltaNet layers make long-context decode O(hd²) per token; the full-attention layer keeps global retrieval." },
+  deltanet: { what: "Gated DeltaNet: a LINEAR-attention mixer. Instead of scoring every past token (O(S²)), it keeps ONE recurrent state matrix S per head and updates it in place: each token only writes into S, never reads the history.", why: "Every block runs 3 DeltaNet mixers + 1 full attention (ADR 0007) — the Qwen3-Next shape. DeltaNet mixers make long-context decode O(hd²) per token; the one full-attention mixer keeps global retrieval." },
   "deltanet.q": { what: "q = x W_q — the query the token reads S with.", why: "o_t = S_t q̂_t: the query selects what the state returns." },
   "deltanet.k": { what: "k = x W_k, then L2-normalized to k̂.", why: "Normalization makes k̂k̂ᵀ a projection — the delta rule subtracts exactly the key's own old value." },
   "deltanet.v": { what: "v = x W_v — the value written into the state.", why: "S accumulates value associations keyed by k̂: S ≈ Σ β k̂ vᵀ, so S q̂ retrieves the value associated with the current query." },
@@ -1808,7 +1825,7 @@ function renderInspector() {
     };
   } else if (id === "pos") {
     title.textContent = "Positions → RoPE (no learned position embedding)";
-    const a = f.blocks[0].attn;
+    const a = f.blocks[0].mixers[(f.blocks[0].mixers.length - 1)].attn;
     view = (body) => {
       body.appendChild(formula("\\text{angle} = \\text{pos} \\cdot 10000^{-2i/d}", "positions are 0…S-1; they enter the model only as rotary angles applied to q and k inside attention — AFTER the embedding (embedding is step 1, positions act inside attention)"));
       tensorBlock(body, "in", "positions (S,)", [f.positions], { cell: 18, rowLabels: f.positions, names: ["S"] });
@@ -2022,26 +2039,35 @@ function renderInspector() {
   } else if (bt) {
     const b = +mBlock[1];
     const rest = id.slice(mBlock[0].length);
-    const mSub = rest.match(/^(ln1|ln2|attn|deltanet|ffn|h|out|cache)(?:\.(.+))?$/);
-    if (mSub) {
-      const what = mSub[1], sub = mSub[2];
-      if (what === "ln1" || what === "ln2") {
-        title.textContent = `block ${b} — ${what === "ln1" ? "input" : "post-attention"} norm (RMSNorm)`;
-        view = normView(f.blocks[b][what], { xIn: what === "ln1" ? bt.xIn : bt.h, label: what === "ln1" ? "block input " : "residual h " });
+    // per-mixer node: bN.mM.(ln|attn|deltanet|h|cache)(.sub)?
+    const mMix = rest.match(/^m(\d+)\.(ln|attn|deltanet|h|cache)(?:\.(.+))?$/);
+    if (mMix) {
+      const mIdx = +mMix[1], what = mMix[2], sub = mMix[3];
+      const mx = bt.mixers[mIdx];
+      if (what === "ln") {
+        title.textContent = `block ${b} — mixer ${mIdx} pre-norm (RMSNorm)`;
+        const hIn = mIdx === 0 ? bt.xIn : bt.mixers[mIdx - 1].h;
+        view = normView(mx.ln, { xIn: hIn, label: "residual in " });
       } else if (what === "attn") {
-        title.textContent = sub ? `block ${b} — attention / ${sub}` : `block ${b} — attention`;
-        view = attnSubView(sub || "attn", b, bt);
+        title.textContent = sub ? `block ${b} — mixer ${mIdx} attention / ${sub}` : `block ${b} — mixer ${mIdx} attention`;
+        view = attnSubView(sub || "attn", b, mIdx, bt);
       } else if (what === "deltanet") {
-        title.textContent = sub ? `block ${b} — Gated DeltaNet / ${sub}` : `block ${b} — Gated DeltaNet`;
-        view = deltanetSubView(sub || "deltanet", b, bt);
-      } else if (what === "ffn") {
-        title.textContent = sub ? `block ${b} — feed-forward / ${sub}` : `block ${b} — feed-forward`;
-        view = ffnSubView(sub || "ffn", b, bt);
+        title.textContent = sub ? `block ${b} — mixer ${mIdx} Gated DeltaNet / ${sub}` : `block ${b} — mixer ${mIdx} Gated DeltaNet`;
+        view = deltanetSubView(sub || "deltanet", b, mIdx, bt);
+      } else if (what === "h") {
+        title.textContent = `block ${b} — residual after mixer ${mIdx}`;
+        view = (body) => {
+          body.appendChild(formula(`h_{${mIdx + 1}} = h_{${mIdx}} + \\text{mixer}_{${mIdx}}(\\text{LN}_{${mIdx}}(h_{${mIdx}}))`, "the skip connection: the stream flows through unchanged, the mixer only ADDS a correction — ∂h/∂x carries the identity path, so gradients reach earlier blocks unshrunk"));
+          const hIn = mIdx === 0 ? bt.xIn : bt.mixers[mIdx - 1].h;
+          tensorBlock(body, "in", `residual h_${mIdx}`, hIn, { cell: 12, names: ["S", "D"] });
+          tensorBlock(body, "in", `mixer_${mIdx} out`, mx.deltanet ? mx.deltanet.out : mx.attn.attn_out, { cell: 12, names: ["S", "D"] });
+          tensorBlock(body, "out", `h_${mIdx + 1} (S, D)`, [mx.h], { cell: 14, names: ["S", "D"] });
+        };
       } else if (what === "cache") {
-        if (bt.deltanet) {
-          title.textContent = `block ${b} — S state (DeltaNet)`;
+        if (mx.deltanet) {
+          title.textContent = `block ${b} — mixer ${mIdx} S state (DeltaNet)`;
           view = (body) => {
-            const d = bt.deltanet;
+            const d = mx.deltanet;
             body.appendChild(formula(
               "S_t = (1-\beta_t)\,S_{t-1}(I - \hat{k}_t\hat{k}_tᵀ) + \beta_t\,\hat{k}_t v_tᵀ",
               "the recurrent state matrix per head — updated in place every token (no per-token history rows)"
@@ -2054,40 +2080,55 @@ function renderInspector() {
             });
           };
         } else {
-        title.textContent = `block ${b} — K/V cache`;
-        view = (body) => {
-          const a = bt.attn;
-          const kc = a.k_cache, vc = a.v_cache, S_c = kc[0][HEAD].length;
-          const H = MODEL.config.n_heads, hd = MODEL.config.embed_dim / H;
-          body.appendChild(formula(
-            "\\text{cache}_{t} = \\text{cache}_{t-1} \\,\\Vert\\, [k_t, v_t]",
-            `the per-block store of every position's K and V — prefill fills it with the whole prompt, each decode reads the whole cache and appends exactly one new row`
-          ));
-          headSel(body);
-          body.appendChild(matLabel(`K cache after this step, head ${HEAD} (S_cache=${S_c}, d=${hd})`));
-          body.appendChild(heatGrid(kc[0][HEAD], { cell: 14, title: "K cache", rowLabels: kc[0][HEAD].map((_, i) => i) }));
-          body.appendChild(numsTable(kc[0][HEAD]));
-          body.appendChild(matLabel(`V cache after this step, head ${HEAD} (S_cache=${S_c}, d=${hd})`));
-          body.appendChild(heatGrid(vc[0][HEAD], { cell: 14, title: "V cache" }));
-          body.appendChild(numsTable(vc[0][HEAD]));
-        };
+          title.textContent = `block ${b} — mixer ${mIdx} K/V cache`;
+          view = (body) => {
+            const a = mx.attn;
+            const kc = a.k_cache, vc = a.v_cache, S_c = kc[0][HEAD].length;
+            const H = MODEL.config.n_heads, hd = MODEL.config.embed_dim / H;
+            body.appendChild(formula(
+              "\\text{cache}_{t} = \\text{cache}_{t-1} \\,\\Vert\\, [k_t, v_t]",
+              `this mixer's store of every position's K and V — prefill fills it with the whole prompt, each decode reads the whole cache and appends exactly one new row`
+            ));
+            headSel(body);
+            body.appendChild(matLabel(`K cache after this step, head ${HEAD} (S_cache=${S_c}, d=${hd})`));
+            body.appendChild(heatGrid(kc[0][HEAD], { cell: 14, title: "K cache", rowLabels: kc[0][HEAD].map((_, i) => i) }));
+            body.appendChild(numsTable(kc[0][HEAD]));
+            body.appendChild(matLabel(`V cache after this step, head ${HEAD} (S_cache=${S_c}, d=${hd})`));
+            body.appendChild(heatGrid(vc[0][HEAD], { cell: 14, title: "V cache" }));
+            body.appendChild(numsTable(vc[0][HEAD]));
+          };
         }
-      } else {
-        const isH = what === "h";
-        title.textContent = `block ${b} — ${isH ? "residual after attention" : "block output"}`;
-        view = (body) => {
-          if (isH) {
-            body.appendChild(formula("h = x + \\text{attn}(\\text{LN1}(x))", "the skip connection: x flows through unchanged, attention only ADDS a correction — mathematically ∂h/∂x = I + ∂attn/∂x, so gradients reach earlier blocks unshrunk (verify: cell-wise, out = left + right below)"));
-            tensorBlock(body, "in", "residual x (block input)", bt.xIn, { cell: 12, names: ["S", "D"] });
-            tensorBlock(body, "in", "attn_out (from mixing sublayer)", bt.deltanet ? bt.deltanet.out : bt.attn.attn_out, { cell: 12, names: ["S", "D"] });
-            tensorBlock(body, "out", "h (S, D)", [bt.h], { cell: 14, names: ["S", "D"] });
-          } else {
-            body.appendChild(formula("\\text{out} = h + \\text{ffn}(\\text{LN2}(h))", "the block's second skip connection — the stream accumulates: out = x + attn + ffn, nothing is overwritten; out becomes the next block's input (verify cell-wise: bottom = top + middle)"));
-            tensorBlock(body, "in", "residual h", [bt.h], { cell: 12, names: ["S", "D"] });
-            tensorBlock(body, "in", "ffn output", [bt.moe ? bt.moe.out : bt.ffn.out], { cell: 12, names: ["S", "D"] });
-            tensorBlock(body, "out", "out (S, D)", [bt.out], { cell: 14, names: ["S", "D"] });
-          }
-        };
+      }
+    } else {
+      const mSub = rest.match(/^(ln2|ffn|h|out)(?:\.(.+))?$/);
+      if (mSub) {
+        const what = mSub[1], sub = mSub[2];
+        if (what === "ln2") {
+          title.textContent = `block ${b} — post-mixer norm (RMSNorm)`;
+          view = normView(f.blocks[b]["ln2"], { xIn: bt.h, label: "residual h " });
+        } else if (what === "ffn") {
+          title.textContent = sub ? `block ${b} — feed-forward / ${sub}` : `block ${b} — feed-forward`;
+          view = ffnSubView(sub || "ffn", b, bt);
+        } else {
+          const isH = what === "h";
+          title.textContent = `block ${b} — ${isH ? "residual after the last mixer" : "block output"}`;
+          view = (body) => {
+            if (isH) {
+              const lastM = bt.mixers.length - 1;
+              const mx = bt.mixers[lastM];
+              const hIn = lastM === 0 ? bt.xIn : bt.mixers[lastM - 1].h;
+              body.appendChild(formula(`h = h_{${lastM}} + \\text{mixer}_{${lastM}}(\\text{LN}_{${lastM}}(h_{${lastM}}))`, "the last mixer's skip connection — the stream flows through unchanged, the mixer only ADDS a correction"));
+              tensorBlock(body, "in", `residual h_${lastM}`, hIn, { cell: 12, names: ["S", "D"] });
+              tensorBlock(body, "in", `mixer_${lastM} out`, mx.deltanet ? mx.deltanet.out : mx.attn.attn_out, { cell: 12, names: ["S", "D"] });
+              tensorBlock(body, "out", "h (S, D)", [bt.h], { cell: 14, names: ["S", "D"] });
+            } else {
+              body.appendChild(formula("\\text{out} = h + \\text{ffn}(\\text{LN2}(h))", "the block's second skip connection — the stream accumulates through ALL mixers then the FFN: out = x + Σ mixers + ffn, nothing is overwritten; out becomes the next block's input"));
+              tensorBlock(body, "in", "residual h", [bt.h], { cell: 12, names: ["S", "D"] });
+              tensorBlock(body, "in", "ffn output", [bt.moe ? bt.moe.out : bt.ffn.out], { cell: 12, names: ["S", "D"] });
+              tensorBlock(body, "out", "out (S, D)", [bt.out], { cell: 14, names: ["S", "D"] });
+            }
+          };
+        }
       }
     }
   }

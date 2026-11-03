@@ -65,7 +65,7 @@ class ParameterRegistry:
         self._key_set = frozenset(e.key for e in self._entries)
 
     @staticmethod
-    def _build_entries(cfg: TransformerConfig) -> list[ParamEntry]:
+    def _build_entries(cfg: TransformerConfig) -> list[ParamEntry]:  # noqa: C901 — per-mixer entry fan-out
         """Enumerate every parameter of ``cfg`` in a stable order."""
         D, V = cfg.embed_dim, cfg.vocab_size
         H, G, hd = cfg.n_heads, cfg.kv_heads, cfg.head_dim
@@ -77,46 +77,58 @@ class ParameterRegistry:
 
         entries: list[ParamEntry] = [ParamEntry(Keys.embed(), (V, D), dtype=cfg.dtype)]
         for i in range(cfg.n_layers):
-            entries.append(ParamEntry(Keys.ln(i, LayerNorm.INPUT), (D,), dtype=cfg.dtype))
             entries.append(ParamEntry(Keys.ln(i, LayerNorm.POST_ATTENTION), (D,), dtype=cfg.dtype))
-            # Mixing sublayer per layer kind (ADR 0006): 'd' → Gated DeltaNet
-            # (q/k/v/o + forget-gate a_proj D→H + dt_bias H, + output gate
-            # gate_proj D→D + output norm gain), 'F' → full attention.
+            # Mixing sublayers (ADR 0007): every block runs n_deltanet_sublayers
+            # Gated DeltaNet mixers + one full-attention mixer, each with its own
+            # pre-norm (q/k/v/o + forget-gate a_proj D→H + dt_bias H, + output
+            # gate gate_proj D→D + output norm gain for 'd'; q/k/v/o for 'F').
             # Matrix params carry the nn.Linear transpose rule like attention.
-            if cfg.layer_kind(i) == "d":
-                entries.append(
-                    ParamEntry(Keys.deltanet(i, DeltaNet.Q_PROJ), (D, H * hd), torch_transpose=True, dtype=cfg.dtype)
-                )
-                entries.append(
-                    ParamEntry(Keys.deltanet(i, DeltaNet.K_PROJ), (D, H * hd), torch_transpose=True, dtype=cfg.dtype)
-                )
-                entries.append(
-                    ParamEntry(Keys.deltanet(i, DeltaNet.V_PROJ), (D, H * hd), torch_transpose=True, dtype=cfg.dtype)
-                )
-                entries.append(
-                    ParamEntry(Keys.deltanet(i, DeltaNet.O_PROJ), (H * hd, D), torch_transpose=True, dtype=cfg.dtype)
-                )
-                entries.append(
-                    ParamEntry(Keys.deltanet(i, DeltaNet.A_PROJ), (D, H), torch_transpose=True, dtype=cfg.dtype)
-                )
-                entries.append(
-                    ParamEntry(Keys.deltanet(i, DeltaNet.GATE_PROJ), (D, D), torch_transpose=True, dtype=cfg.dtype)
-                )
-                entries.append(ParamEntry(Keys.deltanet(i, DeltaNet.DT_BIAS), (H,), dtype=cfg.dtype))
-                entries.append(ParamEntry(Keys.deltanet(i, DeltaNet.NORM), (D,), dtype=cfg.dtype))
-            else:
-                entries.append(
-                    ParamEntry(Keys.attn(i, Attn.Q_PROJ), (D, H * hd), torch_transpose=True, dtype=cfg.dtype)
-                )
-                entries.append(
-                    ParamEntry(Keys.attn(i, Attn.K_PROJ), (D, G * hd), torch_transpose=True, dtype=cfg.dtype)
-                )
-                entries.append(
-                    ParamEntry(Keys.attn(i, Attn.V_PROJ), (D, G * hd), torch_transpose=True, dtype=cfg.dtype)
-                )
-                entries.append(
-                    ParamEntry(Keys.attn(i, Attn.O_PROJ), (H * hd, D), torch_transpose=True, dtype=cfg.dtype)
-                )
+            for m in range(cfg.n_mixers()):
+                entries.append(ParamEntry(Keys.mixer_ln(i, m), (D,), dtype=cfg.dtype))
+                if cfg.mixer_kind(m) == "d":
+                    entries.append(
+                        ParamEntry(
+                            Keys.deltanet(i, m, DeltaNet.Q_PROJ), (D, H * hd), torch_transpose=True, dtype=cfg.dtype
+                        )
+                    )
+                    entries.append(
+                        ParamEntry(
+                            Keys.deltanet(i, m, DeltaNet.K_PROJ), (D, H * hd), torch_transpose=True, dtype=cfg.dtype
+                        )
+                    )
+                    entries.append(
+                        ParamEntry(
+                            Keys.deltanet(i, m, DeltaNet.V_PROJ), (D, H * hd), torch_transpose=True, dtype=cfg.dtype
+                        )
+                    )
+                    entries.append(
+                        ParamEntry(
+                            Keys.deltanet(i, m, DeltaNet.O_PROJ), (H * hd, D), torch_transpose=True, dtype=cfg.dtype
+                        )
+                    )
+                    entries.append(
+                        ParamEntry(Keys.deltanet(i, m, DeltaNet.A_PROJ), (D, H), torch_transpose=True, dtype=cfg.dtype)
+                    )
+                    entries.append(
+                        ParamEntry(
+                            Keys.deltanet(i, m, DeltaNet.GATE_PROJ), (D, D), torch_transpose=True, dtype=cfg.dtype
+                        )
+                    )
+                    entries.append(ParamEntry(Keys.deltanet(i, m, DeltaNet.DT_BIAS), (H,), dtype=cfg.dtype))
+                    entries.append(ParamEntry(Keys.deltanet(i, m, DeltaNet.NORM), (D,), dtype=cfg.dtype))
+                else:
+                    entries.append(
+                        ParamEntry(Keys.attn(i, m, Attn.Q_PROJ), (D, H * hd), torch_transpose=True, dtype=cfg.dtype)
+                    )
+                    entries.append(
+                        ParamEntry(Keys.attn(i, m, Attn.K_PROJ), (D, G * hd), torch_transpose=True, dtype=cfg.dtype)
+                    )
+                    entries.append(
+                        ParamEntry(Keys.attn(i, m, Attn.V_PROJ), (D, G * hd), torch_transpose=True, dtype=cfg.dtype)
+                    )
+                    entries.append(
+                        ParamEntry(Keys.attn(i, m, Attn.O_PROJ), (H * hd, D), torch_transpose=True, dtype=cfg.dtype)
+                    )
             if cfg.has_moe():
                 entries.append(ParamEntry(Keys.moe_gate(i), (D, E), torch_transpose=True, dtype=cfg.dtype))
                 for j in range(E):

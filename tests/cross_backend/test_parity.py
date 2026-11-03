@@ -165,9 +165,10 @@ class TestForwardParity:
             t_last = torch_model.forward_step(input_t[:, [-1]], 4, t_cache)
         # Cache K/V parity as well as logits parity (the cache is part of
         # the parity surface now that it lives on the model interface).
+        # The attention mixer is the LAST mixer of layer 0.
         np.testing.assert_allclose(
-            np_cache[0]["k"],
-            t_cache[0]["k"].numpy(),
+            np_cache[0][-1]["k"],
+            t_cache[0][-1]["k"].numpy(),
             rtol=1e-3,
             atol=1e-3,
             err_msg="step-threaded cache K must match across tracks",

@@ -41,6 +41,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Mapping
+from typing import Any
 
 import numpy as np
 import torch
@@ -122,11 +123,12 @@ class CuGatedDeltaNet:
         n_heads: int,
         seed: int = 0,
         layer_index: int | None = None,
+        mixer_index: int | None = None,
         params: Mapping[str, np.ndarray] | None = None,
     ) -> None:
         from impl._torch.layers import GatedDeltaNet
 
-        self._impl = GatedDeltaNet(embed_dim, n_heads, layer_index=layer_index, params=params)
+        self._impl = GatedDeltaNet(embed_dim, n_heads, layer_index=layer_index, mixer_index=mixer_index, params=params)
         # mirror the plain-tensor attribute surface the block/stack code reads
         self.n_heads = n_heads
         self.head_dim = embed_dim // n_heads
@@ -221,30 +223,48 @@ class CuTransformerBlock:
         self.head_dim = hd
         self.rope_dim = config.rope_dim
 
-        # RMSNorm gains (D,) — identity at init
-        self.input_layernorm_gamma = torch.ones(D, dtype=torch.float32)
-        self.input_layernorm_gamma.requires_grad_(True)
+        # RMSNorm gains (D,) — one pre-norm PER MIXER (ADR 0007) + the
+        # post-attention norm; identity at init.
+        self.mixer_norm_gammas: list[torch.Tensor] = []
+        for _m in range(config.n_mixers()):
+            g = torch.ones(D, dtype=torch.float32)
+            g.requires_grad_(True)
+            self.mixer_norm_gammas.append(g)
         self.post_attention_layernorm_gamma = torch.ones(D, dtype=torch.float32)
         self.post_attention_layernorm_gamma.requires_grad_(True)
 
-        # ── Attention projections (no bias, Llama convention) ──────────
-        if config.layer_kind(i) == "d":
-            # Gated DeltaNet layer (ADR 0006): owns its own sublayer object;
-            # the block's forward paths dispatch on this type.
-            self.deltanet = CuGatedDeltaNet(
-                D, H, seed=seed + 1, layer_index=i if ckpt is not None else None, params=ckpt
-            )
-            self.q_proj = self.deltanet.q_proj  # attribute aliases keep _param_tensors/_cuda_to_device walks working
-            self.k_proj = self.deltanet.k_proj
-            self.v_proj = self.deltanet.v_proj
-            self.o_proj = self.deltanet.o_proj
-        else:
-            self.q_proj = _init_weight(D, H * hd, seed=seed + 2)
-            self.k_proj = _init_weight(D, G * hd, seed=seed + 3)
-            self.v_proj = _init_weight(D, G * hd, seed=seed + 4)
-            self.o_proj = _init_weight(H * hd, D, seed=seed + 5)
-            for p in (self.q_proj, self.k_proj, self.v_proj, self.o_proj):
-                p.requires_grad_(True)
+        # ── Mixing sublayers (ADR 0007): n_deltanet_sublayers Gated DeltaNet
+        # mixers + ONE full-attention mixer (plain projections, no bias) ──
+        self.mixers: list = []  # CuGatedDeltaNet or None (None = attention mixer)
+        self.attn_projs: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        for m in range(config.n_mixers()):
+            if config.mixer_kind(m) == "d":
+                # torch nn.Linear init draws from the GLOBAL RNG — reseed it per
+                # mixer so two same-seed blocks stay bit-identical (the CUDA track
+                # seeds everything else through explicit generators).
+                torch.manual_seed(seed + 1 + m)
+                self.mixers.append(
+                    CuGatedDeltaNet(
+                        D,
+                        H,
+                        seed=seed + 1 + m,
+                        layer_index=i if ckpt is not None else None,
+                        mixer_index=m if ckpt is not None else None,
+                        params=ckpt,
+                    )
+                )
+                self.attn_projs.append(
+                    (self.mixers[-1].q_proj, self.mixers[-1].k_proj, self.mixers[-1].v_proj, self.mixers[-1].o_proj)
+                )
+            else:
+                self.mixers.append(None)
+                q = _init_weight(D, H * hd, seed=seed + 2 + 4 * m)
+                k = _init_weight(D, G * hd, seed=seed + 3 + 4 * m)
+                v = _init_weight(D, G * hd, seed=seed + 4 + 4 * m)
+                o = _init_weight(H * hd, D, seed=seed + 5 + 4 * m)
+                for p in (q, k, v, o):
+                    p.requires_grad_(True)
+                self.attn_projs.append((q, k, v, o))
 
         if config.has_moe():
             # ── MoE: router + SwiGLU experts ───────────────────────────
@@ -288,17 +308,19 @@ class CuTransformerBlock:
         # every projection as (in, out)), so each copy is a direct write
         # over storage this constructor just created.
         if ckpt is not None:
-            _copy_in_place(self.input_layernorm_gamma, ckpt[Keys.ln(i, LayerNorm.INPUT)])
+            for m, g in enumerate(self.mixer_norm_gammas):
+                _copy_in_place(g, ckpt[Keys.mixer_ln(i, m)])
             _copy_in_place(self.post_attention_layernorm_gamma, ckpt[Keys.ln(i, LayerNorm.POST_ATTENTION)])
-            if hasattr(self, "deltanet"):
-                # DeltaNet layer: the sublayer object already injected its own
-                # slice at construction; the q/k/v/o aliases share that storage.
-                pass
-            else:
-                _copy_in_place(self.q_proj, ckpt[Keys.attn(i, Attn.Q_PROJ)])
-                _copy_in_place(self.k_proj, ckpt[Keys.attn(i, Attn.K_PROJ)])
-                _copy_in_place(self.v_proj, ckpt[Keys.attn(i, Attn.V_PROJ)])
-                _copy_in_place(self.o_proj, ckpt[Keys.attn(i, Attn.O_PROJ)])
+            for m in range(config.n_mixers()):
+                if self.mixers[m] is not None:
+                    # DeltaNet mixer: the sublayer object already injected its own
+                    # slice at construction; the q/k/v/o aliases share that storage.
+                    continue
+                q, k, v, o = self.attn_projs[m]
+                _copy_in_place(q, ckpt[Keys.attn(i, m, Attn.Q_PROJ)])
+                _copy_in_place(k, ckpt[Keys.attn(i, m, Attn.K_PROJ)])
+                _copy_in_place(v, ckpt[Keys.attn(i, m, Attn.V_PROJ)])
+                _copy_in_place(o, ckpt[Keys.attn(i, m, Attn.O_PROJ)])
             if config.has_moe():
                 _copy_in_place(self.router, ckpt[Keys.moe_gate(i)])
                 for e in range(E):
@@ -317,315 +339,209 @@ class CuTransformerBlock:
                 _copy_in_place(self.down_proj, ckpt[Keys.ffn(i, Mlp.DOWN_PROJ)])
 
     # ---------------------------------------------------------------- forward
-    def forward(self, x: torch.Tensor, position: int = 0) -> torch.Tensor:
-        """Forward pass through the TransformerBlock.
-
-        Pre-norm layout (identical math to the NumPy/PyTorch tracks):
-
-            xn = RMSNorm(x);  h   = x + SDPA(RoPE(q), RoPE(k), v) @ Wo
-            hn = RMSNorm(h);  out = h + FFN(hn)          # FFN = SwiGLU | MoE
-
-        Shape flow:
-          x: (B, S, D)
-            → q: (B, S, H·hd) → (B, H, S, hd); k, v: (B, G, S, hd)
-            → RoPE: (B, ·, S, hd); GQA repeat → (B, H, S, hd)
-            → SDPA: (B, H, S, hd) → (B, S, H·hd) → @Wo: (B, S, D)
-            → residual, pre-norm, FFN, residual: (B, S, D)
-        """
-        B, S, D = x.shape
-        device = x.device
-        H, G, hd = self.n_heads, self.n_groups, self.head_dim
-
-        if hasattr(self, "deltanet"):
-            # ADR 0006 DeltaNet layer: the whole mixing sublayer is the recurrent
-            # scan; then the same pre-norm FFN/residual as the attention path.
-            xn = rmsnorm(x, self.input_layernorm_gamma.to(device), eps=self.config.norm_eps)
-            attn_out = self.deltanet.forward(xn, position).to(device)
-            h = x + attn_out
-            hn = rmsnorm(h, self.post_attention_layernorm_gamma.to(device), eps=self.config.norm_eps)
-            if self.config.has_moe():
-                return h + self._moe_forward(hn, device)
-            return h + swiglu_ffn(hn, self.gate_proj.to(device), self.up_proj.to(device), self.down_proj.to(device))
-
-        # Move weights to the input's device (caller may have built them on CPU)
-        Wq, Wk, Wv, Wo = (
-            self.q_proj.to(device),
-            self.k_proj.to(device),
-            self.v_proj.to(device),
-            self.o_proj.to(device),
-        )
-        ln1 = self.input_layernorm_gamma.to(device)
-        ln2 = self.post_attention_layernorm_gamma.to(device)
-
-        # ── Stream 1: attention (pre-norm) ─────────────────────────────
-        xn = rmsnorm(x, ln1, eps=self.config.norm_eps)  # (B, S, D)
-
-        # Q, K, V projections: (B, S, D) @ (D, ·) → (B, S, ·)
-        q = xn @ Wq  # (B, S, H·hd)
-        k = xn @ Wk  # (B, S, G·hd)
-        v = xn @ Wv  # (B, S, G·hd)
-
-        # Split into heads: (B, S, ·) → (B, S, H, hd)
-        q = q.view(B, S, H, hd)  # (B, S, H, hd)
-        k = k.view(B, S, G, hd)  # (B, S, G, hd)
-        v = v.view(B, S, G, hd)
-        v = v.transpose(1, 2).contiguous()  # (B, G, S, hd) — attention-kernel layout
-
-        # RoPE on q and k (rope_dim=0 rotates all hd dims — the standard case).
-        # The RoPE kernel expects (B, S, H, D) layout; transpose to the
-        # attention kernel's (B, H, S, hd) layout afterwards.
-        q = apply_rope(q, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, S, hd)
-        k = apply_rope(k, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, S, hd)
-        # GQA: broadcast each K/V group to its H // G query heads
-        if G != H:
-            k = k.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
-            v = v.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
-
-        # Scaled dot-product attention — CUDA softmax + weighted-sum kernels
-        attn = cuda_sdp_attention(q, k, v, is_causal=True)  # (B, H, S, hd)
-
-        # Output projection: (B, H, S, hd) → (B, S, H·hd) → (B, S, D)
-        attn_out = attn.transpose(1, 2).contiguous().view(B, S, H * hd) @ Wo  # (B, S, D)
-
-        # Residual
-        h = x + attn_out  # (B, S, D)
-
-        # ── Stream 2: feed-forward (pre-norm) ──────────────────────────
-        hn = rmsnorm(h, ln2, eps=self.config.norm_eps)  # (B, S, D)
-
+    def _ffn(self, h: torch.Tensor, device: torch.device) -> torch.Tensor:
+        """Feed-forward (dense SwiGLU or MoE) on ``h`` (already normed)."""
         if self.config.has_moe():
-            ff_out = self._moe_forward(hn, device)  # (B, S, D)
-        else:
-            gp = self.gate_proj.to(device)
-            up = self.up_proj.to(device)
-            dn = self.down_proj.to(device)
-            ff_out = swiglu_ffn(hn, gp, up, dn)  # (B, S, D)
+            return self._moe_forward(h, device)
+        return swiglu_ffn(h, self.gate_proj.to(device), self.up_proj.to(device), self.down_proj.to(device))
 
-        out = h + ff_out  # (B, S, D)
-        return out
-
-    def forward_state(self, x: torch.Tensor, position: int = 0) -> Result[torch.Tensor, dict]:
-        """Block forward plus the attention K/V state the cache needs.
-
-        Mirrors ``impl._torch.layers.TransformerBlock.forward_state`` (which
-        mirrors ``impl._np.block.TransformerBlock.forward_state``): the
-        prefill path requests the state and backfills the per-layer cache —
-        no second pass. Same ``Result`` contract (shared/result.py).
-
-        ``.value`` = out (B, S, D); ``.ctx.display`` = {"k_group":
-        (B, G, S, hd), "v_group": (B, G, S, hd)}.
-        """
-        B, S, D = x.shape
-        device = x.device
+    def _attn_forward(self, xn: torch.Tensor, position: int) -> torch.Tensor:
+        """Full-attention mixer's full-sequence forward (CUDA SDPA path)."""
+        B, S, _D = xn.shape
+        device = xn.device
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
-
-        if hasattr(self, "deltanet"):
-            xn = rmsnorm(x, self.input_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
-            res = self.deltanet.forward_state(xn, position)
-            h = x + res.value
-            hn = rmsnorm(h, self.post_attention_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
-            if self.config.has_moe():
-                out = h + self._moe_forward(hn, x.device)
-            else:
-                out = h + swiglu_ffn(
-                    hn, self.gate_proj.to(x.device), self.up_proj.to(x.device), self.down_proj.to(x.device)
-                )
-            return Result.capture(out, {}, dict(res.ctx.display))
-
-        Wq, Wk, Wv, Wo = (
-            self.q_proj.to(device),
-            self.k_proj.to(device),
-            self.v_proj.to(device),
-            self.o_proj.to(device),
-        )
-        ln1 = self.input_layernorm_gamma.to(device)
-        ln2 = self.post_attention_layernorm_gamma.to(device)
-
-        xn = rmsnorm(x, ln1, eps=self.config.norm_eps)  # (B, S, D)
+        Wq, Wk, Wv, Wo = (t.to(device) for t in self.attn_projs[-1])
         q = xn @ Wq  # (B, S, H·hd)
         k = xn @ Wk  # (B, S, G·hd)
         v = xn @ Wv  # (B, S, G·hd)
-
-        q = q.view(B, S, H, hd)  # (B, S, H, hd)
-        k = k.view(B, S, G, hd)  # (B, S, G, hd)
-        v = v.view(B, S, G, hd)
-        v = v.transpose(1, 2).contiguous()  # (B, G, S, hd)
-
+        q = q.view(B, S, H, hd)
+        k = k.view(B, S, G, hd)
+        v = v.view(B, S, G, hd).transpose(1, 2).contiguous()  # (B, G, S, hd)
         q = apply_rope(q, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, S, hd)
         k = apply_rope(k, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, S, hd)
-
-        k_group, v_group = k, v  # (B, G, S, hd) — the cacheable per-group form
-
         if G != H:
-            k_full = k_group.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
-            v_full = v_group.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
+            k = k.repeat_interleave(H // G, dim=1)
+            v = v.repeat_interleave(H // G, dim=1)
+        attn = cuda_sdp_attention(q, k, v, is_causal=True)  # (B, H, S, hd)
+        return attn.transpose(1, 2).contiguous().view(B, S, H * hd) @ Wo  # (B, S, D)
+
+    def _attn_forward_state(self, xn: torch.Tensor, position: int) -> tuple[torch.Tensor, dict]:
+        """Full-attention mixer's forward + the cacheable per-group K/V."""
+        B, S, _D = xn.shape
+        device = xn.device
+        H, G, hd = self.n_heads, self.n_groups, self.head_dim
+        Wq, Wk, Wv, Wo = (t.to(device) for t in self.attn_projs[-1])
+        q = xn @ Wq
+        k = xn @ Wk
+        v = xn @ Wv
+        q = q.view(B, S, H, hd)
+        k = k.view(B, S, G, hd)
+        v = v.view(B, S, G, hd).transpose(1, 2).contiguous()  # (B, G, S, hd)
+        q = apply_rope(q, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, S, hd)
+        k = apply_rope(k, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, S, hd)
+        k_group, v_group = k, v  # (B, G, S, hd) — the cacheable per-group form
+        if G != H:
+            k_full = k_group.repeat_interleave(H // G, dim=1)
+            v_full = v_group.repeat_interleave(H // G, dim=1)
         else:
             k_full, v_full = k_group, v_group
-
         attn = cuda_sdp_attention(q, k_full, v_full, is_causal=True)  # (B, H, S, hd)
         attn_out = attn.transpose(1, 2).contiguous().view(B, S, H * hd) @ Wo  # (B, S, D)
-        h = x + attn_out  # (B, S, D)
+        return attn_out, {"k_group": k_group, "v_group": v_group}
 
-        hn = rmsnorm(h, ln2, eps=self.config.norm_eps)  # (B, S, D)
-        if self.config.has_moe():
-            ff_out = self._moe_forward(hn, device)  # (B, S, D)
-        else:
-            ff_out = swiglu_ffn(hn, self.gate_proj.to(device), self.up_proj.to(device), self.down_proj.to(device))
-        out = h + ff_out  # (B, S, D)
-        return Result.capture(out, {}, {"k_group": k_group, "v_group": v_group})
-
-    def forward_step(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
-        # Fail fast on a schema mismatch: these tracks build only the naive
-        # {'k','v'} cache (make_cache has no quantize mode).
-        if not hasattr(self, "deltanet"):
-            missing = [k for k in ("k", "v") if k not in cache]
-            assert not missing, f"forward_step needs a naive {{'k','v'}} cache (missing keys: {missing})"
-        if hasattr(self, "deltanet"):
-            xn = rmsnorm(x, self.input_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
-            attn_out = self.deltanet.forward_step(xn, position, cache)
-            h = x + attn_out
-            hn = rmsnorm(h, self.post_attention_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
-            if self.config.has_moe():
-                return h + self._moe_forward(hn, x.device)
-            return h + swiglu_ffn(
-                hn, self.gate_proj.to(x.device), self.up_proj.to(x.device), self.down_proj.to(x.device)
-            )
-        """Process ONE new token against this block's cached K/V (KV-cached path).
-
-        Mirrors ``impl._torch.layers.TransformerBlock.forward_step`` (which
-        mirrors ``impl._np.block.TransformerBlock.forward_step``): the token's
-        K/V are appended to ``cache`` before attention runs (single-token
-        attention, O(1) per token).
-
-        x: (B, 1, D) the new token's embedding at absolute ``position``.
-        cache: this layer's dict {"k": (B, G, t, hd), "v": (B, G, t, hd)},
-            mutated in place.
-
-        Returns: out (B, 1, D).
-        """
-        B = x.shape[0]
-        device = x.device
+    def _attn_step(self, xn: torch.Tensor, position: int, cache: dict) -> torch.Tensor:
+        """Full-attention mixer's one-token step against the cached K/V."""
+        B = xn.shape[0]
+        device = xn.device
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
-
-        Wq, Wk, Wv, Wo = (
-            self.q_proj.to(device),
-            self.k_proj.to(device),
-            self.v_proj.to(device),
-            self.o_proj.to(device),
-        )
-        ln1 = self.input_layernorm_gamma.to(device)
-        ln2 = self.post_attention_layernorm_gamma.to(device)
-
-        xn = rmsnorm(x, ln1, eps=self.config.norm_eps)  # (B, 1, D)
-        q = (xn @ Wq).view(B, 1, H, hd)  # (B, 1, H, hd)
-        k = (xn @ Wk).view(B, 1, G, hd)  # (B, 1, G, hd)
+        Wq, Wk, Wv, Wo = (t.to(device) for t in self.attn_projs[-1])
+        q = (xn @ Wq).view(B, 1, H, hd)
+        k = (xn @ Wk).view(B, 1, G, hd)
         v = (xn @ Wv).view(B, 1, G, hd).transpose(1, 2).contiguous()  # (B, G, 1, hd)
-
         q = apply_rope(q, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, 1, hd)
         k = apply_rope(k, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, 1, hd)
-
-        # Append the new K/V to the cache (per-group; K already RoPE'd).
         cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+1, hd)
-        cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+1, hd)
-
+        cache["v"] = torch.cat([cache["v"], v], dim=2)
         k_full, v_full = cache["k"], cache["v"]
         if G != H:
-            k_full = k_full.repeat_interleave(H // G, dim=1)  # (B, H, t+1, hd)
-            v_full = v_full.repeat_interleave(H // G, dim=1)  # (B, H, t+1, hd)
+            k_full = k_full.repeat_interleave(H // G, dim=1)
+            v_full = v_full.repeat_interleave(H // G, dim=1)
+        attn = cuda_sdp_attention(q, k_full, v_full)  # (B, H, 1, hd) — all cached precede the query
+        return attn.transpose(1, 2).contiguous().view(B, 1, H * hd) @ Wo  # (B, 1, D)
 
-        # Single query row: causal masking is implicit (all cached positions
-        # precede the query).
-        attn = cuda_sdp_attention(q, k_full, v_full)  # (B, H, 1, hd)
-        attn_out = attn.transpose(1, 2).contiguous().view(B, 1, H * hd) @ Wo  # (B, 1, D)
-        h = x + attn_out  # (B, 1, D)
-
-        hn = rmsnorm(h, ln2, eps=self.config.norm_eps)  # (B, 1, D)
-        if self.config.has_moe():
-            ff_out = self._moe_forward(hn, device)  # (B, 1, D)
-        else:
-            ff_out = swiglu_ffn(hn, self.gate_proj.to(device), self.up_proj.to(device), self.down_proj.to(device))
-        return h + ff_out  # (B, 1, D)
-
-    def forward_chunk(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Process a CHUNK of c tokens through this block (KV-cached path).
-
-        Mirrors ``impl._torch.layers.TransformerBlock.forward_chunk`` (which
-        mirrors ``impl._np.block.TransformerBlock.forward_chunk``): the
-        whole chunk's K/V are appended to ``cache`` in one pass and every
-        chunk position is scored through the CUDA SDPA path in parallel
-        (causal within the chunk).
-
-        x: (B, c, D) the chunk's vectors. position: the absolute index of
-        the chunk's first token. cache: this layer's dict
-        {"k": (B, G, t, hd), "v": (B, G, t, hd)}, mutated in place.
-
-        Returns: out (B, c, D).
-        """
-        if hasattr(self, "deltanet"):
-            B, c, _ = x.shape
-            xn = rmsnorm(x, self.input_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
-            attn_out = self.deltanet.forward_chunk(xn, position, cache)
-            h = x + attn_out
-            hn = rmsnorm(h, self.post_attention_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
-            if self.config.has_moe():
-                return h + self._moe_forward(hn, x.device)
-            return h + swiglu_ffn(
-                hn, self.gate_proj.to(x.device), self.up_proj.to(x.device), self.down_proj.to(x.device)
-            )
-        B, c, _ = x.shape
-        device = x.device
+    def _attn_chunk(self, xn: torch.Tensor, position: int, cache: dict) -> torch.Tensor:
+        """Full-attention mixer's chunk pass (verification path)."""
+        B, c, _D = xn.shape
+        device = xn.device
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
-
-        Wq, Wk, Wv, Wo = (
-            self.q_proj.to(device),
-            self.k_proj.to(device),
-            self.v_proj.to(device),
-            self.o_proj.to(device),
-        )
-        ln1 = self.input_layernorm_gamma.to(device)
-        ln2 = self.post_attention_layernorm_gamma.to(device)
-
-        xn = rmsnorm(x, ln1, eps=self.config.norm_eps)  # (B, c, D)
-        q = xn @ Wq  # (B, c, H*hd)
-        k = xn @ Wk  # (B, c, G*hd)
-        v = xn @ Wv  # (B, c, G*hd)
-
-        q = q.view(B, c, H, hd)  # (B, c, H, hd)
-        k = k.view(B, c, G, hd)  # (B, c, G, hd)
+        Wq, Wk, Wv, Wo = (t.to(device) for t in self.attn_projs[-1])
+        q = xn @ Wq
+        k = xn @ Wk
+        v = xn @ Wv
+        q = q.view(B, c, H, hd)
+        k = k.view(B, c, G, hd)
         v = v.view(B, c, G, hd).transpose(1, 2).contiguous()  # (B, G, c, hd)
-
         q = apply_rope(q, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, c, hd)
         k = apply_rope(k, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, c, hd)
-
-        # Append the chunk's per-group K/V to the cache (K already RoPE'd).
         cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+c, hd)
-        cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+c, hd)
-
-        # GQA: broadcast each cached K/V group to its H // G query heads.
+        cache["v"] = torch.cat([cache["v"], v], dim=2)
         k_full, v_full = cache["k"], cache["v"]
         if G != H:
-            k_full = k_full.repeat_interleave(H // G, dim=1)  # (B, H, t+c, hd)
-            v_full = v_full.repeat_interleave(H // G, dim=1)  # (B, H, t+c, hd)
-
+            k_full = k_full.repeat_interleave(H // G, dim=1)
+            v_full = v_full.repeat_interleave(H // G, dim=1)
         t = k_full.shape[2] - c
-        # Left-pad the queries with t dummy rows (zeros → -inf scores after
-        # the causal mask; their outputs are discarded) so the kernel's
-        # row-absolute causal mask (key j <= row i) IS the block-causal
-        # (c, t+c) mask over the real rows — the same shape trick the torch
-        # track expresses as an explicit (c, t+c) allow-mask.
+        # Left-pad the queries with t dummy rows so the kernel's row-absolute
+        # causal mask (key j <= row i) IS the block-causal (c, t+c) mask.
         q_pad = torch.zeros((B, H, t + c, hd), device=device, dtype=q.dtype)
         q_pad[:, :, t:, :] = q
         attn = cuda_sdp_attention(q_pad, k_full, v_full, is_causal=True)  # (B, H, t+c, hd)
         attn = attn[:, :, t:, :]  # (B, H, c, hd) — crop the dummy rows
-        attn_out = attn.transpose(1, 2).contiguous().view(B, c, H * hd) @ Wo  # (B, c, D)
-        h = x + attn_out  # (B, c, D)
+        return attn.transpose(1, 2).contiguous().view(B, c, H * hd) @ Wo  # (B, c, D)
 
-        hn = rmsnorm(h, ln2, eps=self.config.norm_eps)  # (B, c, D)
-        if self.config.has_moe():
-            ff_out = self._moe_forward(hn, device)  # (B, c, D)
-        else:
-            ff_out = swiglu_ffn(hn, self.gate_proj.to(device), self.up_proj.to(device), self.down_proj.to(device))
-        return h + ff_out  # (B, c, D)
+    def forward(self, x: torch.Tensor, position: int = 0) -> torch.Tensor:
+        """Forward pass through the TransformerBlock (ADR 0007 mixer chain).
+
+        Pre-norm layout (identical math to the other tracks):
+
+            h = x;  for m: h = h + mixer_m(RMSNorm_m(h))
+            out = h + FFN(RMSNorm(h))               # FFN = SwiGLU | MoE
+        """
+        h = x
+        for m in range(self.config.n_mixers()):
+            device = x.device
+            xn = rmsnorm(h, self.mixer_norm_gammas[m].to(device), eps=self.config.norm_eps)
+            mixer = self.mixers[m]
+            if mixer is not None:
+                h = h + mixer.forward(xn, position).to(device)
+            else:
+                h = h + self._attn_forward(xn, position)
+        hn = rmsnorm(h, self.post_attention_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
+        return h + self._ffn(hn, x.device)
+
+    def forward_state(self, x: torch.Tensor, position: int = 0) -> Result[torch.Tensor, list[dict]]:
+        """Block forward plus the per-mixer cache state the prefill needs.
+
+        Mirrors ``impl._torch.layers.TransformerBlock.forward_state`` (which
+        mirrors ``impl._np.block.TransformerBlock.forward_state``): the
+        prefill path requests the state and backfills the per-mixer caches —
+        no second pass. Same ``Result`` contract (shared/result.py).
+
+        ``.value`` = out (B, S, D); ``.ctx.display`` = the list of per-mixer
+        displays — {"k_group", "v_group"} for the attention mixer,
+        {"s_final", "s_hist"} for each DeltaNet mixer.
+        """
+        h = x
+        displays: list[dict[str, Any]] = []
+        for m in range(self.config.n_mixers()):
+            device = x.device
+            xn = rmsnorm(h, self.mixer_norm_gammas[m].to(device), eps=self.config.norm_eps)
+            mixer = self.mixers[m]
+            if mixer is not None:
+                res = mixer.forward_state(xn, position)
+                h = h + res.value.to(device)
+                displays.append(dict(res.ctx.display))
+            else:
+                attn_out, kv = self._attn_forward_state(xn, position)
+                h = h + attn_out
+                displays.append(kv)
+        hn = rmsnorm(h, self.post_attention_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
+        out = h + self._ffn(hn, x.device)
+        return Result.capture(out, {}, displays)  # type: ignore[arg-type]
+
+    def forward_step(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
+        """Process ONE new token against this block's per-mixer caches.
+
+        Mirrors ``impl._torch.layers.TransformerBlock.forward_step``: each
+        mixer's cache entry (``cache[m]``) is updated in place (the attention
+        mixer appends the token's K/V; DeltaNet mixers advance the recurrent
+        S state).
+
+        x: (B, 1, D) the new token's embedding at absolute ``position``.
+        cache: this block's per-mixer cache list, mutated in place.
+
+        Returns: out (B, 1, D).
+        """
+        h = x
+        for m in range(self.config.n_mixers()):
+            device = x.device
+            xn = rmsnorm(h, self.mixer_norm_gammas[m].to(device), eps=self.config.norm_eps)
+            mixer = self.mixers[m]
+            if mixer is not None:
+                h = h + mixer.forward_step(xn, position, cache[m]).to(device)
+            else:
+                missing = [k for k in ("k", "v") if k not in cache[m]]
+                assert not missing, f"forward_step needs a naive {{'k','v'}} cache (missing keys: {missing})"
+                h = h + self._attn_step(xn, position, cache[m])
+        hn = rmsnorm(h, self.post_attention_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
+        return h + self._ffn(hn, x.device)
+
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
+        """Process a CHUNK of c tokens through this block (KV-cached path).
+
+        Mirrors ``impl._torch.layers.TransformerBlock.forward_chunk`` (which
+        mirrors ``impl._np.block.TransformerBlock.forward_chunk``): each
+        mixer's chunk form runs against ``cache[m]`` — the attention mixer
+        appends the whole chunk's K/V in one pass and scores every chunk
+        position through the CUDA SDPA path in parallel (causal within the
+        chunk); DeltaNet mixers scan sequentially.
+
+        x: (B, c, D) the chunk's vectors. position: the absolute index of
+        the chunk's first token. cache: this block's per-mixer cache list,
+        mutated in place.
+
+        Returns: out (B, c, D).
+        """
+        h = x
+        for m in range(self.config.n_mixers()):
+            device = x.device
+            xn = rmsnorm(h, self.mixer_norm_gammas[m].to(device), eps=self.config.norm_eps)
+            mixer = self.mixers[m]
+            if mixer is not None:
+                h = h + mixer.forward_chunk(xn, position, cache[m]).to(device)
+            else:
+                h = h + self._attn_chunk(xn, position, cache[m])
+        hn = rmsnorm(h, self.post_attention_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
+        return h + self._ffn(hn, x.device)
 
     def _moe_forward(self, x: torch.Tensor, device: torch.device) -> torch.Tensor:
         """MoE forward: torch routing (identical to the other tracks) + CUDA SwiGLU experts.

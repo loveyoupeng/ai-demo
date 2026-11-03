@@ -53,6 +53,7 @@ if TYPE_CHECKING:
         FFNRecord,
         ForwardRecord,
         GenerationRecord,
+        MixerRecord,
         MoERecord,
         NormRecord,
         RopeRecord,
@@ -175,6 +176,7 @@ def _attention_forward(
     block: CuTransformerBlock,
     ln1_out: torch.Tensor,
     position: int,
+    mixer_idx: int = -1,
     cache: dict[str, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, AttnRecord]:
     """Run the block's attention math (float64 display path) + record.
@@ -189,8 +191,7 @@ def _attention_forward(
     """
     B, S, _ = ln1_out.shape
     H, G, hd = block.n_heads, block.n_groups, block.head_dim
-    Wq, Wk, Wv, Wo = (block.q_proj, block.k_proj, block.v_proj, block.o_proj)
-    Wq, Wk, Wv, Wo = _w(Wq), _w(Wk), _w(Wv), _w(Wo)  # float64 display path
+    Wq, Wk, Wv, Wo = block.attn_projs[mixer_idx]
 
     # Projections: (B, S, D) → (B, S, ·)
     q_pre = ln1_out @ Wq  # (B, S, H·hd)
@@ -261,15 +262,17 @@ def _attention_forward(
     }
 
 
-def _init_kv_cache(block: CuTransformerBlock, k_pre: torch.Tensor, v_pre: torch.Tensor, position: int) -> dict:
-    """Build a block's KV cache from a prefill pass.
+def _init_kv_cache(
+    block: CuTransformerBlock, k_pre: torch.Tensor, v_pre: torch.Tensor, position: int, mixer_idx: int = -1
+) -> dict:
+    """Build a mixer's KV cache from a prefill pass.
 
     k_pre/v_pre are the pre-RoPE, un-split projections (B, S, G·hd). The
     cache stores K/V *per group* (GQA keeps it small); RoPE is applied to K
     with the pass's positions so later decode steps only rotate the NEW
     token and can attend to these cached rows unchanged.
     """
-    dev = block.q_proj.device
+    dev = block.attn_projs[mixer_idx][0].device
     k_pre = k_pre.to(dev)
     v_pre = v_pre.to(dev)
     B, S, _ = k_pre.shape
@@ -391,7 +394,7 @@ def _instrumented_blocks(
     model: CUDAModel,
     stream: torch.Tensor,
     position: int,
-    caches: list[dict] | None = None,
+    caches: list[list[dict]] | None = None,
 ) -> tuple[torch.Tensor, list[BlockRecord]]:
     """Run every block of the stack in float64, capturing each block record.
 
@@ -400,32 +403,40 @@ def _instrumented_blocks(
     blocks: list[BlockRecord] = []
     for i, block in enumerate(model.stacking.blocks):
         eps = model.config.norm_eps
-        ln1_out, _ = _rmsnorm(stream, _w(block.input_layernorm_gamma), eps)  # (B, S, D)
-        if hasattr(block, "deltanet"):
-            s_init = None if caches is None else caches[i].get("s")
-            attn_out, attn_rec = _deltanet_record(
-                block.deltanet._impl, ln1_out, ln1_out.new_zeros(ln1_out.shape), s_init=s_init
-            )
-            if caches is not None:
-                caches[i]["s"] = torch.tensor(np.array(attn_rec["s_hist"])[:, :, -1], dtype=torch.float64)
-                caches[i]["s_hist"].append(caches[i]["s"])
-        else:
-            attn_out, attn_rec = _attention_forward(
-                block, ln1_out, position, cache=None if caches is None else caches[i]
-            )  # (B, S, D)
-        h = stream + attn_out  # (B, S, D) residual after attention
+        mixer_recs: list[MixerRecord] = []
+        h = stream
+        for m in range(model.config.n_mixers()):
+            h_in = h
+            ln_out, _ = _rmsnorm(h, _w(block.mixer_norm_gammas[m]), eps)  # (B, S, D)
+            mixer = block.mixers[m]
+            if mixer is not None:
+                s_init = None if caches is None else caches[i][m].get("s")
+                mixer_out, mixer_rec = _deltanet_record(
+                    mixer._impl, ln_out, ln_out.new_zeros(ln_out.shape), s_init=s_init
+                )
+                if caches is not None:
+                    caches[i][m]["s"] = torch.tensor(np.array(mixer_rec["s_hist"])[:, :, -1], dtype=torch.float64)
+                    caches[i][m]["s_hist"].append(caches[i][m]["s"])
+            else:
+                mixer_out, mixer_rec = _attention_forward(
+                    block, ln_out, position, m, cache=None if caches is None else caches[i][m]
+                )  # (B, S, D)
+            h = h + mixer_out  # (B, S, D) residual after this mixer
+            mrec: MixerRecord = {
+                "ln": _rmsnorm_record(_w(block.mixer_norm_gammas[m]), h_in, eps, ln_out),
+                "h": arr(h),
+                "out": arr(mixer_out),
+            }
+            if mixer is not None:
+                mrec["deltanet"] = mixer_rec  # type: ignore[typeddict-item]
+            else:
+                mrec["attn"] = mixer_rec  # type: ignore[typeddict-item]
+            mixer_recs.append(mrec)
         ln2_out, _ = _rmsnorm(h, _w(block.post_attention_layernorm_gamma), eps)  # (B, S, D)
         block_rec: BlockRecord = {
-            "ln1": _rmsnorm_record(_w(block.input_layernorm_gamma), stream, eps, ln1_out),
-            "h": arr(h),
+            "mixers": mixer_recs,
             "ln2": _rmsnorm_record(_w(block.post_attention_layernorm_gamma), h, eps, ln2_out),
         }
-        # TypedDicts are closed shapes: the MoE field carries the MoE record,
-        # the dense field the FFN record — assigned in the branch that builds it.
-        if hasattr(block, "deltanet"):
-            block_rec["deltanet"] = attn_rec  # type: ignore[typeddict-item]
-        else:
-            block_rec["attn"] = attn_rec  # type: ignore[typeddict-item]
         if block.config.has_moe():
             ff_out, moe_rec = _moe_record(block, ln2_out)  # (B, S, D)
             block_rec["moe"] = moe_rec
@@ -593,22 +604,25 @@ def generate_with_records(
     seq.append(tok)
     p0 = list(x[0].tolist())
     pos0 = len(seq) - 1 - len(p0)  # the window's first absolute position
-    caches: list[dict] = []
+    caches: list[list[dict]] = []
     for i, block in enumerate(model.stacking.blocks):
-        if hasattr(block, "deltanet"):
-            dn0 = rec["blocks"][i].get("deltanet")
-            s0 = torch.zeros(1, block.n_heads, block.head_dim, block.head_dim, dtype=torch.float64)
-            hist: list = []
-            if dn0 is not None:
-                sh = np.array(dn0["s_hist"])  # (B, H, S, hd, hd)
-                s0 = torch.tensor(sh[:, :, -1], dtype=torch.float64)
-                hist = [torch.tensor(sh[:, :, t], dtype=torch.float64) for t in range(sh.shape[2])]
-            caches.append({"s": s0, "s_hist": hist})
-        else:
-            r = rec["blocks"][i]["attn"]
-            # (as in the NumPy track) the cache is initialized from the recorded
-            # pre-RoPE projections, so the display and the state agree exactly.
-            caches.append(_init_kv_cache(block, torch.tensor(r["k_pre"]), torch.tensor(r["v_pre"]), pos0))
+        layer_caches: list[dict] = []
+        for m in range(model.config.n_mixers()):
+            if block.mixers[m] is not None:
+                dn0 = rec["blocks"][i]["mixers"][m].get("deltanet")
+                s0 = torch.zeros(1, block.n_heads, block.head_dim, block.head_dim, dtype=torch.float64)
+                hist: list = []
+                if dn0 is not None:
+                    sh = np.array(dn0["s_hist"])  # (B, H, S, hd, hd)
+                    s0 = torch.tensor(sh[:, :, -1], dtype=torch.float64)
+                    hist = [torch.tensor(sh[:, :, t], dtype=torch.float64) for t in range(sh.shape[2])]
+                layer_caches.append({"s": s0, "s_hist": hist})
+            else:
+                r = rec["blocks"][i]["mixers"][m]["attn"]
+                # (as in the NumPy track) the cache is initialized from the recorded
+                # pre-RoPE projections, so the display and the state agree exactly.
+                layer_caches.append(_init_kv_cache(block, torch.tensor(r["k_pre"]), torch.tensor(r["v_pre"]), pos0, m))
+        caches.append(layer_caches)
 
     # ---- Steps 1..n: autoregressive decode, one new token per step
     for i in range(1, n_tokens):

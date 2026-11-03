@@ -462,7 +462,7 @@ class GatedDeltaNet(nn.Module):
     sequentially (chunk parity with ``forward``, pinned by tests).
 
     Cache: {"s": (B,H,hd,hd), "s_hist": [...]} — same contract as the NumPy
-    track; ``make_cache`` picks the kind per layer.
+    track; ``make_cache`` picks the kind per mixer.
     """
 
     def __init__(
@@ -470,6 +470,7 @@ class GatedDeltaNet(nn.Module):
         embed_dim: int,
         n_heads: int,
         layer_index: int | None = None,
+        mixer_index: int | None = None,
         params: Mapping[str, np.ndarray] | None = None,
     ) -> None:
         super().__init__()
@@ -486,16 +487,16 @@ class GatedDeltaNet(nn.Module):
         self.dt_bias = nn.Parameter(torch.zeros(H))
         self.gate_proj = nn.Linear(D, D, bias=False)
         self.norm = RMSNorm(D)
-        if params is not None and layer_index is not None:
-            i = layer_index
-            _copy_checkpoint(self.q_proj.weight, params[Keys.deltanet(i, DeltaNet.Q_PROJ)], transpose=True)
-            _copy_checkpoint(self.k_proj.weight, params[Keys.deltanet(i, DeltaNet.K_PROJ)], transpose=True)
-            _copy_checkpoint(self.v_proj.weight, params[Keys.deltanet(i, DeltaNet.V_PROJ)], transpose=True)
-            _copy_checkpoint(self.o_proj.weight, params[Keys.deltanet(i, DeltaNet.O_PROJ)], transpose=True)
-            _copy_checkpoint(self.a_proj.weight, params[Keys.deltanet(i, DeltaNet.A_PROJ)], transpose=True)
-            _copy_checkpoint(self.dt_bias, params[Keys.deltanet(i, DeltaNet.DT_BIAS)])
-            _copy_checkpoint(self.gate_proj.weight, params[Keys.deltanet(i, DeltaNet.GATE_PROJ)], transpose=True)
-            _copy_checkpoint(self.norm.weight, params[Keys.deltanet(i, DeltaNet.NORM)])
+        if params is not None and layer_index is not None and mixer_index is not None:
+            i, m = layer_index, mixer_index
+            _copy_checkpoint(self.q_proj.weight, params[Keys.deltanet(i, m, DeltaNet.Q_PROJ)], transpose=True)
+            _copy_checkpoint(self.k_proj.weight, params[Keys.deltanet(i, m, DeltaNet.K_PROJ)], transpose=True)
+            _copy_checkpoint(self.v_proj.weight, params[Keys.deltanet(i, m, DeltaNet.V_PROJ)], transpose=True)
+            _copy_checkpoint(self.o_proj.weight, params[Keys.deltanet(i, m, DeltaNet.O_PROJ)], transpose=True)
+            _copy_checkpoint(self.a_proj.weight, params[Keys.deltanet(i, m, DeltaNet.A_PROJ)], transpose=True)
+            _copy_checkpoint(self.dt_bias, params[Keys.deltanet(i, m, DeltaNet.DT_BIAS)])
+            _copy_checkpoint(self.gate_proj.weight, params[Keys.deltanet(i, m, DeltaNet.GATE_PROJ)], transpose=True)
+            _copy_checkpoint(self.norm.weight, params[Keys.deltanet(i, m, DeltaNet.NORM)])
 
     @staticmethod
     def _l2norm(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -777,34 +778,48 @@ class TransformerBlock(nn.Module):
         i = layer_index
         p = params  # short alias; None → the training path (all keys below unused)
 
-        # Norms (LLama naming: input norm, norm after attention)
-        self.input_layernorm = RMSNorm(
-            D, eps=config.norm_eps, weight=None if p is None else p[Keys.ln(i, LayerNorm.INPUT)]
+        # Norms: one pre-norm PER MIXER (ADR 0007) + the post-attention norm
+        # before the FFN (Llama naming).
+        self.mixer_norms = nn.ModuleList(
+            [
+                RMSNorm(D, eps=config.norm_eps, weight=None if p is None else p[Keys.mixer_ln(i, m)])
+                for m in range(config.n_mixers())
+            ]
         )
         self.post_attention_layernorm = RMSNorm(
             D, eps=config.norm_eps, weight=None if p is None else p[Keys.ln(i, LayerNorm.POST_ATTENTION)]
         )
-        # Mixing sublayer per layer kind (ADR 0006): 'd' → Gated DeltaNet,
-        # 'F' → full attention. Same forward/step/chunk interface; the cache
-        # dict shape differs ({"s","s_hist"} vs {"k","v"}).
-        if config.layer_kind(i) == "d":
-            self.self_attn: MultiHeadAttention | GatedDeltaNet = GatedDeltaNet(
-                embed_dim=D,
-                n_heads=H,
-                layer_index=i if p is not None else None,
-                params=p,
-            )
-        else:
-            self.self_attn = MultiHeadAttention(
-                embed_dim=D,
-                n_heads=H,
-                n_groups=G,
-                rope_dim=config.rope_dim,
-                q_proj=None if p is None else p[Keys.attn(i, Attn.Q_PROJ)],
-                k_proj=None if p is None else p[Keys.attn(i, Attn.K_PROJ)],
-                v_proj=None if p is None else p[Keys.attn(i, Attn.V_PROJ)],
-                o_proj=None if p is None else p[Keys.attn(i, Attn.O_PROJ)],
-            )
+        # Mixing sublayers (ADR 0007): every block runs n_deltanet_sublayers
+        # Gated DeltaNet mixers followed by ONE full RoPE attention mixer.
+        # Same forward/step/chunk interface; the cache dict shape differs
+        # ({"s","s_hist"} vs {"k","v"}).
+        mixers: list[MultiHeadAttention | GatedDeltaNet] = []
+        for m in range(config.n_mixers()):
+            if config.mixer_kind(m) == "d":
+                mixers.append(
+                    GatedDeltaNet(
+                        embed_dim=D,
+                        n_heads=H,
+                        layer_index=i if p is not None else None,
+                        mixer_index=m if p is not None else None,
+                        params=p,
+                    )
+                )
+            else:
+                mixers.append(
+                    MultiHeadAttention(
+                        embed_dim=D,
+                        n_heads=H,
+                        n_groups=G,
+                        rope_dim=config.rope_dim,
+                        q_proj=None if p is None else p[Keys.attn(i, m, Attn.Q_PROJ)],
+                        k_proj=None if p is None else p[Keys.attn(i, m, Attn.K_PROJ)],
+                        v_proj=None if p is None else p[Keys.attn(i, m, Attn.V_PROJ)],
+                        o_proj=None if p is None else p[Keys.attn(i, m, Attn.O_PROJ)],
+                    )
+                )
+        self.mixers: list[MultiHeadAttention | GatedDeltaNet] = mixers
+        self.self_attn = nn.ModuleList(mixers)
         if config.has_moe():
             self.mlp: SwiGLUFFN | MixtureOfExperts = MixtureOfExperts(
                 embed_dim=D,
@@ -826,68 +841,72 @@ class TransformerBlock(nn.Module):
 
     def forward(self, x: torch.Tensor, position: int = 0) -> torch.Tensor:
         """Block forward. x: (B, S, D) → out: (B, S, D); position: this
-        pass's first absolute token index."""
-        # Stream 1: attention with pre-norm and residual.
-        attn_out = self.self_attn(self.input_layernorm(x), position)  # (B, S, D)
-        h = x + attn_out  # (B, S, D)
+        pass's first absolute token index.
 
-        # Stream 2: feed-forward (dense or MoE) with pre-norm and residual.
+        h = x; for each mixer m: h = h + mixers[m](mixer_norms[m](h));
+        out = h + mlp(post_attention_layernorm(h))."""
+        h = x
+        for _m, (norm, mixer) in enumerate(zip(self.mixer_norms, self.mixers, strict=True)):
+            h = h + mixer(norm(h), position)  # (B, S, D)
         ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, S, D)
         return h + ff_out  # (B, S, D)
 
-    def forward_state(self, x: torch.Tensor, position: int = 0) -> Result[torch.Tensor, dict]:
-        """Block forward plus the attention K/V state the cache needs.
+    def forward_state(self, x: torch.Tensor, position: int = 0) -> Result[torch.Tensor, list[dict]]:
+        """Block forward plus the per-mixer cache state the prefill needs.
 
-        Mirrors ``impl._np.block.TransformerBlock.forward_state``:
-        ``forward`` calls this and drops the state; the prefill path
-        requests it and backfills the per-layer cache — no second pass.
-        Same ``Result`` contract as the NumPy reference
-        (shared/result.py).
+        Mirrors ``impl._np.block.TransformerBlock.forward``: ``forward``
+        calls this and drops the state; the prefill path requests it and
+        backfills the per-mixer caches — no second pass. Same ``Result``
+        contract as the NumPy reference (shared/result.py).
 
-        ``.value`` = out (B, S, D); ``.ctx.display`` = the cache-ready
-        K/V views {"k_group": (B, G, S, hd), "v_group": (B, G, S, hd)}.
+        ``.value`` = out (B, S, D); ``.ctx.display`` = the list of per-mixer
+        displays — {"k_group", "v_group"} for the attention mixer,
+        {"s_final", "s_hist"} for each DeltaNet mixer.
         """
-        attn_res = self.self_attn.forward_state(self.input_layernorm(x), position)
-        attn_out = attn_res.unwrap()
-        h = x + attn_out  # (B, S, D)
+        h = x
+        displays: list[dict[str, Any]] = []
+        for norm, mixer in zip(self.mixer_norms, self.mixers, strict=True):
+            mixer_res = mixer.forward_state(norm(h), position)
+            h = h + mixer_res.value  # (B, S, D)
+            displays.append(mixer_res.ctx.display)
         ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, S, D)
-        return Result.capture(h + ff_out, {}, dict(attn_res.ctx.display))
+        return Result.capture(h + ff_out, {}, displays)  # type: ignore[arg-type]
 
-    def forward_step(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Process ONE new token against this block's cached K/V (KV-cached path).
+    def forward_step(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
+        """Process ONE new token against this block's per-mixer caches.
 
-        Mirrors ``impl._np.block.TransformerBlock.forward_step``: the token's
-        K/V are appended to ``cache`` before attention runs (single-token
-        attention, O(1) per token).
+        Mirrors ``impl._np.block.TransformerBlock.forward_step``: each
+        mixer's cache entry (``cache[m]``) is updated in place.
 
         x: (B, 1, D) the new token's embedding at absolute ``position``.
-        cache: this layer's dict {"k": (B, G, t, hd), "v": (B, G, t, hd)},
-            mutated in place.
+        cache: this block's per-mixer cache list, mutated in place.
 
         Returns: out (B, 1, D).
         """
-        attn_out = self.self_attn.forward_step(self.input_layernorm(x), position, cache)  # (B, 1, D)
-        h = x + attn_out  # (B, 1, D)
+        h = x
+        for m, (norm, mixer) in enumerate(zip(self.mixer_norms, self.mixers, strict=True)):
+            h = h + mixer.forward_step(norm(h), position, cache[m])  # (B, 1, D)
         ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, 1, D)
         return h + ff_out  # (B, 1, D)
 
-    def forward_chunk(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
         """Process a CHUNK of c tokens through this block (KV-cached path).
 
-        Mirrors ``impl._np.block.TransformerBlock.forward_chunk``: identical
-        structure to ``forward_step`` but the whole chunk's K/V are appended
-        in one pass and every chunk position is scored in parallel (causal
-        within the chunk). The FFN is chunk-positionwise so it needs no
-        chunk form.
+        Mirrors ``impl._np.block.TransformerBlock.forward_chunk``: each
+        mixer's chunk form runs against ``cache[m]`` (the attention mixer
+        appends the chunk's K/V in one pass and scores all chunk positions
+        in parallel; DeltaNet mixers scan sequentially). The FFN is
+        chunk-positionwise so it needs no chunk form.
 
         x: (B, c, D) the chunk's vectors. position: the absolute index of
-        the chunk's first token. cache: this layer's attention cache,
+        the chunk's first token. cache: this block's per-mixer cache list,
         mutated in place.
 
         Returns: out (B, c, D).
         """
-        attn_out = self.self_attn.forward_chunk(self.input_layernorm(x), position, cache)  # (B, c, D)
-        h = x + attn_out  # (B, c, D)
+        h = x
+        for m, (norm, mixer) in enumerate(zip(self.mixer_norms, self.mixers, strict=True)):
+            h = h + mixer.forward_chunk(norm(h), position, cache[m])  # (B, c, D)
         ff_out = self.mlp(self.post_attention_layernorm(h))  # (B, c, D)
         return h + ff_out  # (B, c, D)
 
@@ -939,7 +958,7 @@ class DecoderStack(nn.Module):
             states[i] = block_res.ctx.display  # {block index: k_group/v_group}
         return Result.capture(out, {}, {}, states)
 
-    def forward_step(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
+    def forward_step(self, x: torch.Tensor, position: int, cache: list[list[dict[str, torch.Tensor]]]) -> torch.Tensor:
         """Process ONE new token through all blocks (KV-cached path).
 
         Mirrors ``impl._np.stack.DecoderStack.forward_step``: each block
@@ -956,7 +975,7 @@ class DecoderStack(nn.Module):
             out = block.forward_step(out, position, cache[i])
         return out
 
-    def forward_chunk(self, x: torch.Tensor, position: int, cache: list[dict[str, torch.Tensor]]) -> torch.Tensor:
+    def forward_chunk(self, x: torch.Tensor, position: int, cache: list[list[dict[str, torch.Tensor]]]) -> torch.Tensor:
         """Process a CHUNK of c tokens through all blocks (KV-cached path).
 
         Mirrors ``impl._np.stack.DecoderStack.forward_chunk``: each block
@@ -1025,7 +1044,7 @@ class TorchModel(nn.Module):
             _copy_checkpoint(self.lm_head.weight, p[Keys.lm_head()], transpose=True)
 
         # Cast model parameters to the configured dtype (AMP: BF16 compute with FP32 master weights)
-        if config.dtype is not None:
+        if isinstance(config.dtype, torch.dtype):
             self.to(dtype=config.dtype)
 
     @classmethod
@@ -1056,14 +1075,17 @@ class TorchModel(nn.Module):
         # (B, S, D) → (B, S, V)
         return self.lm_head(x)
 
-    def make_cache(self, batch_size: int) -> list[dict[str, torch.Tensor]]:
-        """Create an empty per-layer KV cache for the per-token step path.
+    def make_cache(self, batch_size: int) -> list[list[dict[str, torch.Tensor]]]:
+        """Create the per-layer, per-mixer cache for the per-token step path.
 
-        Each layer gets {"k": (B, G, 0, hd), "v": (B, G, 0, hd)} — K/V
-        *per group* (GQA keeps the cache H // G times smaller), the same
-        shape contract as ``impl._np.model.NumPyModel.make_cache``.
+        One LIST per layer with one dict per mixer (M = n_mixers()).
+        DeltaNet mixers get {"s": (B, H, hd, hd), "s_hist": []} — the
+        recurrent state + rollback snapshots; the attention mixer gets
+        {"k": (B, G, 0, hd), "v": (B, G, 0, hd)} — K/V *per group* (GQA
+        keeps the cache H // G times smaller), the same shape contract as
+        ``impl._np.model.NumPyModel.make_cache``.
 
-        Returns: one dict per block (n_layers entries).
+        Returns: one list per block (n_layers entries).
         """
         B = batch_size
         G = self.config.kv_heads
@@ -1071,23 +1093,26 @@ class TorchModel(nn.Module):
         hd = self.embed_dim // self.config.n_heads
         device = self.embedding.weight.device
         dtype = self.embedding.weight.dtype
-        caches: list[dict[str, Any]] = []
-        for i in range(self.config.n_layers):
-            if self.config.layer_kind(i) == "d":
-                # DeltaNet layer (ADR 0006): recurrent state + rollback snapshots.
-                caches.append({"s": torch.zeros(B, H, hd, hd, device=device, dtype=dtype), "s_hist": []})
-            else:
-                caches.append(
-                    {
-                        "k": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
-                        "v": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
-                    }
-                )
+        caches: list[list[dict[str, Any]]] = []
+        for _i in range(self.config.n_layers):
+            layer_caches: list[dict[str, Any]] = []
+            for m in range(self.config.n_mixers()):
+                if self.config.mixer_kind(m) == "d":
+                    # DeltaNet mixer (ADR 0007): recurrent state + rollback snapshots.
+                    layer_caches.append({"s": torch.zeros(B, H, hd, hd, device=device, dtype=dtype), "s_hist": []})
+                else:
+                    layer_caches.append(
+                        {
+                            "k": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+                            "v": torch.zeros(B, G, 0, hd, device=device, dtype=dtype),
+                        }
+                    )
+            caches.append(layer_caches)
         return caches
 
     def forward_prefill(
-        self, input_ids: torch.Tensor, cache: list[dict[str, torch.Tensor]] | None = None, position: int = 0
-    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
+        self, input_ids: torch.Tensor, cache: list[list[dict[str, torch.Tensor]]] | None = None, position: int = 0
+    ) -> tuple[torch.Tensor, list[list[dict[str, torch.Tensor]]]]:
         """Run a full-sequence forward and fill the per-layer KV cache.
 
         Mirrors ``impl._np.model.NumPyModel.forward_prefill``: the cache is
@@ -1103,30 +1128,36 @@ class TorchModel(nn.Module):
         B, S = input_ids.shape
         if cache is None:
             cache = self.make_cache(B)
-        states: list[dict[str, torch.Tensor]] = []
+        states: list[list[dict[str, Any]]] = []
         x = self.embedding(input_ids)  # (B, S, D)
         for block in self.stack.blocks:
             block_res = block.forward_state(x, position)
             x = block_res.value
-            states.append(block_res.ctx.display)
+            states.append(block_res.ctx.display)  # type: ignore[arg-type]
         x_final = self.final_norm(x)  # (B, S, D)
         logits = self.lm_head(x_final)  # (B, S, V)
-        # Backfill each layer's cache from this pass's attention state:
-        # K/V per group (GQA keeps it small), K already RoPE'd, V un-rotated.
-        for i, attn_state in enumerate(states):
-            if self.config.layer_kind(i) == "d":
-                cache[i]["s"] = attn_state["s_final"]  # (B, H, hd, hd)
-                cache[i]["s_hist"] = [attn_state["s_hist"][:, :, j] for j in range(attn_state["s_hist"].shape[2])]  # type: ignore[index]
-            else:
-                cache[i]["k"] = attn_state["k_group"]  # (B, G, S, hd)
-                cache[i]["v"] = attn_state["v_group"]  # (B, G, S, hd)
+        # Backfill each layer's per-mixer caches from this pass's mixer states:
+        # K/V per group (GQA keeps it small), K already RoPE'd, V un-rotated;
+        # DeltaNet mixers backfill s/s_hist from the captured scan.
+        for i, mixer_states in enumerate(states):
+            layer_cache = cache[i]
+            for m, mixer_state in enumerate(mixer_states):
+                mixer_cache: dict[str, Any] = layer_cache[m]
+                if self.config.mixer_kind(m) == "d":
+                    mixer_cache["s"] = mixer_state["s_final"]  # (B, H, hd, hd)
+                    mixer_cache["s_hist"] = [
+                        mixer_state["s_hist"][:, :, j] for j in range(mixer_state["s_hist"].shape[2])
+                    ]  # type: ignore[assignment]
+                else:
+                    mixer_cache["k"] = mixer_state["k_group"]  # (B, G, S, hd)
+                    mixer_cache["v"] = mixer_state["v_group"]  # (B, G, S, hd)
         return logits, cache
 
     def forward_step(
         self,
         input_ids: torch.Tensor,
         position: int,
-        cache: list[dict[str, torch.Tensor]],
+        cache: list[list[dict[str, torch.Tensor]]],
     ) -> torch.Tensor:
         """Process ONE token per batch row against the cached K/V.
 
@@ -1150,7 +1181,7 @@ class TorchModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         position: int,
-        cache: list[dict[str, torch.Tensor]],
+        cache: list[list[dict[str, torch.Tensor]]],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Process a CHUNK of c tokens against the cached K/V (verification path).
 
@@ -1187,26 +1218,26 @@ class TorchModel(nn.Module):
             Keys.lm_head(): self.lm_head.weight,
         }
         for layer_idx, block in enumerate(self.stack.blocks):
-            t[Keys.ln(layer_idx, LayerNorm.INPUT)] = block.input_layernorm.weight
             t[Keys.ln(layer_idx, LayerNorm.POST_ATTENTION)] = block.post_attention_layernorm.weight
-            if isinstance(block.self_attn, GatedDeltaNet):
-                attn = block.self_attn
-                t[Keys.deltanet(layer_idx, DeltaNet.Q_PROJ)] = attn.q_proj.weight
-                t[Keys.deltanet(layer_idx, DeltaNet.K_PROJ)] = attn.k_proj.weight
-                t[Keys.deltanet(layer_idx, DeltaNet.V_PROJ)] = attn.v_proj.weight
-                t[Keys.deltanet(layer_idx, DeltaNet.O_PROJ)] = attn.o_proj.weight
-                t[Keys.deltanet(layer_idx, DeltaNet.A_PROJ)] = attn.a_proj.weight
-                t[Keys.deltanet(layer_idx, DeltaNet.GATE_PROJ)] = attn.gate_proj.weight
-                t[Keys.deltanet(layer_idx, DeltaNet.DT_BIAS)] = attn.dt_bias
-                t[Keys.deltanet(layer_idx, DeltaNet.NORM)] = attn.norm.weight
-            else:
-                for proj, module in (
-                    (Attn.Q_PROJ, block.self_attn.q_proj),
-                    (Attn.K_PROJ, block.self_attn.k_proj),
-                    (Attn.V_PROJ, block.self_attn.v_proj),
-                    (Attn.O_PROJ, block.self_attn.o_proj),
-                ):
-                    t[Keys.attn(layer_idx, proj)] = module.weight
+            for m, (norm, mixer) in enumerate(zip(block.mixer_norms, block.mixers, strict=True)):
+                t[Keys.mixer_ln(layer_idx, m)] = norm.weight  # type: ignore[assignment]
+                if isinstance(mixer, GatedDeltaNet):
+                    t[Keys.deltanet(layer_idx, m, DeltaNet.Q_PROJ)] = mixer.q_proj.weight
+                    t[Keys.deltanet(layer_idx, m, DeltaNet.K_PROJ)] = mixer.k_proj.weight
+                    t[Keys.deltanet(layer_idx, m, DeltaNet.V_PROJ)] = mixer.v_proj.weight
+                    t[Keys.deltanet(layer_idx, m, DeltaNet.O_PROJ)] = mixer.o_proj.weight
+                    t[Keys.deltanet(layer_idx, m, DeltaNet.A_PROJ)] = mixer.a_proj.weight
+                    t[Keys.deltanet(layer_idx, m, DeltaNet.GATE_PROJ)] = mixer.gate_proj.weight
+                    t[Keys.deltanet(layer_idx, m, DeltaNet.DT_BIAS)] = mixer.dt_bias
+                    t[Keys.deltanet(layer_idx, m, DeltaNet.NORM)] = mixer.norm.weight
+                else:
+                    for proj, module in (
+                        (Attn.Q_PROJ, mixer.q_proj),
+                        (Attn.K_PROJ, mixer.k_proj),
+                        (Attn.V_PROJ, mixer.v_proj),
+                        (Attn.O_PROJ, mixer.o_proj),
+                    ):
+                        t[Keys.attn(layer_idx, m, proj)] = module.weight
             mlp = block.mlp
             if isinstance(mlp, MixtureOfExperts):
                 t[Keys.moe_gate(layer_idx)] = mlp.gate.weight

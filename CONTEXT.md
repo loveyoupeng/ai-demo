@@ -131,14 +131,14 @@ letters. Where each value comes from:
   score matrix, (2) softmaxes it, (3) multiplies by V. Materializes the
   (BLOCK_M, Sk) score matrix. See `impl/_triton/attn.py`.
 
-- **Gated DeltaNet** (linear attention, ADR 0006): instead of scoring every
+- **Gated DeltaNet** (linear attention, ADR 0006/0007): instead of scoring every
   past token, a per-head recurrent state matrix `S (hd, hd)` is updated in
   place — `S_t = (1-β_t)·S_{t-1}·(I − k̂_t k̂_tᵀ) + β_t·k̂_t v_tᵀ` with
   L2-normalized `k̂` and a per-head forget gate `β_t = σ(a·x_t + b)` — and the
   read-out is `o_t = S_t q̂_t` (O(hd²), no history read). The "delta rule"
-  subtracts the key's old value before writing the new one. Layers of this
-  kind appear in a 3:1 ratio beside full attention via `layer_pattern`
-  (e.g. `"dddF"`). See `impl/_np/deltanet.py` and ADR 0006.
+  subtracts the key's old value before writing the new one. Every block runs
+  `n_deltanet_sublayers` (default 3) of these mixers plus 1 full-attention
+  mixer (ADR 0007). See `impl/_np/deltanet.py` and ADRs 0006/0007.
 
 ## Norms
 

@@ -33,11 +33,11 @@ Forward paths (mirroring ``MultiHeadAttention``):
         so chunk verification loses the intra-chunk parallelism attention
         has — but stays exactly equal to the full forward (chunk parity).
 
-Cache contract: a DeltaNet layer's cache dict is
+Cache contract: a DeltaNet mixer's cache dict is
     {"s": (B, H, hd, hd),               # the recurrent state
      "s_hist": list of (B, H, hd, hd)}  # per-position snapshots for rollback
-Attention layers keep the {"k","v"} dict — ``make_cache`` picks the kind per
-layer from ``config.layer_kind(i)``.
+Attention mixers keep the {"k","v"} dict — ``make_cache`` picks the kind per
+mixer from ``config.mixer_kind(m)``.
 
 Backward: backpropagation through time over the recurrence (reverse scan);
 stateless — every intermediate is recomputed from x (same convention as the
@@ -92,15 +92,17 @@ class GatedDeltaNet:
         n_heads: int,
         seed: int = 0,
         layer_index: int | None = None,
+        mixer_index: int | None = None,
         params=None,
     ) -> None:
-        """Create the projections + gates, injecting this layer's checkpoint slice.
+        """Create the projections + gates, injecting this mixer's checkpoint slice.
 
-        layer_index/params: the layer's position and the flat registry-keyed
-        checkpoint; when both are given every tensor is born with its trained
-        array (read from ``Keys.deltanet(layer_index, ...)``), copied in place
-        over the seed-initialized storage. None (default) keeps the seeded
-        init (the training path).
+        layer_index/mixer_index/params: the block's position, this mixing
+        sublayer's index within the block, and the flat registry-keyed
+        checkpoint; when all are given every tensor is born with its trained
+        array (read from ``Keys.deltanet(layer_index, mixer_index, ...)``),
+        copied in place over the seed-initialized storage. None (default)
+        keeps the seeded init (the training path).
         """
         self.embed_dim = embed_dim
         self.n_heads = n_heads
@@ -115,16 +117,16 @@ class GatedDeltaNet:
         self.dt_bias = np.zeros(H, dtype=np.float32)
         self.gate_proj = xavier_uniform(rng, D, D)
         self.norm = RMSNorm(D)
-        if params is not None and layer_index is not None:
-            i = layer_index
-            self.q_proj[...] = params[Keys.deltanet(i, DeltaNet.Q_PROJ)]
-            self.k_proj[...] = params[Keys.deltanet(i, DeltaNet.K_PROJ)]
-            self.v_proj[...] = params[Keys.deltanet(i, DeltaNet.V_PROJ)]
-            self.o_proj[...] = params[Keys.deltanet(i, DeltaNet.O_PROJ)]
-            self.a_proj[...] = params[Keys.deltanet(i, DeltaNet.A_PROJ)]
-            self.dt_bias[...] = params[Keys.deltanet(i, DeltaNet.DT_BIAS)]
-            self.gate_proj[...] = params[Keys.deltanet(i, DeltaNet.GATE_PROJ)]
-            self.norm.gamma[...] = params[Keys.deltanet(i, DeltaNet.NORM)]
+        if params is not None and layer_index is not None and mixer_index is not None:
+            i, m = layer_index, mixer_index
+            self.q_proj[...] = params[Keys.deltanet(i, m, DeltaNet.Q_PROJ)]
+            self.k_proj[...] = params[Keys.deltanet(i, m, DeltaNet.K_PROJ)]
+            self.v_proj[...] = params[Keys.deltanet(i, m, DeltaNet.V_PROJ)]
+            self.o_proj[...] = params[Keys.deltanet(i, m, DeltaNet.O_PROJ)]
+            self.a_proj[...] = params[Keys.deltanet(i, m, DeltaNet.A_PROJ)]
+            self.dt_bias[...] = params[Keys.deltanet(i, m, DeltaNet.DT_BIAS)]
+            self.gate_proj[...] = params[Keys.deltanet(i, m, DeltaNet.GATE_PROJ)]
+            self.norm.gamma[...] = params[Keys.deltanet(i, m, DeltaNet.NORM)]
 
     # ------------------------------------------------------------------ core
     def _scan(
@@ -347,7 +349,7 @@ class GatedDeltaNet:
         dbeta_pre = dbeta * beta * (1.0 - beta)  # (B,H,S,1)
         d_a = dbeta_pre[:, :, :, 0].transpose(0, 2, 1)  # (B,S,H)
         d_a_proj = x.reshape(-1, D).T @ d_a.reshape(-1, H)  # (D,H)
-        d_dt_bias = dbeta_pre.sum(axis=(0, 2))  # (H,)
+        d_dt_bias = dbeta_pre.sum(axis=(0, 2)).reshape(H)  # (H,) — dbeta_pre is (B,H,S,1)
 
         # 6. projections: q/k/v = x @ W
         x_flat = x.reshape(-1, D)

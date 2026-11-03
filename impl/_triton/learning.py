@@ -13,7 +13,7 @@ Key constants:
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         FFNRecord,
         ForwardRecord,
         GenerationRecord,
+        MixerRecord,
         MoERecord,
         NormRecord,
         RopeRecord,
@@ -338,25 +339,40 @@ def instrumented_forward(model: TritonModel, input_ids: torch.Tensor) -> tuple[F
     # Embedding: (B, S) → (B, S, D)
     emb = model.embedding.weight.detach().cpu().to(torch.float64)[x.detach().cpu()]  # CPU f64 display path
 
-    # Blocks: each runs through the real components; intermediates captured.
+    # Blocks: each runs its mixer chain through the real components;
+    # intermediates captured per mixer (ADR 0007).
     stream = emb
     blocks: list[BlockRecord] = []
     for block in model.stack.blocks:
-        ln1 = block.input_layernorm
-        ln1_out = (
-            stream
-            / torch.sqrt(torch.mean(stream * stream, dim=-1, keepdim=True) + (ln1.eps or 1e-6))
-            * ln1.weight.detach().cpu().to(torch.float64)
-        )  # (B, S, D)
         from impl._torch.layers import GatedDeltaNet as _GDN
         from impl._triton.transformer import TritonGatedDeltaNet as _TGDN
 
-        if isinstance(block.self_attn, (_GDN, _TGDN)):
-            inner = block.self_attn._impl if hasattr(block.self_attn, "_impl") else block.self_attn
-            attn_out, attn_rec = _deltanet_record(inner, ln1_out, ln1_out.new_zeros(ln1_out.shape))
-        else:
-            attn_out, attn_rec = _attn_record(block.self_attn, ln1_out, 0)  # (B, S, D) — window positions 0..S-1
-        h = stream + attn_out  # (B, S, D) residual after attention
+        mixer_recs: list[MixerRecord] = []
+        h = stream
+        for norm, mixer in zip(block.mixer_norms, block.mixers, strict=True):
+            norm_any: Any = norm
+            h_in = h
+            ln_out = (
+                h
+                / torch.sqrt(torch.mean(h * h, dim=-1, keepdim=True) + (norm_any.eps or 1e-6))
+                * norm_any.weight.detach().cpu().to(torch.float64)
+            )  # (B, S, D)
+            if isinstance(mixer, (_GDN, _TGDN)):
+                inner = mixer._impl if hasattr(mixer, "_impl") else mixer
+                mixer_out, mixer_rec = _deltanet_record(inner, ln_out, ln_out.new_zeros(ln_out.shape))
+            else:
+                mixer_out, mixer_rec = _attn_record(mixer, ln_out, 0)  # (B, S, D) — window positions 0..S-1
+            h = h + mixer_out  # (B, S, D) residual after this mixer
+            mrec: MixerRecord = {
+                "ln": _rmsnorm_record(norm_any.weight, h_in, norm_any.eps, ln_out),
+                "h": arr(h),
+                "out": arr(mixer_out),
+            }
+            if isinstance(mixer, (_GDN, _TGDN)):
+                mrec["deltanet"] = mixer_rec  # type: ignore[typeddict-item]
+            else:
+                mrec["attn"] = mixer_rec  # type: ignore[typeddict-item]
+            mixer_recs.append(mrec)
         ln2 = block.post_attention_layernorm
         ln2_out = (
             h
@@ -367,18 +383,10 @@ def instrumented_forward(model: TritonModel, input_ids: torch.Tensor) -> tuple[F
         ff_out = _ffn_f64(mlp, ln2_out)  # (B, S, D)
         out = h + ff_out  # (B, S, D) block output
         block_rec: BlockRecord = {
-            "ln1": _rmsnorm_record(ln1.weight, stream, ln1.eps, ln1_out),
-            "h": arr(h),
+            "mixers": mixer_recs,
             "ln2": _rmsnorm_record(ln2.weight, h, ln2.eps, ln2_out),
             "out": arr(out),
         }
-        from impl._torch.layers import GatedDeltaNet as _GDN2
-        from impl._triton.transformer import TritonGatedDeltaNet as _TGDN2
-
-        if isinstance(block.self_attn, (_GDN2, _TGDN2)):
-            block_rec["deltanet"] = attn_rec  # type: ignore[typeddict-item]
-        else:
-            block_rec["attn"] = attn_rec  # type: ignore[typeddict-item]
         if isinstance(mlp, TritonMixtureOfExperts):
             block_rec["moe"] = _moe_record(mlp, ln2_out, ff_out)
         else:
@@ -533,38 +541,43 @@ def generate_with_records(
     seq.append(tok)
     p0 = list(x[0].tolist())
     pos0 = len(seq) - 1 - len(p0)  # the window's first absolute position
-    caches: list[dict] = []
+    caches: list[list[dict]] = []
     for i, block in enumerate(model.stack.blocks):
         from impl._torch.layers import GatedDeltaNet as _GDNk
         from impl._triton.transformer import TritonGatedDeltaNet as _TGDNk
 
-        if isinstance(block.self_attn, (_GDNk, _TGDNk)):
-            dn0 = rec["blocks"][i].get("deltanet")
-            sh = np.array(dn0["s_hist"]) if dn0 is not None else None
-            attn = block.self_attn
-            H = int(attn._impl.n_heads) if hasattr(attn, "_impl") else int(attn.n_heads)  # type: ignore[union-attr]
-            hd = int(attn._impl.head_dim) if hasattr(attn, "_impl") else int(attn.head_dim)  # type: ignore[union-attr]
-            s0 = (
-                torch.tensor(sh[:, :, -1], dtype=torch.float64)
-                if sh is not None
-                else torch.zeros(1, H, hd, hd, dtype=torch.float64)
-            )
-            hist = (
-                [torch.tensor(sh[:, :, t], dtype=torch.float64) for t in range(sh.shape[2])] if sh is not None else []
-            )
-            caches.append({"s": s0, "s_hist": hist})
-        else:
-            r = rec["blocks"][i]["attn"]
-            # (as in the NumPy track) the cache is initialized from the recorded
-            # pre-RoPE projections, so the display and the state agree exactly.
-            caches.append(
-                _init_kv_cache(
-                    block.self_attn,  # type: ignore[arg-type]
-                    torch.tensor(r["k_pre"], device=device),
-                    torch.tensor(r["v_pre"], device=device),
-                    pos0,
+        layer_caches: list[dict] = []
+        for m, mixer in enumerate(block.mixers):
+            if isinstance(mixer, (_GDNk, _TGDNk)):
+                dn0 = rec["blocks"][i]["mixers"][m].get("deltanet")
+                sh = np.array(dn0["s_hist"]) if dn0 is not None else None
+                inner: Any = mixer._impl if hasattr(mixer, "_impl") else mixer
+                H = int(inner.n_heads)
+                hd = int(inner.head_dim)
+                s0 = (
+                    torch.tensor(sh[:, :, -1], dtype=torch.float64)
+                    if sh is not None
+                    else torch.zeros(1, H, hd, hd, dtype=torch.float64)
                 )
-            )
+                hist = (
+                    [torch.tensor(sh[:, :, t], dtype=torch.float64) for t in range(sh.shape[2])]
+                    if sh is not None
+                    else []
+                )
+                layer_caches.append({"s": s0, "s_hist": hist})
+            else:
+                r = rec["blocks"][i]["mixers"][m]["attn"]
+                # (as in the NumPy track) the cache is initialized from the recorded
+                # pre-RoPE projections, so the display and the state agree exactly.
+                layer_caches.append(
+                    _init_kv_cache(
+                        mixer,  # type: ignore[arg-type]
+                        torch.tensor(r["k_pre"], device=device),
+                        torch.tensor(r["v_pre"], device=device),
+                        pos0,
+                    )
+                )
+        caches.append(layer_caches)
 
     # ---- Steps 1..n: autoregressive decode, one new token per step
     for i in range(1, n_tokens):
@@ -574,25 +587,39 @@ def generate_with_records(
         stream = emb
         blocks: list[BlockRecord] = []
         for j, block in enumerate(model.stack.blocks):
-            ln1 = block.input_layernorm
-            ln1_out = (
-                stream
-                / torch.sqrt(torch.mean(stream * stream, dim=-1, keepdim=True) + (ln1.eps or 1e-6))
-                * ln1.weight.detach().cpu().to(torch.float64)
-            )  # (1, 1, D)
             from impl._torch.layers import GatedDeltaNet as _GDN
             from impl._triton.transformer import TritonGatedDeltaNet as _TGDN
 
-            if isinstance(block.self_attn, (_GDN, _TGDN)):
-                inner = block.self_attn._impl if hasattr(block.self_attn, "_impl") else block.self_attn
-                attn_out, attn_rec = _deltanet_record(
-                    inner, ln1_out, ln1_out.new_zeros(ln1_out.shape), s_init=caches[j].get("s")
-                )
-                caches[j]["s"] = torch.tensor(np.array(attn_rec["s_hist"])[:, :, -1], dtype=torch.float64)
-                caches[j]["s_hist"].append(caches[j]["s"])
-            else:
-                attn_out, attn_rec = _attn_step_record(block.self_attn, ln1_out, t, caches[j])  # (1, 1, D)
-            h = stream + attn_out  # (1, 1, D)
+            mixer_recs: list[MixerRecord] = []
+            h = stream
+            for m, (norm, mixer) in enumerate(zip(block.mixer_norms, block.mixers, strict=True)):
+                norm_any: Any = norm
+                h_in = h
+                ln_out = (
+                    h
+                    / torch.sqrt(torch.mean(h * h, dim=-1, keepdim=True) + (norm_any.eps or 1e-6))
+                    * norm_any.weight.detach().cpu().to(torch.float64)
+                )  # (1, 1, D)
+                if isinstance(mixer, (_GDN, _TGDN)):
+                    inner = mixer._impl if hasattr(mixer, "_impl") else mixer
+                    mixer_out, mixer_rec = _deltanet_record(
+                        inner, ln_out, ln_out.new_zeros(ln_out.shape), s_init=caches[j][m].get("s")
+                    )
+                    caches[j][m]["s"] = torch.tensor(np.array(mixer_rec["s_hist"])[:, :, -1], dtype=torch.float64)
+                    caches[j][m]["s_hist"].append(caches[j][m]["s"])
+                else:
+                    mixer_out, mixer_rec = _attn_step_record(mixer, ln_out, t, caches[j][m])  # (1, 1, D)
+                h = h + mixer_out  # (1, 1, D)
+                mrec: MixerRecord = {
+                    "ln": _rmsnorm_record(norm_any.weight, h_in, norm_any.eps, ln_out),
+                    "h": arr(h),
+                    "out": arr(mixer_out),
+                }
+                if isinstance(mixer, (_GDN, _TGDN)):
+                    mrec["deltanet"] = mixer_rec  # type: ignore[typeddict-item]
+                else:
+                    mrec["attn"] = mixer_rec  # type: ignore[typeddict-item]
+                mixer_recs.append(mrec)
             ln2 = block.post_attention_layernorm
             ln2_out = (
                 h
@@ -603,18 +630,10 @@ def generate_with_records(
             ff_out = _ffn_f64(mlp, ln2_out)  # (1, 1, D)
             out = h + ff_out  # (1, 1, D)
             block_rec: BlockRecord = {
-                "ln1": _rmsnorm_record(ln1.weight, stream, ln1.eps, ln1_out),
-                "h": arr(h),
+                "mixers": mixer_recs,
                 "ln2": _rmsnorm_record(ln2.weight, h, ln2.eps, ln2_out),
                 "out": arr(out),
             }
-            from impl._torch.layers import GatedDeltaNet as _GDN3
-            from impl._triton.transformer import TritonGatedDeltaNet as _TGDN3
-
-            if isinstance(block.self_attn, (_GDN3, _TGDN3)):
-                block_rec["deltanet"] = attn_rec  # type: ignore[typeddict-item]
-            else:
-                block_rec["attn"] = attn_rec  # type: ignore[typeddict-item]
             if isinstance(mlp, TritonMixtureOfExperts):
                 block_rec["moe"] = _moe_record(mlp, ln2_out, ff_out)
             else:

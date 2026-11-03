@@ -1,6 +1,8 @@
 # Copyright (c) 2026 loveyoupeng <loveyoupeng@gmail.com>. MIT License — see LICENSE.
 """E8: DecoderStack — chain n_layers of TritonTransformerBlock."""
 
+from typing import Any, cast
+
 import pytest
 import torch
 
@@ -72,7 +74,7 @@ class TestDecoderStackWiring:
         assert x.grad.shape == x.shape
 
     @pytest.mark.timeout(30)
-    def test_parity_with_torch(self):
+    def test_parity_with_torch(self) -> None:  # noqa: C901 — per-mixer weight copy fan-out
         """Same weights → same output as PyTorch DecoderStack (rtol=1e-2)."""
         import impl._torch.layers as torch_layers
         from impl._triton.transformer import TritonDecoderStack
@@ -122,8 +124,20 @@ class TestDecoderStackWiring:
             assert isinstance(tmlp, TorchMoE)
             assert isinstance(rmlp, TritonMixtureOfExperts)
 
-            for name in ["q_proj", "k_proj", "v_proj", "o_proj"]:
-                getattr(tb.self_attn, name).weight.data.copy_(getattr(tblock.self_attn, name).weight.data)
+            for _m, (tmix, rmix) in enumerate(
+                zip(cast("list[Any]", tblock.mixers), cast("list[Any]", tb.mixers), strict=True)
+            ):
+                tgt = rmix._impl if hasattr(rmix, "_impl") else rmix
+                for name, w in tmix.named_parameters():
+                    mod = tgt
+                    parts = name.split(".")
+                    for part in parts[:-1]:
+                        mod = getattr(mod, part)
+                    leaf = getattr(mod, parts[-1])
+                    if isinstance(leaf, torch.nn.Parameter):
+                        leaf.data.copy_(w.data)
+                    else:
+                        leaf.weight.data.copy_(w.data)
 
             # MoE router and expert weights
             rmlp.gate.weight.data.copy_(tmlp.gate.weight.data)
@@ -133,7 +147,10 @@ class TestDecoderStackWiring:
                 rmlp.expert_list[j].down_proj.data.copy_(tmlp.expert_list[j].down_proj.data)
 
             # Normalization weights
-            tb.input_layernorm.weight.data.copy_(tblock.input_layernorm.weight.data)  # pyright: ignore[reportAttributeAccessIssue, reportArgumentType]
+            for _m, (tnorm, rnorm) in enumerate(
+                zip(cast("list[Any]", tblock.mixer_norms), cast("list[Any]", tb.mixer_norms), strict=True)
+            ):
+                rnorm.weight.data.copy_(tnorm.weight.data)  # pyright: ignore[reportAttributeAccessIssue, reportArgumentType]
             tb.post_attention_layernorm.weight.data.copy_(tblock.post_attention_layernorm.weight.data)  # pyright: ignore[reportAttributeAccessIssue, reportArgumentType]
 
         def sync_to_cuda(block):
