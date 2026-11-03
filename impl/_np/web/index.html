@@ -504,15 +504,15 @@ function blockParamKeys(nodeId) {
   if (m) {
     const [_, n, mm, sub] = m;
     const M = `model.layers.${n}.mixers.${mm}`;
-    const t = sub.replace(/^attn\./, "self_attn.").replace(/^deltanet\./, "deltanet.");
+    const t = sub;  // node sub is already "attn.q" / "deltanet.q" / ...
     const map = {
       "ln": [`${M}.input_layernorm.weight`],
       "attn": [`${M}.self_attn.q_proj.weight`, `${M}.self_attn.k_proj.weight`, `${M}.self_attn.v_proj.weight`, `${M}.self_attn.o_proj.weight`],
       "deltanet": [`${M}.deltanet.q_proj.weight`, `${M}.deltanet.k_proj.weight`, `${M}.deltanet.v_proj.weight`, `${M}.deltanet.o_proj.weight`, `${M}.deltanet.a_proj.weight`, `${M}.deltanet.gate_proj.weight`],
-      "self_attn.q": [`${M}.self_attn.q_proj.weight`],
-      "self_attn.k": [`${M}.self_attn.k_proj.weight`],
-      "self_attn.v": [`${M}.self_attn.v_proj.weight`],
-      "self_attn.o": [`${M}.self_attn.o_proj.weight`],
+      "attn.q": [`${M}.self_attn.q_proj.weight`],
+      "attn.k": [`${M}.self_attn.k_proj.weight`],
+      "attn.v": [`${M}.self_attn.v_proj.weight`],
+      "attn.o": [`${M}.self_attn.o_proj.weight`],
       "deltanet.q": [`${M}.deltanet.q_proj.weight`],
       "deltanet.k": [`${M}.deltanet.k_proj.weight`],
       "deltanet.v": [`${M}.deltanet.v_proj.weight`],
@@ -1568,7 +1568,7 @@ function attnSubView(sub, bIdx, mIdx, bt) {
     return (body) => {
       const nm = sub.toUpperCase();
       body.appendChild(formula(`${nm} = x W_${nm[0]}`, `a learned linear projection of every position's normed vector: (S, D) @ (D, ${H * hd}) → (S, ${H * hd}); the columns are then split into ${H} heads of width ${hd}`));
-      tensorBlock(body, "in", "input x (LN1 output)", bt.y1, { cell: 12, names: ["S", "D"] });
+      tensorBlock(body, "in", `input x (LN${mIdx} output)`, bt.mixers[mIdx].y, { cell: 12, names: ["S", "D"] });
       tensorBlock(body, "out", `${nm}_pre (before head split${sub !== "v" ? " / RoPE" : ""})`, a[sub + "_pre"], { cell: 12, names: ["S", `H·d`] });
       if (sub !== "v") {
         headSel(body);

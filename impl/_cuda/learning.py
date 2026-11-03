@@ -191,7 +191,7 @@ def _attention_forward(
     """
     B, S, _ = ln1_out.shape
     H, G, hd = block.n_heads, block.n_groups, block.head_dim
-    Wq, Wk, Wv, Wo = block.attn_projs[mixer_idx]
+    Wq, Wk, Wv, Wo = (_w(t) for t in block.attn_projs[mixer_idx])  # float64 display path
 
     # Projections: (B, S, D) → (B, S, ·)
     q_pre = ln1_out @ Wq  # (B, S, H·hd)
