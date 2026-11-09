@@ -454,8 +454,8 @@ def _attn_fwd_kernel(
     │  Q tile │  K tile   │
     │ (16, D) │ (Sk, D)   │
     ├─────────┼───────────┤
-    │           │  V tile   │
-    │           │ (Sk, D)   │
+    │         │  V tile   │
+    │         │ (Sk, D)   │
     └─────────┴───────────┘
      QK^T:     (16, D) @ (D, Sk) → (16, Sk)       ← scores
      AV:       (16, Sk) @ (Sk, D) → (16, D)      → output
