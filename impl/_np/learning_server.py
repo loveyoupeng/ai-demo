@@ -164,12 +164,16 @@ def load_learning_model(
         import torch
 
         from impl._cuda.model import CUDAModel as _CUDAModel
-        from impl._cuda.model import _cuda_to_device
+        from impl._cuda.model import _cuda_to_device, _cuda_to_dtype
 
         model = _CUDAModel(cfg, params)
-        # Serve in BF16 (the checkpoint's dtype marker is the running dtype
-        # on the GPU tracks); the drafter sidecar aligns via
-        # drafter_from_sidecar. NumPy track stays float64/float32.
+        # Serve in float32, not the checkpoint's BF16 training marker: the
+        # float64 display path in impl/_cuda/learning.py recomputes from the
+        # parameters, so a BF16-served model's real forward diverges from its
+        # own display record by BF16 rounding (max|Δ| ~2 on logits). The
+        # learning page serves every backend in float32 (see scripts/learning.py
+        # dtype note); _cuda_to_dtype covers the attn_projs tuples as well.
+        _cuda_to_dtype(model, torch.float32)
         _cuda_to_device(model, torch.device("cuda" if torch.cuda.is_available() else "cpu"))  # in place
     else:
         raise ValueError(f"backend must be 'numpy'|'torch'|'triton'|'cuda', got {backend!r}")

@@ -75,7 +75,11 @@ def _cuda_to_device(model: CUDAModel, device: torch.device | str) -> None:  # no
 def _cuda_to_dtype(model: CUDAModel, dtype: torch.dtype) -> None:  # noqa: C901 — per-mixer walks
     """Cast every CUDAModel tensor to ``dtype`` (storage relocation, same
     idiom as :func:`_cuda_to_device` — the block's ``__dict__`` traversal
-    catches the stacked expert tensors a per-attribute list would miss)."""
+    catches the stacked expert tensors a per-attribute list would miss).
+
+    ``attn_projs`` is a list of TUPLES of tensors, which the list walk above
+    skips — so it is rebuilt here explicitly (each projection cast in place
+    via ``.data``, preserving leaf-ness/requires_grad like the rest)."""
     for name in ("embedding_weights", "final_norm_gamma", "lm_head_weight"):
         getattr(model, name).data = getattr(model, name).data.to(dtype)
     for block in model.stacking.blocks:
@@ -83,9 +87,17 @@ def _cuda_to_dtype(model: CUDAModel, dtype: torch.dtype) -> None:  # noqa: C901 
             if isinstance(attr, torch.Tensor):
                 attr.data = attr.data.to(dtype)
             elif isinstance(attr, list):
-                for item in attr:
+                for idx, item in enumerate(attr):
                     if isinstance(item, torch.Tensor):
                         item.data = item.data.to(dtype)
+                    elif isinstance(item, tuple):
+                        # attn_projs: list of (q, k, v, o) / (q, kvd, ku, vu, o)
+                        new_tup = []
+                        for t in item:
+                            if isinstance(t, torch.Tensor):
+                                t.data = t.data.to(dtype)
+                            new_tup.append(t)
+                        attr[idx] = tuple(new_tup)
         for mixer in block.mixers:
             if mixer is not None:
                 for p in mixer._impl.parameters():
