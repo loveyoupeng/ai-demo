@@ -61,13 +61,13 @@ synthetic arithmetic, each row `question <|think|> rationale
 then the drafter sidecars are re-distilled from the RL target (ADR
 0003). Two families, four variants:
 
-- **dense** (`learning_think`) — 6 layers, thin SwiGLU FFN (dim 96),
-  **275K** params (275,264, all active) — the DEPTH twin (the Qwen3-32B
+- **dense** (`learning_think`) — 8 layers, thin SwiGLU FFN (dim 48),
+  **752K** params (751,776, all active) — the DEPTH twin (the Qwen3-32B
   shape), SFT-final.
-- **moe** (`learning_moe_think`) — the param-matched MoE of ADR 0005:
-  3 layers, E=8 routed + 1 always-on shared expert at `expert_dim=32`,
-  top-1 — **283K-A154K** (282,560 total = 1.03× dense, but only 153,536
-  active per token ≈54%), SFT-final.
+- **moe** (`learning_moe_think`) — the MoE of ADR 0005/0011:
+  4 layers, E=10 routed + 1 always-on shared expert at `expert_dim=20`,
+  top-1 — **543K-A405K** (543,344 total, 405,360 active per token ≈75%),
+  SFT-final.
 - **dense-rl** (`learning_rl`) / **moe-rl** (`learning_moe_rl`, the
   default) — the same two models after the GRPO RL stage.
 
@@ -83,10 +83,10 @@ variant dropdown switches).
 | `vocab_size` | 512 | Byte-level BPE, case preserved, with 10 special tokens (`<|tool_call|>`, `<|think|>`, `<|answer|>`, …) so SFT can teach chat/tool/reasoning shapes. Small enough that the full softmax fits on screen. |
 | `context_length` | 128 | Sequences are truncated/padded to 128; every (S, …) tensor in the record has ≤129 rows — inspectable by eye. |
 | `embed_dim` D | 64 | Model width. Small enough that every attention score, expert weight, and residual value can be printed in full. |
-| `n_layers` L | 3 | Three repeated decoder blocks — deep enough to show how the residual stream accumulates, shallow enough to follow end to end. |
+| `n_layers` L | 4 (moe) / 8 (dense) | Repeated decoder blocks — v7 geometry (ADR 0011): both families carry the same group-of-2 MLA/MHA interleave. |
 | `n_heads` H | 4 (`n_groups=4`) | Head dim = 16. `n_groups == n_heads` → every head has its own K/V (plain MHA); set `n_groups < n_heads` in config and the same code runs GQA. |
 | `rope_dim` | 0 | 0 rotates the full head dim (standard RoPE); no learned position embedding anywhere. |
-| FFN / `n_experts` | dense: SwiGLU `expert_dim=96` (= 1.5·D) / moe: E=8 routed + 1 always-on shared at `expert_dim=32`, top-1 | The FFN slot — where the two families diverge (ADR 0005). Totals match: dense **275K** all-active vs moe **283K-A154K** (282,560 total = 1.03×, only 153,536 active/token ≈54%) — the total-vs-active trade at toy scale. |
+| FFN / `n_experts` | dense: SwiGLU `expert_dim=48` (8 layers) / moe: E=10 routed + 1 shared at `expert_dim=20`, top-1 (4 layers) | The FFN slot — where the two families diverge (ADR 0005). Both share the ADR 0011 group-of-2 MLA/MHA interleave (`mla_group_size=2`, L=16). |
 | biases / weight tying | none | LLaMA convention: RMSNorm has only γ, all projections are bias-free, `lm_head` is its own matrix (not the tied embedding). |
 
 ### Architecture diagrams
@@ -97,7 +97,7 @@ variant dropdown switches).
 flowchart TD
     TOK["token ids (S)"] --> EMB["embedding lookup: x[s] = E[tok_s]  —  (512, 64) table → x (S, 64)"]
     EMB --> STACK
-    subgraph STACK["decoder block × 3  (pre-norm; per block: 3× DeltaNet + 1× attention mixer + FFN — ADR 0007)"]
+    subgraph STACK["decoder block × 4 (MoE) / × 8 (dense) — per block: 3× DeltaNet + 1× global mixer (MLA on even blocks, MHA on odd — ADR 0011) + FFN"]
         direction TB
         X["residual stream x (S, 64)"] --> N1["LN0: RMSNorm → normed copy x̂"]
         N1 --> QKV["q,k,v = x̂·Wq, x̂·Wk, x̂·Wv  —  4 heads × 16 dims"]
@@ -301,8 +301,9 @@ uv run python -m scripts.learning --port 9000 --model resource/models/torch_real
 # Rebuild a family end-to-end (BPE-512 with think tags → pretrain →
 # code SFT → tool SFT → thinking SFT → GRPO RL → drafter sidecars; see
 # "The learning-mode example model" above). The MoE family is the page
-# default: E=8 routed + 1 shared expert at dim 32, param-matched to the
-# dense model (ADR 0005).
+# default: E=10 routed + 1 shared expert at dim 20 on 4 layers
+# (dense twin: 8 layers, FFN dim 48) — the v7 geometry of ADR 0011
+# (same MLA/MHA interleave on both families; ADR 0005 split).
 uv run python -m scripts.train_demo_model_v3 --variant moe    # learning_moe_rl (default variant)
 uv run python -m scripts.train_demo_model_v3                  # learning_rl (dense twin)
 
@@ -394,6 +395,7 @@ shared/
 ├── checkpoint.py# save/load (config.json + model.npz)
 ├── generator.py # single deep TextGenerator over the KV-step interface
 ├── draft.py     # Drafter protocol + sidecar checkpoint scheme (ADR 0003)
+├── agentic.py   # Multi-turn tool sandbox + turn assembly for agentic RL (ADR 0010)
 ├── spec_engine.py # torch-family speculative engine (greedy verification)
 ├── sft_data.py  # SFT dataset helpers (prompt-masked targets)
 ├── tokenizer.py # GPT-2 BPE tokenizer (AutoTokenizer factory)
@@ -402,9 +404,9 @@ shared/
 └── utils/logger_setup.py
 docs/
 ├── architecture/          # design + decisions
-│   ├── design.md          # doctrine, cross-track naming, key design decisions
+│   ├── design.md          # doctrine, cross-track naming, key design decisions (incl. SWA/MLA, ADR 0008/0009)
 │   ├── seam_triton_to_torch.md  # the documented Triton→PyTorch shared seam
-│   └── adr/               # 0001 residual, 0002 shared experts, 0003 drafter sidecars, 0006/0007 DeltaNet mixers
+│   └── adr/               # 0001 residual, 0002 shared experts, 0003 drafter sidecars, 0006/0007 DeltaNet mixers, 0008 SWA, 0009 MLA, 0010 multi-turn agentic RL, 0011 group-of-2 MLA/MHA
 ├── math/                  # derivations + background
 │   ├── transformer-walkthrough.md  # forward-pass tour (incl. speculative decoding)
 │   └── training-pipeline.md        # pre-train → SFT → tool pipeline + drafter distillation

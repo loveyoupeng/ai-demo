@@ -159,6 +159,19 @@ letters. Where each value comes from:
   gradients in closed form. The NumPy track implements this; the PyTorch/
   Triton/CUDA tracks use autograd.
 
+- **SWA (sliding-window attention)** (ADR 0008): the full-attention mixer
+  masks keys more than `swa_window` positions behind the query, in addition
+  to the causal mask. Decode then costs O(w) per token, not O(t).
+
+- **MLA (multi-head latent attention)** (ADR 0009): the KV cache stores one
+  low-rank latent vector `c_t = x_t @ W_kv_down` per token; K/V are rebuilt
+  from the cache as `RoPE(c @ W_k_up)`, `c @ W_v_up`. Cache memory per token
+  drops from `2·G·hd` to `L` floats.
+
+- **Group-of-2 alternating global mixer** (ADR 0011): with
+  `mla_group_size=2`, blocks pair up — the even block of each pair uses MLA,
+  the odd block classic MHA (`has_mla_at(layer_idx)` picks per block).
+
 - **Gradient check**: compare the analytic backward against finite
   differences to verify correctness. The NumPy track's
   `check_model_gradients` does this (float64, per-parameter worst relative

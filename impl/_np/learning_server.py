@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_DIR = (
-    "resource/models/learning_moe_rl"  # the full v3 pipeline model (mirrors scripts/learning.py DEFAULT_MODEL)
+    "resource/models/learning_moe_rl"  # the full v5 pipeline model (mirrors scripts/learning.py DEFAULT_MODEL)
 )
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -80,7 +80,13 @@ def count_active_params(cfg: TransformerConfig) -> int:
                 # DeltaNet mixer (ADR 0007): q/k/v/o at H heads + a_proj (D*H) + gate_proj (D*D)
                 n += 4 * D * H * hd + D * H + D * D + H + D  # q/k/v/o + a_proj + gate_proj + dt_bias + norm
             else:
-                n += 4 * D * D  # q/k/v/o at MHA size
+                # Full-attention mixer: q/o always; MLA (ADR 0009) replaces
+                # k/v (2*D*G*hd) with kv_down (D*L) + k_up/v_up (2*L*G*hd).
+                if cfg.has_mla_at(_i):
+                    LL = cfg.mla_latent_dim
+                    n += D * (H * hd) + (H * hd) * D + D * LL + 2 * LL * (G * hd)  # q + o + kv_down + k_up + v_up
+                else:
+                    n += 4 * D * D  # q/k/v/o at MHA size
     if cfg.has_moe():
         FF, E = cfg.expert_dim, cfg.n_experts
         routed = cfg.top_k
@@ -95,6 +101,24 @@ def count_active_params(cfg: TransformerConfig) -> int:
     if G != H:
         n -= L * 2 * (H - G) * hd * D
     return int(n)
+
+
+def _maybe_wrap_sft_prompt(text: str, cfg: TransformerConfig, tok: Tokenizer | None) -> str:
+    """Wrap a raw user question in the SFT prompt format when the checkpoint
+    was trained with the `` ```output `` marker (the v3+ demo pipeline).
+
+    The SFT stage trains on `` ```output<instruction>```input<output> `` —
+    without the marker the model never enters "answer mode" and answers as
+    story continuation (the "random-looking" outputs). If the checkpoint's
+    tokenizer knows the marker and the text does not already contain it,
+    prepend it so the page's free-text box does the right thing.
+    """
+    marker = "```output"
+    if tok is None or marker in text:
+        return text
+    if tok.token_to_id(marker) is not None:
+        return marker + text
+    return text
 
 
 def load_learning_model(
@@ -306,7 +330,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
         """Swap self.model/vocab/tokenizer for the named VARIANT checkpoint.
 
         Variants are DIFFERENT CHECKPOINTS of the demo families served by
-        one page (the v3 pipeline, ADRs 0004/0005): "moe-rl" (the DEFAULT —
+        one page (the v5 pipeline, ADRs 0004/0005/0008/0009/0010): "moe-rl" (the DEFAULT —
         the full pipeline's param-matched MoE: E=8 routed + 1 shared at
         dim 32 after GRPO RL), "dense-rl" (the dense FFN twin), and the
         two SFT-final checkpoints "moe" / "dense" the RL runs started
@@ -467,7 +491,8 @@ class _LearningHandler(BaseHTTPRequestHandler):
             "n_params_active": count_active_params(cfg),
             "has_moe": cfg.has_moe(),
             "has_deltanet": cfg.has_deltanet(),
-            "mixer_kinds": cfg.mixer_kinds(),
+            "has_swa": cfg.has_swa(),
+            "has_mla": cfg.has_mla(),
             "spec_available": self._spec_available(),
             "default_spec": self.default_spec if self.default_spec in self._spec_available() else "plain",
             "spec_block_size": self._spec_block_sizes(),
@@ -576,6 +601,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
         if self.vocab is None:
             raise ValueError("this checkpoint has no vocab.json — text input is unavailable (raw token IDs only)")
         text = str(body.get("text", ""))
+        text = _maybe_wrap_sft_prompt(text, self.model.config, self.tokenizer)
         n_tokens = int(body.get("n_tokens", 20))
         temp = body.get("temperature")
         top_k = body.get("top_k")

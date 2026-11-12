@@ -169,13 +169,25 @@ class NumPyModel:
                         slots.append((Keys.deltanet(i, m, attr_key), mixer, attr_name))
                     slots.append((Keys.deltanet(i, m, DeltaNet.NORM), mixer.norm, "gamma"))
                 else:
-                    for proj, attr in (
-                        (Attn.Q_PROJ, "q_proj"),
-                        (Attn.K_PROJ, "k_proj"),
-                        (Attn.V_PROJ, "v_proj"),
-                        (Attn.O_PROJ, "o_proj"),
-                    ):
-                        slots.append((Keys.attn(i, m, proj), mixer, attr))
+                    if self.config.has_mla_at(i):
+                        # MLA (ADR 0009): the attention mixer's params are the
+                        # latent factorization kv_down/k_up/v_up (+ q/o).
+                        for attr_key, attr_name in (
+                            (Attn.Q_PROJ, "q_proj"),
+                            (Attn.O_PROJ, "o_proj"),
+                            (Attn.KV_DOWN_PROJ, "kv_down_proj"),
+                            (Attn.K_UP_PROJ, "k_up_proj"),
+                            (Attn.V_UP_PROJ, "v_up_proj"),
+                        ):
+                            slots.append((Keys.attn(i, m, attr_key), mixer, attr_name))
+                    else:
+                        for proj, attr in (
+                            (Attn.Q_PROJ, "q_proj"),
+                            (Attn.K_PROJ, "k_proj"),
+                            (Attn.V_PROJ, "v_proj"),
+                            (Attn.O_PROJ, "o_proj"),
+                        ):
+                            slots.append((Keys.attn(i, m, proj), mixer, attr))
             mlp = block.mlp
             if isinstance(mlp, MixtureOfExperts):
                 slots.append((Keys.moe_gate(i), mlp, "gate"))
@@ -331,6 +343,11 @@ class NumPyModel:
                 for m in range(self.config.n_mixers()):
                     if self.config.mixer_kind(m) == "d":
                         layer_caches.append({"s": np.zeros((B, H, hd, hd), dtype=dtype), "s_hist": []})
+                    elif self.config.has_mla_at(_i):
+                        # MLA (ADR 0009): the cache stores ONE latent c per
+                        # token — (B, 1, 0, L) — instead of per-group K/V.
+                        L = self.config.mla_latent_dim
+                        layer_caches.append({"c": np.zeros((B, 1, 0, L), dtype=dtype)})
                     else:
                         layer_caches.append(
                             {"k": np.zeros((B, G, 0, hd), dtype=dtype), "v": np.zeros((B, G, 0, hd), dtype=dtype)}
@@ -428,6 +445,11 @@ class NumPyModel:
                     continue
                 k_group = mixer_state["k_group"]  # (B, G, S, hd)
                 v_group = mixer_state["v_group"]  # (B, G, S, hd)
+                if self.config.has_mla_at(i):
+                    # MLA (ADR 0009): backfill the latent cache from the
+                    # captured c_pre — the only thing the step path stores.
+                    mixer_cache["c"] = mixer_state["c_group"]  # (B, 1, S, L)
+                    continue
                 if quantize:
                     mixer_layer = self.stack.layers[i].mixers[m]
                     k_r = np.repeat(k_group, H // G, axis=1) if G != H else k_group  # (B, H, S, hd)
@@ -648,8 +670,21 @@ class NumPyModel:
                     ):
                         grads[Keys.deltanet(i, m, attr)] = block_grads[f"mixers.{m}.deltanet.{name}"]
                 else:
-                    for proj in ATTN_PROJS:
-                        grads[Keys.attn(i, m, proj)] = block_grads[f"mixers.{m}.self_attn.{proj}"]
+                    # The block's grad dict carries exactly the active set for
+                    # THIS layer's global mixer (ADR 0011: MLA on even blocks
+                    # of each group, MHA on odd).
+                    if self.config.has_mla_at(i):
+                        for attr, name in (
+                            (Attn.Q_PROJ, "q_proj"),
+                            (Attn.O_PROJ, "o_proj"),
+                            (Attn.KV_DOWN_PROJ, "kv_down_proj"),
+                            (Attn.K_UP_PROJ, "k_up_proj"),
+                            (Attn.V_UP_PROJ, "v_up_proj"),
+                        ):
+                            grads[Keys.attn(i, m, attr)] = block_grads[f"mixers.{m}.self_attn.{name}"]
+                    else:
+                        for proj in ATTN_PROJS:
+                            grads[Keys.attn(i, m, proj)] = block_grads[f"mixers.{m}.self_attn.{proj}"]
             block = self.stack.layers[i]
             if isinstance(block.mlp, MixtureOfExperts):
                 grads[Keys.moe_gate(i)] = block_grads["mlp.gate"]

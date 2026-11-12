@@ -127,6 +127,8 @@ class TransformerBlock:
                     )
                 )
             else:
+                # Full-attention mixer: SWA (ADR 0008) and MLA (ADR 0009) are
+                # config-level knobs the operator reads directly.
                 self.mixers.append(
                     MultiHeadAttention(
                         embed_dim=D,
@@ -134,10 +136,16 @@ class TransformerBlock:
                         n_groups=G,
                         rope_dim=config.rope_dim,
                         seed=seed + 1 + m,
-                        q_proj=None if p is None else p[Keys.attn(i, m, Attn.Q_PROJ)],
-                        k_proj=None if p is None else p[Keys.attn(i, m, Attn.K_PROJ)],
-                        v_proj=None if p is None else p[Keys.attn(i, m, Attn.V_PROJ)],
+                        swa_window=config.swa_window,
+                        q_proj=None if p is None else p.get(Keys.attn(i, m, Attn.Q_PROJ)),
+                        # ADR 0011: MLA only on even blocks of each group.
+                        mla_latent_dim=config.mla_latent_dim if config.has_mla_at(i) else 0,
+                        k_proj=None if p is None else p.get(Keys.attn(i, m, Attn.K_PROJ)),
+                        v_proj=None if p is None else p.get(Keys.attn(i, m, Attn.V_PROJ)),
                         o_proj=None if p is None else p[Keys.attn(i, m, Attn.O_PROJ)],
+                        kv_down_proj=None if p is None else p.get(Keys.attn(i, m, Attn.KV_DOWN_PROJ)),
+                        k_up_proj=None if p is None else p.get(Keys.attn(i, m, Attn.K_UP_PROJ)),
+                        v_up_proj=None if p is None else p.get(Keys.attn(i, m, Attn.V_UP_PROJ)),
                     )
                 )
         if config.has_moe():
@@ -251,7 +259,10 @@ class TransformerBlock:
                 for name in ("q_proj", "k_proj", "v_proj", "o_proj", "a_proj", "dt_bias", "gate_proj", "norm"):
                     dparams[f"mixers.{m}.deltanet.{name}"] = mixer_grads[name]
             else:
-                for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
+                # The attention mixer's grad dict carries exactly the active
+                # projection set: q/o always, plus k/v in classic mode or
+                # kv_down/k_up/v_up in MLA mode (ADR 0009).
+                for name in mixer_grads:
                     dparams[f"mixers.{m}.self_attn.{name}"] = mixer_grads[name]
         dx = d_h  # (B, S, D) — the stream entering mixer 0 is x itself
 

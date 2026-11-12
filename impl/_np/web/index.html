@@ -191,7 +191,7 @@
       <div class="row">
         <div><label>Tokens to generate</label><input type="number" id="ntokens" value="8" min="1" max="32"></div>
         <div><label>Model — which checkpoint runs (architecture variant)</label>
-          <select id="variant"><option value="moe-rl" selected>moe-rl — 3L + MoE bank, SFT + GRPO</option></select>
+          <select id="variant"><option value="moe-rl" selected>moe-rl — 4L + MoE bank, SFT + GRPO</option></select>
         </div>
         <div><label>Backend — which implementation computes the forward pass</label>
           <select id="backend">
@@ -507,15 +507,18 @@ function blockParamKeys(nodeId) {
     const t = sub;  // node sub is already "attn.q" / "deltanet.q" / ...
     const map = {
       "ln": [`${M}.input_layernorm.weight`],
-      "attn": [`${M}.self_attn.q_proj.weight`, `${M}.self_attn.k_proj.weight`, `${M}.self_attn.v_proj.weight`, `${M}.self_attn.o_proj.weight`],
+      "attn": (MODEL.config.mla_latent_dim > 0 && (+n % (MODEL.config.mla_group_size || 1) === 0))
+        ? [`${M}.self_attn.q_proj.weight`, `${M}.self_attn.kv_down_proj.weight`, `${M}.self_attn.k_up_proj.weight`, `${M}.self_attn.v_up_proj.weight`, `${M}.self_attn.o_proj.weight`]
+        : [`${M}.self_attn.q_proj.weight`, `${M}.self_attn.k_proj.weight`, `${M}.self_attn.v_proj.weight`, `${M}.self_attn.o_proj.weight`],
       "deltanet": [`${M}.deltanet.q_proj.weight`, `${M}.deltanet.k_proj.weight`, `${M}.deltanet.v_proj.weight`, `${M}.deltanet.o_proj.weight`, `${M}.deltanet.a_proj.weight`, `${M}.deltanet.gate_proj.weight`],
       "attn.q": [`${M}.self_attn.q_proj.weight`],
-      "attn.k": [`${M}.self_attn.k_proj.weight`],
-      "attn.v": [`${M}.self_attn.v_proj.weight`],
+      "attn.k": (MODEL.config.mla_latent_dim > 0 && (+n % (MODEL.config.mla_group_size || 1) === 0)) ? [`${M}.self_attn.kv_down_proj.weight`, `${M}.self_attn.k_up_proj.weight`] : [`${M}.self_attn.k_proj.weight`],
+      "attn.v": (MODEL.config.mla_latent_dim > 0 && (+n % (MODEL.config.mla_group_size || 1) === 0)) ? [`${M}.self_attn.kv_down_proj.weight`, `${M}.self_attn.v_up_proj.weight`] : [`${M}.self_attn.v_proj.weight`],
       "attn.o": [`${M}.self_attn.o_proj.weight`],
       "deltanet.q": [`${M}.deltanet.q_proj.weight`],
-      "deltanet.k": [`${M}.deltanet.k_proj.weight`],
-      "deltanet.v": [`${M}.deltanet.v_proj.weight`],
+      "attn.k": (MODEL.config.mla_latent_dim > 0 && (+n % (MODEL.config.mla_group_size || 1) === 0)) ? [`${M}.self_attn.kv_down_proj.weight`, `${M}.self_attn.k_up_proj.weight`] : [`${M}.self_attn.k_proj.weight`],
+      "attn.v": (MODEL.config.mla_latent_dim > 0 && (+n % (MODEL.config.mla_group_size || 1) === 0)) ? [`${M}.self_attn.kv_down_proj.weight`, `${M}.self_attn.v_up_proj.weight`] : [`${M}.self_attn.v_proj.weight`],
+      "attn.c": (MODEL.config.mla_latent_dim > 0 && (+n % (MODEL.config.mla_group_size || 1) === 0)) ? [`${M}.self_attn.kv_down_proj.weight`] : null,
       "deltanet.o": [`${M}.deltanet.o_proj.weight`],
       "deltanet.beta": [`${M}.deltanet.a_proj.weight`, `${M}.deltanet.dt_bias.weight`],
       "deltanet.gate": [`${M}.deltanet.gate_proj.weight`, `${M}.deltanet.norm.weight`],
@@ -633,6 +636,11 @@ async function init(prefetched) {
     [`ctx = ${c.context_length}`, "context"],
   ];
   if (MODEL.has_moe) badges.push([`E = ${c.n_experts}`, "MoE experts (top-k " + c.top_k + ")"]);
+  if (MODEL.has_swa) badges.push([`SWA w = ${c.swa_window}`, "sliding-window attention (ADR 0008): each query sees only the last w+1 positions — decode cost O(w), not O(t); the mask heatmap shows the band"]);
+  if (MODEL.has_mla) {
+    const g = c.mla_group_size || 1;
+    badges.push([`MLA L = ${c.mla_latent_dim}${g > 1 ? ` (every ${g}th block)` : ""}`, "multi-head latent attention (ADR 0009/0011): " + (g > 1 ? `blocks alternate — even blocks in each group of ${g} use MLA (latent cache), odd blocks use classic MHA (K/V cache). ` : "") + "the latent cache stores one L-vector per token instead of 2·G·hd — ~" + Math.round(2 * (c.n_groups ?? c.n_heads) * (c.embed_dim / c.n_heads) / c.mla_latent_dim) + "× smaller; K/V are rebuilt from it on the fly"]);
+  }
   if (c.n_shared_experts > 0) badges.push([`shared = ${c.n_shared_experts}`, "always-on ungated expert(s) — every token passes through them; their averaged output is added on top of the routed experts' sum"]);
   // The total-vs-active trade (ADR 0005): which slice stands behind ONE
   // token. Dense: identical numbers. MoE: active < total — the point.
@@ -640,8 +648,8 @@ async function init(prefetched) {
   const paramTitle = active === MODEL.n_params
     ? "parameters (all active — dense)"
     : "parameters total · the per-token active slice (routed top-" + c.top_k + " + shared)";
-  // Human-readable size label in the HF convention: 275K for dense,
-  // 283K-A154K for the MoE (total, then active per token after the dash).
+  // Human-readable size label in the HF convention: 752K for dense,
+  // 543K-A405K for the MoE (total, then active per token after the dash).
   const fmtK = (n) => (n >= 1000 ? (n / 1000).toFixed(n % 1000 === 0 ? 0 : 1).replace(/\.0$/, "") + "K" : String(n));
   const sizeLabel = active === MODEL.n_params ? fmtK(MODEL.n_params) : `${fmtK(MODEL.n_params)}-A${fmtK(active)}`;
   badges.push([`${sizeLabel}  (${MODEL.n_params.toLocaleString()} · ${active.toLocaleString()}/tok)`, paramTitle]);
@@ -673,10 +681,10 @@ async function init(prefetched) {
   const vSel = $("variant");
   const variants = MODEL.variants || [];
   const LABELS = {
-    "moe-rl": "moe-rl — 3L + MoE bank (E=8+1), full pipeline: SFT + GRPO",
-    "dense-rl": "dense-rl — 6L thin FFN, full pipeline: SFT + GRPO",
-    moe: "moe — 3L + MoE bank, SFT-final (the RL run's exact starting point)",
-    dense: "dense — 6L thin FFN, SFT-final (the RL run's exact starting point)",
+    "moe-rl": "moe-rl — 4L + MoE bank (E=10+1 @ dim 20), full pipeline: SFT + GRPO",
+    "dense-rl": "dense-rl — 8L thin FFN (dim 48), full pipeline: SFT + GRPO",
+    moe: "moe — 4L + MoE bank, SFT-final (the RL run's exact starting point)",
+    dense: "dense — 8L thin FFN, SFT-final (the RL run's exact starting point)",
   };
   const training = new Set(MODEL.training_variants || []);
   if (variants.length > 1) {
@@ -1302,10 +1310,13 @@ function buildDiagram() {
           [["L2norm q,k", `${mix}.norm`, true], ["S-scan", `${mix}.scan`, true], ["α·norm(Sq)", `${mix}.gate`, true], ["·Wo", `${mix}.o`]],
         ], [[], null]);
       } else {
-        module(mix, CX_C, y, CW_C, MIX_H, "attention", [
-          [["Q=xWq", `${mix}.q`], ["K=xWk", `${mix}.k`], ["V=xWv", `${mix}.v`], ["RoPE", `${mix}.rope`]],
+        const mla = MODEL.config.mla_latent_dim > 0 && (i % (MODEL.config.mla_group_size || 1) === 0);
+        module(mix, CX_C, y, CW_C, MIX_H, "attention" + (mla ? " (MLA)" : ""), [
+          mla
+            ? [["Q=xWq", `${mix}.q`], ["c=xWkv↓", `${mix}.c`], ["K=cW↑", `${mix}.k`], ["V=cW↑", `${mix}.v`], ["RoPE", `${mix}.rope`]]
+            : [["Q=xWq", `${mix}.q`], ["K=xWk", `${mix}.k`], ["V=xWv", `${mix}.v`], ["RoPE", `${mix}.rope`]],
           [["QKᵀ/√d", `${mix}.scores`], ["mask", `${mix}.mask`, true], ["softmax", `${mix}.softmax`, true], ["A·V → Wo", `${mix}.o`]],
-        ], [[], null]);
+        ], mla ? [[[1, 2], [1, 3]]] : [[], null]);
       }
       node(hId, CX_R, y, CW_R, MIX_H, m + 1 < NMIX ? `h = prev + mix${m}` : "h = prev + attn", "residual sum");
       edge([[CX_L + CW_L, mid], [CX_C - 3, mid]], { from: ln, to: mix });
@@ -1315,6 +1326,8 @@ function buildDiagram() {
       const cId = `b${i}.m${m}.cache`;
       if (kind === "d") {
         node(cId, cacheX, y, cacheW, MIX_H, "S state", "recurrent (hd×hd) state per head — updated in place each token");
+      } else if (MODEL.config.mla_latent_dim > 0 && (i % (MODEL.config.mla_group_size || 1) === 0)) {
+        node(cId, cacheX, y, cacheW, MIX_H, "latent c cache", "MLA (ADR 0009): one L-vector per position — K/V are rebuilt from it; cache is ~" + Math.round(2 * (MODEL.config.n_groups ?? MODEL.config.n_heads) * (MODEL.config.embed_dim / MODEL.config.n_heads) / MODEL.config.mla_latent_dim) + "× smaller than K/V");
       } else {
         node(cId, cacheX, y, cacheW, MIX_H, "K/V cache", "K,V of every position so far — +1 row per token");
       }
@@ -1541,11 +1554,17 @@ function deltanetSubView(sub, bIdx, mIdx, bt) {
 function attnSubView(sub, bIdx, mIdx, bt) {
   const a = bt.mixers[mIdx].attn;
   const H = MODEL.config.n_heads, hd = MODEL.config.embed_dim / H;
+  const mla = MODEL.config.mla_latent_dim > 0 && (bIdx % (MODEL.config.mla_group_size || 1) === 0);
+  const L = MODEL.config.mla_latent_dim || 0;
   if (sub === "attn") {
     return (body) => {
       body.appendChild(formula(
-        "q = x W_q,\\; k = x W_k,\\; v = x W_v \\;\\Rightarrow\\; s_{ij} = \\dfrac{q_i \\cdot k_j}{\\sqrt{d}} \\;\\text{(causal: } j>i \\Rightarrow -\\infty)",
-        "three projections of the SAME input give each position three roles; the √d divisor keeps pre-softmax scores near unit variance — click an inner stage (Q, K, V, RoPE, QKᵀ/√d, mask, softmax, A·V) for its numbers"
+        mla
+          ? "c = x W_{kv\\downarrow},\\; q = x W_q,\\; k = \\mathrm{RoPE}(c W_{k\\uparrow}),\\; v = c W_{v\\uparrow} \\;\\Rightarrow\\; s_{ij} = \\dfrac{q_i \\cdot k_j}{\\sqrt{d}}"
+          : "q = x W_q,\\; k = x W_k,\\; v = x W_v \\;\\Rightarrow\\; s_{ij} = \\dfrac{q_i \\cdot k_j}{\\sqrt{d}} \\;\\text{(causal: } j>i \\Rightarrow -\\infty)",
+        mla
+          ? `MLA (ADR 0009): only the LATENT c (width L=${L}) is cached per position — K and V are rebuilt from it on the fly. That is the compact step: the cache holds L=${L} floats per token instead of 2·G·hd=${2 * (MODEL.config.n_groups ?? H) * hd}, and decode still scores the whole cache in O(1) append. Click an inner stage (c↓, Q, K=cW↑, V=cW↑, RoPE, QKᵀ/√d, mask, softmax, A·V) for its numbers`
+          : "three projections of the SAME input give each position three roles; the √d divisor keeps pre-softmax scores near unit variance — click an inner stage (Q, K, V, RoPE, QKᵀ/√d, mask, softmax, A·V) for its numbers"
       ));
       body.appendChild(formula("A = \\text{softmax}(s),\\qquad \\text{ctx} = A\\,v,\\qquad \\text{out} = \\text{ctx}\\,W_o", "per head: (S, d) each; A's rows are mixing recipes (sum to 1), ctx is the mixed content, W_o merges all heads back to width D"));
       tensorBlock(body, "in", `input x (LN${mIdx} output)`, bt.mixers[mIdx].y, { cell: 12, names: ["S", "D"] });
@@ -1565,21 +1584,48 @@ function attnSubView(sub, bIdx, mIdx, bt) {
       body.appendChild(numsTable(aw));
       tensorBlock(body, "out", "attn_out = ctx·Wo", a.attn_out, { cell: 12, names: ["S", "D"] });
       const kc = a.k_cache, vc = a.v_cache, S_c = kc[0][HEAD].length;
-      body.appendChild(formula(
-        "\\text{cache}_{t} = \\text{cache}_{t-1} \\,\\Vert\\, [k_t, v_t]",
-        `after this step the cache holds S_cache = ${S_c} row(s); prefill fills it with the whole prompt, each decode appends exactly one new row`
-      ));
-      headSel(body);
-      body.appendChild(matLabel(`K cache after this step, head ${HEAD} (S_cache=${S_c}, d=${hd})`));
-      body.appendChild(heatGrid(kc[0][HEAD], { cell: 14, title: "K cache", rowLabels: kc[0][HEAD].map((_, i) => i) }));
-      body.appendChild(numsTable(kc[0][HEAD]));
-      body.appendChild(matLabel(`V cache after this step, head ${HEAD} (S_cache=${S_c}, d=${hd})`));
-      body.appendChild(heatGrid(vc[0][HEAD], { cell: 14, title: "V cache" }));
-      body.appendChild(numsTable(vc[0][HEAD]));
+      if (mla && a.c_cache) {
+        const cc = a.c_cache[0][0], L_c = cc[0].length;
+        body.appendChild(formula(
+          "c_t = x_t W_{kv\\downarrow},\\quad \\text{c-cache}_{t} = \\text{c-cache}_{t-1} \\Vert\\, [c_t]",
+          `MLA compact step: after this pass the LATENT cache holds S_cache=${S_c} row(s) × L=${L_c} (one L-vector per position) — K/V are rebuilt from it, never stored. Per token that is L=${L_c} floats vs 2·G·hd=${2 * (MODEL.config.n_groups ?? H) * hd} for a full K/V cache (~${Math.round(2 * (MODEL.config.n_groups ?? H) * hd / L_c)}× smaller); each decode appends exactly one c row in O(1)`
+        ));
+        body.appendChild(matLabel(`latent c cache after this step (S_cache=${S_c}, L=${L_c}) — the ONLY thing stored`));
+        body.appendChild(heatGrid(cc, { cell: 14, title: "c cache", rowLabels: cc.map((_, i) => i) }));
+        body.appendChild(numsTable(cc));
+        headSel(body);
+        body.appendChild(matLabel(`K rebuilt from c on the fly, head ${HEAD} (S_cache=${S_c}, d=${hd}) — what q actually scored against`));
+        body.appendChild(heatGrid(kc[0][HEAD], { cell: 14, title: "K (rebuilt)", rowLabels: kc[0][HEAD].map((_, i) => i) }));
+        body.appendChild(matLabel(`V rebuilt from c on the fly, head ${HEAD} (S_cache=${S_c}, d=${hd})`));
+        body.appendChild(heatGrid(vc[0][HEAD], { cell: 14, title: "V (rebuilt)", rowLabels: vc[0][HEAD].map((_, i) => i) }));
+      } else {
+        body.appendChild(formula(
+          "\\text{cache}_{t} = \\text{cache}_{t-1} \\,\\Vert\\, [k_t, v_t]",
+          `after this step the cache holds S_cache = ${S_c} row(s); prefill fills it with the whole prompt, each decode appends exactly one new row`
+        ));
+        headSel(body);
+        body.appendChild(matLabel(`K cache after this step, head ${HEAD} (S_cache=${S_c}, d=${hd})`));
+        body.appendChild(heatGrid(kc[0][HEAD], { cell: 14, title: "K cache", rowLabels: kc[0][HEAD].map((_, i) => i) }));
+        body.appendChild(numsTable(kc[0][HEAD]));
+        body.appendChild(matLabel(`V cache after this step, head ${HEAD} (S_cache=${S_c}, d=${hd})`));
+        body.appendChild(heatGrid(vc[0][HEAD], { cell: 14, title: "V cache" }));
+        body.appendChild(numsTable(vc[0][HEAD]));
+      }
     };
   }
-  if (sub === "q" || sub === "k" || sub === "v") {
+  if (sub === "q" || (mla && (sub === "k" || sub === "v"))) {
     return (body) => {
+      if (mla && (sub === "k" || sub === "v")) {
+        const nm = sub.toUpperCase();
+        body.appendChild(formula(`${nm} = c W_{${nm === "K" ? "k" : "v"}\\uparrow}`, `MLA: ${nm} is NOT projected from x and NOT cached — it is rebuilt from the cached latent: (S, L=${L}) @ (L, H·hd) → (S, H·hd), then split into ${H} heads of width ${hd}${sub === "k" ? " and RoPE'd" : ""}. The latent c is the only per-position state stored (see the cache node)`));
+        tensorBlock(body, "in", `latent c this pass (S, L=${L})`, a.c_pre, { cell: 12, names: ["S", "L"] });
+        tensorBlock(body, "out", `${nm}_pre = c·W↑ (before head split${sub !== "v" ? " / RoPE" : ""})`, a[sub + "_pre"], { cell: 12, names: ["S", `H·d`] });
+        if (sub !== "v") {
+          headSel(body);
+          tensorBlock(body, "out", `${nm} post-RoPE, head ${HEAD}`, a[sub][0][HEAD], { cell: 14, names: ["S", "d"] });
+        }
+        return;
+      }
       const nm = sub.toUpperCase();
       body.appendChild(formula(`${nm} = x W_${nm[0]}`, `a learned linear projection of every position's normed vector: (S, D) @ (D, ${H * hd}) → (S, ${H * hd}); the columns are then split into ${H} heads of width ${hd}`));
       tensorBlock(body, "in", `input x (LN${mIdx} output)`, bt.mixers[mIdx].y, { cell: 12, names: ["S", "D"] });
@@ -1588,6 +1634,14 @@ function attnSubView(sub, bIdx, mIdx, bt) {
         headSel(body);
         tensorBlock(body, "out", `${nm} post-RoPE, head ${HEAD}`, a[sub][0][HEAD], { cell: 14, names: ["S", "d"] });
       }
+    };
+  }
+  if (mla && sub === "c") {
+    return (body) => {
+      body.appendChild(formula("c = x W_{kv\\downarrow}", `MLA down-projection: every position's normed vector is compressed ONCE to the latent width: (S, D=${MODEL.config.embed_dim}) @ (D, L=${L}) → (S, L=${L}). This c row is what gets appended to the latent cache — L=${L} floats per token instead of storing 2·G·hd=${2 * (MODEL.config.n_groups ?? H) * hd} K/V floats`));
+      tensorBlock(body, "in", `input x (LN${mIdx} output)`, bt.mixers[mIdx].y, { cell: 12, names: ["S", "D"] });
+      tensorBlock(body, "out", `latent c this pass (S, L=${L}) — appended to the c cache`, a.c_pre, { cell: 14, names: ["S", "L"] });
+      body.appendChild(numsTable(a.c_pre));
     };
   }
   if (sub === "rope") {
@@ -1764,6 +1818,10 @@ function ffnSubView(sub, bIdx, bt) {
 // Per-stage explanations, keyed by node id with the block prefix stripped
 // ("b2.attn.rope" → "attn.rope"). Shown at the top of the inspector, before
 // the formula and the tensors.
+// EXPLAIN entries are static text: the MLA/MHA variants are described inline
+// in each entry, and the only MODEL-dependent entry (attn.mask) is guarded
+// with a typeof check — MODEL is null until init() resolves, so never
+// dereference it at parse time.
 const EXPLAIN = {
   deltanet: { what: "Gated DeltaNet: a LINEAR-attention mixer. Instead of scoring every past token (O(S²)), it keeps ONE recurrent state matrix S per head and updates it in place: each token only writes into S, never reads the history.", why: "Every block runs 3 DeltaNet mixers + 1 full attention (ADR 0007) — the Qwen3-Next shape. DeltaNet mixers make long-context decode O(hd²) per token; the one full-attention mixer keeps global retrieval." },
   "deltanet.q": { what: "q = x W_q — the query the token reads S with.", why: "o_t = S_t q̂_t: the query selects what the state returns." },
@@ -1779,12 +1837,12 @@ const EXPLAIN = {
   ln1: { what: "RMSNorm #1: rescales each position's vector to unit root-mean-square length, then applies a learned per-channel gain γ — and this normed COPY is the only input attention ever sees.", why: "Why two norms per block? Because two sublayers read the stream at different points: attention reads x, the FFN later reads h = x + attn. Attention is scale-sensitive (q·k grows quadratically with magnitude, and softmax saturates on big scores), so each block re-calibrates before attention — while the stream x itself stays unnormalized, keeping the identity path intact (pre-norm)." },
   ln2: { what: "RMSNorm #2: the same operation with its own γ, applied to h = x + attn_out — the normed copy the feed-forward reads.", why: "A separate norm because h has a different scale than x (attention just added its delta). Two independent γs let each sublayer see inputs in the range its weights were trained for. The unnormalized h keeps flowing to the second residual add untouched — the norm never rewrites the stream." },
   attn: { what: "Attention: each position scores every earlier position, then mixes their value vectors by match strength.", why: "This is the only stage where tokens exchange information. Everything else (norms, FFN) processes each position independently." },
-  "attn.q": { what: "q = xW_q — the query: what this position is looking for.", why: "q, k and v come from the SAME input through three different matrices — one input, three roles." },
-  "attn.k": { what: "k = xW_k — the key: what this position advertises.", why: "A key is meant to be matched against queries; RoPE will rotate it so position shows up in the match score." },
-  "attn.v": { what: "v = xW_v — the value: the content this position passes on if attended to.", why: "Note v bypasses RoPE — position must not distort the content, only the matching." },
-  "attn.rope": { what: "Rotates q and k by an angle proportional to token position (head dims taken in pairs).", why: "After rotation, q·k reflects relative distance: attention can prefer nearby or specific-offset tokens without any positions stored in the weights." },
+  "attn.c": { what: "c = x W_{kv↓} — the MLA latent: every position's vector compressed ONCE from D to L. THIS is the only per-position state the block caches (MLA blocks only; MHA blocks have no c cell).", why: "Caching L floats per token instead of 2·G·hd K/V floats shrinks the KV cache ~2·G·hd/L×; K and V are rebuilt from c on the fly via the up-projections (the K=cW↑ / V=cW↑ cells). The price: K/V reconstruction is recomputed every decode step instead of read from memory." },
+  "attn.q": { what: "q = xW_q — the query: what this position is looking for.", why: "In MLA blocks q still comes straight from x (only K/V go through the latent); in MHA blocks q, k and v all come from the SAME input through three different matrices — one input, three roles." },
+  "attn.k": { what: "k = xW_k — the key: what this position advertises (MHA), or k = RoPE(c·W_{k↑}) — the key REBUILT from the latent cache, not stored (MLA).", why: "MLA: because only c is cached, every decode step re-up-projects all cached c rows to K before scoring — that is the compute/memory trade MLA makes. RoPE is applied to the rebuilt k, so position still enters through the match score. MHA: RoPE rotates the stored k so position shows up in the match score." },
+  "attn.v": { what: "v = xW_v — the value (MHA), or v = c·W_{v↑} — the value REBUILT from the latent cache (MLA).", why: "MLA: same trade as K — rebuilt per step from the compact c cache. Either way v bypasses RoPE: position must not distort the content, only the matching." },
   "attn.scores": { what: "scores = q·kᵀ / √d per head — how strongly each position matches each earlier one.", why: "The √d divisor holds pre-softmax scores near unit variance; without it, softmax saturates and gradients die early in training." },
-  "attn.mask": { what: "Sets the strict upper triangle of the scores to −∞.", why: "Causality: without the mask, position t would peek at the future it is supposed to predict." },
+  "attn.mask": { what: (typeof MODEL !== "undefined" && MODEL && MODEL.has_swa) ? "Masks the future (j>i) AND positions more than w behind (i−j>w) — the sliding window (ADR 0008)." : "Sets the strict upper triangle of the scores to −∞.", why: (typeof MODEL !== "undefined" && MODEL && MODEL.has_swa) ? "The band is visible in the heatmap: each query row sees only a diagonal band of width w+1. SWA caps decode cost at O(w) per token instead of O(t) — the price is no cross-window retrieval (that is what the DeltaNet mixers still provide)." : "Causality: without the mask, position t would peek at the future it is supposed to predict." },
   "attn.softmax": { what: "Row-wise softmax over scores → attention weights (each row sums to 1).", why: "Exponentiating emphasizes the best match; normalization turns scores into a mixing recipe." },
   "attn.o": { what: "ctx = A·V (weighted value mix, heads merged), then out = ctx·W_o projects back to width D.", why: "W_o is where the H per-head answers are combined into one D-vector for the residual stream." },
   h: { what: "h = x + attn_out — a plain element-wise add: x passes through unchanged, attention only ADDS a correction.", why: "The residual connection is the gradient highway: ∂h/∂x = I + ∂attn/∂x — the identity term carries gradients to earlier blocks unshrunk, so stacking blocks stays trainable. It also means each block is a small correction, not a rewrite: features learned early are never erased." },
@@ -2092,6 +2150,22 @@ function renderInspector() {
               body.appendChild(matLabel(`S after position ${t} — head ${HEAD} (hd×hd)`));
               body.appendChild(heatGrid(m, { cell: 14, title: `S@${t}` }));
             });
+          };
+        } else if (MODEL.config.mla_latent_dim > 0 && (b % (MODEL.config.mla_group_size || 1) === 0) && mx.attn.c_cache) {
+          title.textContent = `block ${b} — mixer ${mIdx} latent c cache (MLA)`;
+          view = (body) => {
+            const a = mx.attn;
+            const cc = a.c_cache, S_c = cc[0][0].length, L = cc[0][0][0].length;
+            const kc = a.k_cache, H = MODEL.config.n_heads;
+            body.appendChild(formula(
+              "c_t = x_t W_{kv\\downarrow},\\quad k_t = \\mathrm{RoPE}(c_t W_{k\\uparrow}),\\quad v_t = c_t W_{v\\uparrow}",
+              `MLA (ADR 0009): the cache stores only the latent c (S_cache=${S_c} rows × L=${L}) — K/V are reconstructed from it on the fly. Cache memory per token: L=${L} floats instead of 2·G·hd=${2 * (MODEL.config.n_groups ?? H) * (MODEL.config.embed_dim / H)}.`
+            ));
+            body.appendChild(matLabel(`latent c cache after this step (S_cache=${S_c}, L=${L})`));
+            body.appendChild(heatGrid(cc[0][0], { cell: 14, title: "c cache", rowLabels: cc[0][0].map((_, i) => i) }));
+            body.appendChild(numsTable(cc[0][0]));
+            body.appendChild(matLabel(`reconstructed K cache, head ${HEAD} (S_cache=${S_c}) — what the query actually scored against`));
+            body.appendChild(heatGrid(kc[0][HEAD], { cell: 14, title: "K (rebuilt)" }));
           };
         } else {
           title.textContent = `block ${b} — mixer ${mIdx} K/V cache`;

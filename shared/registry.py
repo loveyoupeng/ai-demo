@@ -117,15 +117,38 @@ class ParameterRegistry:
                     entries.append(ParamEntry(Keys.deltanet(i, m, DeltaNet.DT_BIAS), (H,), dtype=cfg.dtype))
                     entries.append(ParamEntry(Keys.deltanet(i, m, DeltaNet.NORM), (D,), dtype=cfg.dtype))
                 else:
+                    # Full-attention mixer (ADR 0007 'F'). MLA (ADR 0009):
+                    # when mla_latent_dim > 0 the k/v_proj pair is REPLACED by
+                    # the low-rank latent factorization kv_down (D,L) +
+                    # k_up (L,G*hd) + v_up (L,G*hd) — the cache then stores only
+                    # the latent c (B, L, t) instead of per-group K/V.
                     entries.append(
                         ParamEntry(Keys.attn(i, m, Attn.Q_PROJ), (D, H * hd), torch_transpose=True, dtype=cfg.dtype)
                     )
-                    entries.append(
-                        ParamEntry(Keys.attn(i, m, Attn.K_PROJ), (D, G * hd), torch_transpose=True, dtype=cfg.dtype)
-                    )
-                    entries.append(
-                        ParamEntry(Keys.attn(i, m, Attn.V_PROJ), (D, G * hd), torch_transpose=True, dtype=cfg.dtype)
-                    )
+                    if cfg.has_mla_at(i):
+                        L = cfg.mla_latent_dim
+                        entries.append(
+                            ParamEntry(
+                                Keys.attn(i, m, Attn.KV_DOWN_PROJ), (D, L), torch_transpose=True, dtype=cfg.dtype
+                            )
+                        )
+                        entries.append(
+                            ParamEntry(
+                                Keys.attn(i, m, Attn.K_UP_PROJ), (L, G * hd), torch_transpose=True, dtype=cfg.dtype
+                            )
+                        )
+                        entries.append(
+                            ParamEntry(
+                                Keys.attn(i, m, Attn.V_UP_PROJ), (L, G * hd), torch_transpose=True, dtype=cfg.dtype
+                            )
+                        )
+                    else:
+                        entries.append(
+                            ParamEntry(Keys.attn(i, m, Attn.K_PROJ), (D, G * hd), torch_transpose=True, dtype=cfg.dtype)
+                        )
+                        entries.append(
+                            ParamEntry(Keys.attn(i, m, Attn.V_PROJ), (D, G * hd), torch_transpose=True, dtype=cfg.dtype)
+                        )
                     entries.append(
                         ParamEntry(Keys.attn(i, m, Attn.O_PROJ), (H * hd, D), torch_transpose=True, dtype=cfg.dtype)
                     )

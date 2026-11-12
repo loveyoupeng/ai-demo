@@ -343,6 +343,7 @@ class _CUDASDPACudaFunction(torch.autograd.Function):
         k: torch.Tensor,
         v: torch.Tensor,
         is_causal: bool,
+        window: int = 0,
     ) -> torch.Tensor:
         """Forward pass: compute attention(Q, K, V).
 
@@ -378,7 +379,13 @@ class _CUDASDPACudaFunction(torch.autograd.Function):
         if is_causal:
             causal = torch.triu(torch.ones(Sq, Sk, device=q.device, dtype=torch.bool), diagonal=1)
             scores = torch.where(causal, torch.tensor(float("-inf"), device=q.device, dtype=scores.dtype), scores)
-
+            if window > 0:
+                # SWA (ADR 0008): also mask keys more than `window` behind.
+                rows = torch.arange(Sq, device=q.device)[:, None]
+                cols = torch.arange(Sk, device=q.device)[None, :]
+                scores = torch.where(
+                    (rows - cols) > window, torch.tensor(float("-inf"), device=q.device, dtype=scores.dtype), scores
+                )
         # Step 2: Stable softmax per row using CUDA kernel
         # Flatten to (total_queries, num_keys) for kernel
         total_queries = B * H * Sq  # total number of query positions
@@ -435,6 +442,7 @@ class _CUDASDPACudaFunction(torch.autograd.Function):
         # Save for backward
         ctx.save_for_backward(q, k, v, scores)
         ctx.is_causal = is_causal
+        ctx.window = window
 
         return output
 
@@ -442,7 +450,7 @@ class _CUDASDPACudaFunction(torch.autograd.Function):
     def backward(
         ctx: Any,
         *grad_outputs: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, None]:
         """Backward pass: use PyTorch's F.scaled_dot_product_attention.
 
         Parameters
@@ -470,10 +478,17 @@ class _CUDASDPACudaFunction(torch.autograd.Function):
         import torch.nn.functional as F
 
         with torch.enable_grad():
-            out = F.scaled_dot_product_attention(q, k, v, is_causal=ctx.is_causal)
+            if getattr(ctx, "window", 0) > 0:
+                Sq, Sk = q.shape[2], k.shape[2]
+                qi = torch.arange(Sq, device=q.device)[:, None]
+                ki = torch.arange(Sk, device=k.device)[None, :]
+                allow = (ki <= qi) & ((qi - ki) <= ctx.window)  # (Sq, Sk)
+                out = F.scaled_dot_product_attention(q, k, v, attn_mask=allow)
+            else:
+                out = F.scaled_dot_product_attention(q, k, v, is_causal=ctx.is_causal)
             grad_q, grad_k, grad_v = torch.autograd.grad(out, (q, k, v), grad_output, retain_graph=False)
 
-        return grad_q, grad_k, grad_v, None
+        return grad_q, grad_k, grad_v, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +501,7 @@ def scaled_dot_product_attention(
     k: torch.Tensor,
     v: torch.Tensor,
     is_causal: bool = False,
+    window: int = 0,
 ) -> torch.Tensor:
     """Compute scaled dot-product attention via CUDA kernel.
 
@@ -555,4 +571,4 @@ def scaled_dot_product_attention(
     if q.dtype == torch.bfloat16:
         q, k, v = q.float(), k.float(), v.float()
 
-    return _CUDASDPACudaFunction.apply(q, k, v, is_causal).to(orig_dtype)
+    return _CUDASDPACudaFunction.apply(q, k, v, is_causal, window).to(orig_dtype)

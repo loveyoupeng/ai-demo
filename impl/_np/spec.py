@@ -232,6 +232,9 @@ class SpeculativeGenerator:
                     # the tail from n on.
                     mixer["s"] = mixer["s_hist"][n - 1].copy()
                     del mixer["s_hist"][n:]
+                elif "c" in mixer:
+                    # MLA (ADR 0009): trim the latent cache rows.
+                    mixer["c"] = mixer["c"][:, :, :n]
                 else:
                     mixer["k"] = mixer["k"][:, :, :n]
                     mixer["v"] = mixer["v"][:, :, :n]

@@ -64,8 +64,37 @@ updated by the delta rule, O(hd²) per token, no history read); the **'F'
 mixer** is the existing full attention. Each layer's cache is a LIST of
 per-mixer dicts (`{"s","s_hist"}` ×3 + `{"k","v"}` ×1); spec verification
 scans the DeltaNet mixers sequentially and snapshots S per position for
-rollback (greedy spec stays lossless). See ADR 0006/0007 and
 `impl/_np/deltanet.py` (the math reference, with analytic BPTT backward).
+
+### Group-of-2 alternating global mixer (ADR 0011)
+
+With `mla_group_size > 1`, blocks form logical groups: the even block of
+each group uses an **MLA** global mixer (latent cache), the odd block a
+classic **MHA** one. v7 geometry: MoE 4 layers / dense 8 layers, so both
+families carry the same MLA/MHA interleave — a controlled MHA-vs-MLA comparison inside one
+checkpoint. `has_mla_at(layer_idx)` picks the kind per block; the registry
+emits MLA keys (`kv_down/k_up/v_up`) for MLA blocks and classic `k/v_proj`
+for MHA blocks. Production precedent for the 3:1 linear:global ratio is
+Kimi-Linear (`full_attn_layers = [4,8,12,...,27]`); the alternation of the
+global *kind* is this repo's teaching addition.
+
+### Sliding-window attention + MLA latent cache (ADR 0008/0009)
+
+Two opt-in knobs on the full-attention ('F') mixer:
+
+- `swa_window = w` (ADR 0008): the causal mask becomes banded — a query at
+  absolute position p attends only to keys in `[p-w, p]`. Training uses the
+  banded (S,S) mask; decode **slices** the last w+1 cache rows (O(w) per
+  token instead of O(t)); chunk verification uses the absolute-position
+  band. The Triton/CUDA kernels take a `window` parameter next to
+  `is_causal`.
+- `mla_latent_dim = L` (ADR 0009): Multi-head Latent Attention. The K/V
+  projections are replaced by `kv_down (D→L)`, `k_up (L→G·hd)`,
+  `v_up (L→G·hd)` (registry keys `self_attn.{kv_down,k_up,v_up}_proj`); the
+  cache stores ONE latent `c (B, L, t)` per token and K/V are rebuilt as
+  `RoPE(c @ W_k_up)`, `c @ W_v_up`. At the demo geometry (G=4, hd=16,
+  L=16) that is 16 vs 128 floats/token — an 8× cache cut. NumPy carries the
+  analytic backward through the low-rank factorization (gradchecked).
 
 
 ```mermaid
@@ -149,6 +178,8 @@ autocast region.
   path (`forward_prefill` + `forward_step`) is exact, one token per
   iteration. TurboQuant (1-bit quantized cache) is a documented,
   parity-budgeted alternative behind `forward_step(quantize=True)`.
+  With MLA (ADR 0009) the cache stores the latent `c` only; with SWA
+  (ADR 0008) decode reads just the last w+1 rows.
 - **Speculative decoding** (ADR 0003): a distilled drafter proposes a k-token
   block; the target verifies it in one `forward_chunk` pass; the longest
   agreeing prefix commits (greedy: token-identical to plain decoding — the

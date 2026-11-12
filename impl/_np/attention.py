@@ -118,14 +118,24 @@ class MultiHeadAttention:
         n_groups: int,
         rope_dim: int,
         seed: int = 0,
+        swa_window: int = 0,
+        mla_latent_dim: int = 0,
         q_proj: np.ndarray | None = None,
         k_proj: np.ndarray | None = None,
         v_proj: np.ndarray | None = None,
         o_proj: np.ndarray | None = None,
+        kv_down_proj: np.ndarray | None = None,
+        k_up_proj: np.ndarray | None = None,
+        v_up_proj: np.ndarray | None = None,
     ) -> None:
-        """Create the four (in, out) projections.
+        """Create the projections.
 
-        q_proj/k_proj/v_proj/o_proj: optional trained arrays injected **at
+        Classic mode (mla_latent_dim=0): the four (in, out) projections
+        q/k/v/o. MLA mode (mla_latent_dim=L>0, ADR 0009): k/v_proj are
+        replaced by the low-rank latent factorization — kv_down (D, L),
+        k_up (L, G*hd), v_up (L, G*hd).
+
+        All optional arrays are trained weights injected **at
         construction** (copied in place over the seed-initialized storage;
         storage identity never changes). None (default) keeps the
         seed-initialized weights (the training path).
@@ -135,13 +145,29 @@ class MultiHeadAttention:
         self.n_groups = n_groups
         self.head_dim = embed_dim // n_heads
         self.rope_dim = rope_dim
+        self.swa_window = swa_window
+        self.mla_latent_dim = mla_latent_dim
         rng = np.random.default_rng(seed)
         hd = self.head_dim
         # (D, H*hd) query projection
         self.q_proj = xavier_uniform(rng, embed_dim, n_heads * hd)
-        # (D, G*hd) key / value projections — smaller when G < H (GQA)
-        self.k_proj = xavier_uniform(rng, embed_dim, n_groups * hd)
-        self.v_proj = xavier_uniform(rng, embed_dim, n_groups * hd)
+        if mla_latent_dim > 0:
+            # MLA (ADR 0009): K/V are cached as one latent c per token and
+            # reconstructed from it — the cache shrinks from 2*G*hd to L
+            # floats per token.
+            L = mla_latent_dim
+            self.kv_down_proj = xavier_uniform(rng, embed_dim, L)  # (D, L)
+            self.k_up_proj = xavier_uniform(rng, L, n_groups * hd)  # (L, G*hd)
+            self.v_up_proj = xavier_uniform(rng, L, n_groups * hd)  # (L, G*hd)
+            self.k_proj = np.zeros((embed_dim, n_groups * hd))  # unused in MLA mode
+            self.v_proj = np.zeros((embed_dim, n_groups * hd))
+        else:
+            # (D, G*hd) key / value projections — smaller when G < H (GQA)
+            self.k_proj = xavier_uniform(rng, embed_dim, n_groups * hd)
+            self.v_proj = xavier_uniform(rng, embed_dim, n_groups * hd)
+            self.kv_down_proj = np.zeros((embed_dim, 1))
+            self.k_up_proj = np.zeros((1, n_groups * hd))
+            self.v_up_proj = np.zeros((1, n_groups * hd))
         # (H*hd, D) output projection (mixes the heads back into one vector)
         self.o_proj = xavier_uniform(rng, n_heads * hd, embed_dim)
         for target, injected in (
@@ -149,6 +175,9 @@ class MultiHeadAttention:
             (self.k_proj, k_proj),
             (self.v_proj, v_proj),
             (self.o_proj, o_proj),
+            (self.kv_down_proj, kv_down_proj),
+            (self.k_up_proj, k_up_proj),
+            (self.v_up_proj, v_up_proj),
         ):
             if injected is not None:
                 target[...] = injected
@@ -224,10 +253,25 @@ class MultiHeadAttention:
         batch_size, seq_len, _ = x.shape
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
 
-        # Q, K, V projections: (B, S, D) @ (D, H*hd) → (B, S, H*hd)
+        # Q projection: (B, S, D) @ (D, H*hd) → (B, S, H*hd)
         q_pre = x @ self.q_proj  # (B, S, H*hd)
-        k_pre = x @ self.k_proj  # (B, S, G*hd)
-        v_pre = x @ self.v_proj  # (B, S, G*hd)
+
+        # K/V projections. Classic: k_pre/v_pre = x @ Wk/Wv (B, S, G*hd).
+        # MLA (ADR 0009): the CACHE stores one latent c = x @ W_kv_down
+        # (B, S, L); K/V are reconstructed as c @ W_k_up / c @ W_v_up.
+        # We compute both views: the latent (cache-ready) and the
+        # reconstructed per-group K/V (attention-ready).
+        if self.mla_latent_dim > 0:
+            L = self.mla_latent_dim
+            c_pre = x @ self.kv_down_proj  # (B, S, L) — the latent
+            k_pre = c_pre @ self.k_up_proj  # (B, S, G*hd) — reconstructed K
+            v_pre = c_pre @ self.v_up_proj  # (B, S, G*hd) — reconstructed V
+            c_group = c_pre.reshape(batch_size, seq_len, 1, L).transpose(0, 2, 1, 3)  # (B, 1, S, L)
+        else:
+            k_pre = x @ self.k_proj  # (B, S, G*hd)
+            v_pre = x @ self.v_proj  # (B, S, G*hd)
+            c_pre = None
+            c_group = None
 
         # Split the width into heads: (B, S, H*hd) → (B, H, S, hd)
         q_heads = q_pre.reshape(batch_size, seq_len, H, hd).transpose(0, 2, 1, 3)  # (B, H, S, hd)
@@ -263,7 +307,14 @@ class MultiHeadAttention:
         # matrix: every block position sees every other, position
         # information comes from the learned block-position embeddings.
         if causal:
-            causal_mask = np.triu(np.ones((seq_len, seq_len), dtype=bool), k=1)  # (S, S), True where j > i
+            rows = np.arange(seq_len)[:, None]  # (S, 1) local row index i
+            cols = np.arange(seq_len)[None, :]  # (1, S) local col index j
+            causal_mask = cols > rows  # (S, S), True where j > i
+            if self.swa_window > 0:
+                # SWA (ADR 0008): a query at absolute p+i also masks keys at
+                # absolute positions < p+i-w — in pass-local coords that is
+                # (i - j > w), so the mask becomes causal OR beyond-window.
+                causal_mask = causal_mask | ((rows - cols) > self.swa_window)
             scores_masked = np.where(causal_mask, -np.inf, scores)  # (B, H, S, S)
         else:
             causal_mask = np.zeros((seq_len, seq_len), dtype=bool)
@@ -285,6 +336,7 @@ class MultiHeadAttention:
                 "q_pre": q_pre,
                 "k_pre": k_pre,
                 "v_pre": v_pre,
+                "c_pre": c_pre,
                 "q_rope_in": q_heads,
                 "k_rope_in": k_heads,
                 "q": q,
@@ -298,9 +350,11 @@ class MultiHeadAttention:
             display={
                 "k_group": k_group,
                 "v_group": v_group,
+                "c_group": c_group,
                 "scores": scores,
                 "scores_masked": scores_masked,
                 "causal_mask": causal_mask,
+                "swa_window": self.swa_window,
             },
         )
 
@@ -386,13 +440,23 @@ class MultiHeadAttention:
         if quantize:
             missing = [k for k in ("bits_k", "scales_k", "bits_v", "scales_v") if k not in cache]
             assert not missing, f"quantize=True step needs a TurboQuant cache (missing keys: {missing})"
+        elif self.mla_latent_dim > 0:
+            missing = [k for k in ("c",) if k not in cache]
+            assert not missing, f"MLA step needs a latent {{'c'}} cache (missing keys: {missing})"
         else:
             missing = [k for k in ("k", "v") if k not in cache]
             assert not missing, f"quantize=False step needs a naive {{'k','v'}} cache (missing keys: {missing})"
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
         q_pre = x @ self.q_proj  # (B, 1, H*hd)
-        k_pre = x @ self.k_proj  # (B, 1, G*hd)
-        v_pre = x @ self.v_proj  # (B, 1, G*hd)
+        if self.mla_latent_dim > 0:
+            L = self.mla_latent_dim
+            c_pre = x @ self.kv_down_proj  # (B, 1, L) — the latent write
+            k_pre = c_pre @ self.k_up_proj  # (B, 1, G*hd) — reconstructed K
+            v_pre = c_pre @ self.v_up_proj  # (B, 1, G*hd)
+        else:
+            c_pre = None
+            k_pre = x @ self.k_proj  # (B, 1, G*hd)
+            v_pre = x @ self.v_proj  # (B, 1, G*hd)
 
         q_heads = q_pre.reshape(batch_size, 1, H, hd).transpose(0, 2, 1, 3)  # (B, H, 1, hd)
         k_heads = k_pre.reshape(batch_size, 1, G, hd).transpose(0, 2, 1, 3)  # (B, G, 1, hd)
@@ -421,23 +485,54 @@ class MultiHeadAttention:
             k_r = self._dequantize_turbo(cache["bits_k"], cache["scales_k"])  # (B, H, t+1, hd)
             v_r = self._dequantize_turbo(cache["bits_v"], cache["scales_v"])  # (B, H, t+1, hd)
         else:
-            # Naive: append the full-precision K/V (per group).
-            cache["k"] = np.concatenate([cache["k"], k], axis=2)  # (B, G, t+1, hd)
-            cache["v"] = np.concatenate([cache["v"], v], axis=2)  # (B, G, t+1, hd)
+            # Naive: append the new K/V (per group) — or, in MLA mode, the
+            # latent c only; K/V are reconstructed from the whole cache.
+            if self.mla_latent_dim > 0:
+                assert c_pre is not None
+                L = self.mla_latent_dim
+                cache["c"] = np.concatenate([cache["c"], c_pre.reshape(batch_size, 1, 1, L)], axis=2)  # (B, 1, t+1, L)
+                # Reconstruct per-group K/V from the WHOLE cached latent, then
+                # RoPE the K rows by their absolute positions (0..t). RoPE's
+                # contract is (B, S, H, hd), so go through the (B, t+1, G, hd)
+                # view: permute to (B, t+1, G, hd) → rotate → back.
+                c_cache = cache["c"].transpose(0, 2, 1, 3)  # (B, t+1, 1, L)
+                # c_cache @ W_up: (B, t+1, 1, G*hd) → split into heads:
+                # (B, t+1, G, hd) → (B, G, t+1, hd).
+                k_g = (c_cache @ self.k_up_proj).reshape(batch_size, -1, G, hd).transpose(0, 2, 1, 3)  # (B, G, t+1, hd)
+                v_g = (c_cache @ self.v_up_proj).reshape(batch_size, -1, G, hd).transpose(0, 2, 1, 3)  # (B, G, t+1, hd)
+                # RoPE the cached K rows by their absolute positions (0..t):
+                # RoPE's contract is (B, S, H, hd), so permute → rotate → back.
+                k_g = RoPE().forward(k_g.transpose(0, 2, 1, 3), 0, rope_dim=self.rope_dim).transpose(0, 2, 1, 3)
+                k, v = k_g, v_g
+            else:
+                cache["k"] = np.concatenate([cache["k"], k], axis=2)  # (B, G, t+1, hd)
+                cache["v"] = np.concatenate([cache["v"], v], axis=2)  # (B, G, t+1, hd)
+                k, v = cache["k"], cache["v"]
             # GQA repeat: broadcast each group to its H // G query heads.
             if G != H:
-                k_r = np.repeat(cache["k"], H // G, axis=1)  # (B, H, t+1, hd)
-                v_r = np.repeat(cache["v"], H // G, axis=1)
+                k_r = np.repeat(k, H // G, axis=1)  # (B, H, t+1, hd)
+                v_r = np.repeat(v, H // G, axis=1)
             else:
-                k_r, v_r = cache["k"], cache["v"]
+                k_r, v_r = k, v
 
         scale = float(np.sqrt(hd))
-        scores = (q @ k_r.transpose(0, 1, 3, 2)) / scale  # (B, H, 1, t+1)
-        # Nothing is masked in decode: every cached row is in the past of the
-        # new token, so the causal mask is all zeros over the whole cache.
-        attn = stable_softmax(scores, axis=-1)  # (B, H, 1, t+1) — no mask needed in decode
+        # SWA (ADR 0008) decode: the query at absolute `position` sees only
+        # cache rows with absolute position >= position - w. Slice the LAST
+        # w+1 rows instead of masking — O(w) work instead of O(t).
+        if self.swa_window > 0:
+            w = self.swa_window
+            start = max(0, k_r.shape[2] - (w + 1))
+            k_vis, v_vis = k_r[:, :, start:], v_r[:, :, start:]
+            swa_offset = start  # first visible cache row (for the record mask)
+        else:
+            k_vis, v_vis = k_r, v_r
+            swa_offset = 0
+        scores = (q @ k_vis.transpose(0, 1, 3, 2)) / scale  # (B, H, 1, t_vis)
+        # Nothing is masked in decode: every visible cached row is in the
+        # past of the new token, so the causal mask is all zeros.
+        attn = stable_softmax(scores, axis=-1)  # (B, H, 1, t_vis) — no mask needed in decode
 
-        ctx = attn @ v_r  # (B, H, 1, hd)
+        ctx = attn @ v_vis  # (B, H, 1, hd)
         ctx = ctx.transpose(0, 2, 1, 3).reshape(batch_size, 1, H * hd)  # (B, 1, H*hd)
         out = ctx @ self.o_proj  # (B, 1, D)
 
@@ -446,13 +541,16 @@ class MultiHeadAttention:
         # attended to). The dense path's state is filled by forward_state;
         # here we fill the parallel keys from the step-local variables.
         if record is not None:
-            k_exp = np.repeat(k, H // G, axis=1) if G != H else k  # (B, H, 1, hd)
-            v_exp = np.repeat(v, H // G, axis=1) if G != H else v  # (B, H, 1, hd)
+            # The step record's k/v mirror the torch display path: the FULL
+            # GQA-expanded cache (B, H, t, hd) — same as k_cache/v_cache.
+            k_exp = k_r  # (B, H, t, hd) — the cache after this append
+            v_exp = v_r  # (B, H, t, hd)
             record.update(
                 {
                     "q_pre": q_pre,
                     "k_pre": k_pre,
                     "v_pre": v_pre,
+                    "c_pre": c_pre,
                     "q_rope_in": q_heads,
                     "k_rope_in": k_heads,
                     "q": q,
@@ -460,15 +558,26 @@ class MultiHeadAttention:
                     "v": v_exp,
                     "k_group": k,
                     "v_group": v,
+                    "c_group": c_pre.reshape(batch_size, 1, 1, self.mla_latent_dim).transpose(0, 2, 1, 3)
+                    if c_pre is not None
+                    else None,
                     "attn": attn,
                     "ctx": ctx,
                     "scale": scale,
                     "rope": rope_state,
                     "scores": scores,
                     "scores_masked": scores,
-                    "causal_mask": np.zeros((1, k_r.shape[2]), dtype=bool),
+                    # SWA decode: rows before swa_offset are outside the
+                    # window — record the mask over the FULL cache so the
+                    # page can show what was sliced away.
+                    "causal_mask": np.concatenate(
+                        [np.ones((1, swa_offset), dtype=bool), np.zeros((1, k_r.shape[2] - swa_offset), dtype=bool)],
+                        axis=1,
+                    ),
                     "k_cache": k_r,
                     "v_cache": v_r,
+                    "c_cache": cache.get("c"),
+                    "swa_window": self.swa_window,
                 }
             )
         return out
@@ -521,8 +630,15 @@ class MultiHeadAttention:
         B, c, _ = x.shape
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
         q_pre = x @ self.q_proj  # (B, c, H*hd)
-        k_pre = x @ self.k_proj  # (B, c, G*hd)
-        v_pre = x @ self.v_proj  # (B, c, G*hd)
+        if self.mla_latent_dim > 0:
+            L = self.mla_latent_dim
+            c_pre = x @ self.kv_down_proj  # (B, c, L) — the latent write
+            k_pre = c_pre @ self.k_up_proj  # (B, c, G*hd)
+            v_pre = c_pre @ self.v_up_proj  # (B, c, G*hd)
+        else:
+            c_pre = None
+            k_pre = x @ self.k_proj  # (B, c, G*hd)
+            v_pre = x @ self.v_proj  # (B, c, G*hd)
 
         q_heads = q_pre.reshape(B, c, H, hd).transpose(0, 2, 1, 3)  # (B, H, c, hd)
         k_heads = k_pre.reshape(B, c, G, hd).transpose(0, 2, 1, 3)  # (B, G, c, hd)
@@ -536,14 +652,25 @@ class MultiHeadAttention:
         k = RoPE().forward_state(k_heads.transpose(0, 2, 1, 3), position, rope_dim=self.rope_dim).unwrap()
         k = k.transpose(0, 2, 1, 3)  # (B, G, c, hd)
 
-        # Append the chunk's per-group K/V to the cache.
-        cache["k"] = np.concatenate([cache["k"], k], axis=2)  # (B, G, t+c, hd)
-        cache["v"] = np.concatenate([cache["v"], v], axis=2)  # (B, G, t+c, hd)
-        if G != H:
-            k_r = np.repeat(cache["k"], H // G, axis=1)  # (B, H, t+c, hd)
-            v_r = np.repeat(cache["v"], H // G, axis=1)  # (B, H, t+c, hd)
+        # Append the chunk's K/V (or latent c, MLA mode) to the cache.
+        if self.mla_latent_dim > 0:
+            L = self.mla_latent_dim
+            assert c_pre is not None
+            cache["c"] = np.concatenate([cache["c"], c_pre.reshape(B, 1, c, L)], axis=2)  # (B, 1, t+c, L)
+            c_cache = cache["c"].transpose(0, 2, 1, 3)  # (B, t+c, 1, L)
+            k = (c_cache @ self.k_up_proj).reshape(B, -1, G, hd).transpose(0, 2, 1, 3)  # (B, G, t+c, hd), pre-RoPE
+            v = (c_cache @ self.v_up_proj).reshape(B, -1, G, hd).transpose(0, 2, 1, 3)  # (B, G, t+c, hd)
+            # RoPE every cached K row by its absolute position (0..t+c-1).
+            k = RoPE().forward(k.transpose(0, 2, 1, 3), 0, rope_dim=self.rope_dim).transpose(0, 2, 1, 3)
         else:
-            k_r, v_r = cache["k"], cache["v"]
+            cache["k"] = np.concatenate([cache["k"], k], axis=2)  # (B, G, t+c, hd)
+            cache["v"] = np.concatenate([cache["v"], v], axis=2)  # (B, G, t+c, hd)
+            k, v = cache["k"], cache["v"]
+        if G != H:
+            k_r = np.repeat(k, H // G, axis=1)  # (B, H, t+c, hd)
+            v_r = np.repeat(v, H // G, axis=1)  # (B, H, t+c, hd)
+        else:
+            k_r, v_r = k, v
 
         scale = float(np.sqrt(hd))
         # (B, H, c, t+c) — chunk queries against every cached + chunk key.
@@ -551,9 +678,15 @@ class MultiHeadAttention:
         t = k_r.shape[2] - c
         # Block-causal mask: cache rows (0..t-1) are always in the past of the
         # chunk; chunk row t+j is visible to chunk token i iff j <= i.
+        # SWA (ADR 0008): a chunk token at absolute position+i may also NOT
+        # see cache/chunk columns at absolute position < position+i-w.
         causal = np.triu(np.ones((c, c), dtype=bool), k=1)  # (c, c), True where j > i
         mask = np.zeros((c, t + c), dtype=bool)  # (c, t+c), True = masked
         mask[:, t:] = causal
+        if self.swa_window > 0:
+            row_abs = position + np.arange(c)[:, None]  # (c, 1) absolute row positions
+            col_abs = np.arange(t + c)[None, :]  # (1, t+c) absolute col positions
+            mask = mask | ((row_abs - col_abs) > self.swa_window)
         scores_masked = np.where(mask, -np.inf, scores)  # (B, H, c, t+c)
 
         # Softmax over the key axis → attention weights.
@@ -564,20 +697,28 @@ class MultiHeadAttention:
         out = ctx @ self.o_proj  # (B, c, D)
 
         if record is not None:
-            k_exp = np.repeat(cache["k"], H // G, axis=1) if G != H else cache["k"]  # (B, H, t+c, hd)
-            v_exp = np.repeat(cache["v"], H // G, axis=1) if G != H else cache["v"]
+            if self.mla_latent_dim > 0:
+                k_exp = np.repeat(k, H // G, axis=1) if G != H else k  # (B, H, t+c, hd)
+                v_exp = np.repeat(v, H // G, axis=1) if G != H else v
+                k_grp, v_grp, c_grp = None, None, cache["c"]
+            else:
+                k_exp = np.repeat(cache["k"], H // G, axis=1) if G != H else cache["k"]  # (B, H, t+c, hd)
+                v_exp = np.repeat(cache["v"], H // G, axis=1) if G != H else cache["v"]
+                k_grp, v_grp, c_grp = cache["k"], cache["v"], None
             record.update(
                 {
                     "q_pre": q_pre,
                     "k_pre": k_pre,
                     "v_pre": v_pre,
-                    "q_rope_in": q_heads,  # pre-RoPE q in head layout (the forward_chunk state's pre-RoPE view)
+                    "c_pre": c_pre,
+                    "q_rope_in": q_heads,  # pre-RoPE q in head layout
                     "k_rope_in": k_heads,  # pre-RoPE k
                     "q": q,
                     "k": k_exp,
                     "v": v_exp,
-                    "k_group": cache["k"],
-                    "v_group": cache["v"],
+                    "k_group": k_grp,
+                    "v_group": v_grp,
+                    "c_group": c_grp,
                     "attn": attn,
                     "ctx": ctx,
                     "scale": scale,
@@ -587,6 +728,8 @@ class MultiHeadAttention:
                     "causal_mask": mask,
                     "k_cache": k_r,
                     "v_cache": v_r,
+                    "c_cache": cache.get("c"),
+                    "swa_window": self.swa_window,
                 }
             )
         return out
@@ -720,13 +863,31 @@ class MultiHeadAttention:
         dv_flat = dv.transpose(0, 2, 1, 3).reshape(-1, G * hd)  # (T, G*hd)
         x_flat = x.reshape(-1, x.shape[-1])  # (T, D)
         dWq = x_flat.T @ dq_flat  # (D, H*hd)
-        dWk = x_flat.T @ dk_flat  # (D, G*hd)
-        dWv = x_flat.T @ dv_flat  # (D, G*hd)
-        dx = dq_flat @ self.q_proj.T + dk_flat @ self.k_proj.T + dv_flat @ self.v_proj.T  # (T, D)
+        dx = dq_flat @ self.q_proj.T  # (T, D)
+        dparams: dict[str, np.ndarray] = {"q_proj": dWq, "o_proj": dWo}
+        if self.mla_latent_dim > 0:
+            # MLA (ADR 0009) backward — chain rule through the low-rank
+            # factorization k_pre = c_pre @ W_k_up, c_pre = x @ W_kv_down:
+            #   dW_k_up = c_pre^T @ dk_flat        (L, G*hd)
+            #   dW_v_up = c_pre^T @ dv_flat        (L, G*hd)
+            #   dc_pre  = dk_flat @ W_k_up^T + dv_flat @ W_v_up^T   (T, L)
+            #   dW_kv_down = x_flat^T @ dc_pre     (D, L)
+            #   dx += dc_pre @ W_kv_down^T         (T, D)
+            c_pre = st["c_pre"]  # (B, S, L)
+            c_flat = c_pre.reshape(-1, self.mla_latent_dim)  # (T, L)
+            dWk_up = c_flat.T @ dk_flat  # (L, G*hd)
+            dWv_up = c_flat.T @ dv_flat  # (L, G*hd)
+            dc_flat = dk_flat @ self.k_up_proj.T + dv_flat @ self.v_up_proj.T  # (T, L)
+            dWkv_down = x_flat.T @ dc_flat  # (D, L)
+            dx = dx + dc_flat @ self.kv_down_proj.T  # (T, D)
+            dparams["kv_down_proj"] = dWkv_down
+            dparams["k_up_proj"] = dWk_up
+            dparams["v_up_proj"] = dWv_up
+        else:
+            dWk = x_flat.T @ dk_flat  # (D, G*hd)
+            dWv = x_flat.T @ dv_flat  # (D, G*hd)
+            dx = dx + dk_flat @ self.k_proj.T + dv_flat @ self.v_proj.T  # (T, D)
+            dparams["k_proj"] = dWk
+            dparams["v_proj"] = dWv
 
-        return dx.reshape(x.shape), {
-            "q_proj": dWq,
-            "k_proj": dWk,
-            "v_proj": dWv,
-            "o_proj": dWo,
-        }
+        return dx.reshape(x.shape), dparams

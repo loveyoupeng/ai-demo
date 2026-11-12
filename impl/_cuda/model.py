@@ -264,6 +264,11 @@ class CUDAModel:
             for m in range(self.config.n_mixers()):
                 if self.config.mixer_kind(m) == "d":
                     layer_caches.append({"s": torch.zeros(B, H, hd, hd, device=device, dtype=dtype), "s_hist": []})
+                elif self.config.has_mla_at(_i):
+                    # MLA (ADR 0009): the cache stores ONE latent c per
+                    # token — (B, L, 0) — instead of per-group K/V.
+                    L = self.config.mla_latent_dim
+                    layer_caches.append({"c": torch.zeros(B, L, 0, device=device, dtype=dtype)})
                 else:
                     layer_caches.append(
                         {
@@ -315,6 +320,9 @@ class CUDAModel:
                     mixer_cache["s_hist"] = [
                         mixer_state["s_hist"][:, :, j] for j in range(mixer_state["s_hist"].shape[2])
                     ]  # type: ignore[assignment]
+                elif self.config.has_mla_at(i):
+                    # MLA (ADR 0009): backfill the latent cache (B, L, S).
+                    mixer_cache["c"] = mixer_state["c_group"].transpose(1, 2)  # (B, L, S)
                 else:
                     mixer_cache["k"] = mixer_state["k_group"]  # (B, G, S, hd)
                     mixer_cache["v"] = mixer_state["v_group"]  # (B, G, S, hd)
@@ -350,6 +358,9 @@ class CUDAModel:
                 mixer_cache: dict[str, Any] = mixer_cache_raw
                 if "s" in mixer_cache:
                     mixer_cache["s"] = mixer_cache["s"].to(device)
+                elif "c" in mixer_cache:
+                    # MLA (ADR 0009): latent cache moves like K/V.
+                    mixer_cache["c"] = mixer_cache["c"].to(device)
                 else:
                     mixer_cache["k"] = mixer_cache["k"].to(device)
                     mixer_cache["v"] = mixer_cache["v"].to(device)
@@ -391,6 +402,9 @@ class CUDAModel:
                 mixer_cache: dict[str, Any] = mixer_cache_raw
                 if "s" in mixer_cache:
                     mixer_cache["s"] = mixer_cache["s"].to(device)
+                elif "c" in mixer_cache:
+                    # MLA (ADR 0009): latent cache moves like K/V.
+                    mixer_cache["c"] = mixer_cache["c"].to(device)
                 else:
                     mixer_cache["k"] = mixer_cache["k"].to(device)  # same dicts, mutated in place
                     mixer_cache["v"] = mixer_cache["v"].to(device)
@@ -426,11 +440,19 @@ class CUDAModel:
                     t[Keys.deltanet(i, m, DeltaNet.DT_BIAS)] = dn.dt_bias
                     t[Keys.deltanet(i, m, DeltaNet.NORM)] = dn.norm_gamma
                 else:
-                    q, k, v, o = block.attn_projs[m]
-                    t[Keys.attn(i, m, Attn.Q_PROJ)] = q
-                    t[Keys.attn(i, m, Attn.K_PROJ)] = k
-                    t[Keys.attn(i, m, Attn.V_PROJ)] = v
-                    t[Keys.attn(i, m, Attn.O_PROJ)] = o
+                    if self.config.has_mla_at(i):
+                        q, kvd, ku, vu, o = block.attn_projs[m]  # type: ignore[assignment]
+                        t[Keys.attn(i, m, Attn.Q_PROJ)] = q
+                        t[Keys.attn(i, m, Attn.O_PROJ)] = o
+                        t[Keys.attn(i, m, Attn.KV_DOWN_PROJ)] = kvd
+                        t[Keys.attn(i, m, Attn.K_UP_PROJ)] = ku
+                        t[Keys.attn(i, m, Attn.V_UP_PROJ)] = vu
+                    else:
+                        q, k, v, o = block.attn_projs[m]
+                        t[Keys.attn(i, m, Attn.Q_PROJ)] = q
+                        t[Keys.attn(i, m, Attn.K_PROJ)] = k
+                        t[Keys.attn(i, m, Attn.V_PROJ)] = v
+                        t[Keys.attn(i, m, Attn.O_PROJ)] = o
             if self.config.has_moe():
                 t[Keys.moe_gate(i)] = block.router
                 for e in range(self.config.n_experts):

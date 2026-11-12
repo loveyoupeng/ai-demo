@@ -52,10 +52,19 @@ class Attn:
     K_PROJ: str = "k_proj"
     V_PROJ: str = "v_proj"
     O_PROJ: str = "o_proj"
+    # MLA projections (ADR 0009, active when config.mla_latent_dim > 0):
+    # the K/V cache stores one latent c = x @ kv_down; K/V are rebuilt as
+    # k = RoPE(c @ k_up), v = c @ v_up.
+    KV_DOWN_PROJ: str = "kv_down_proj"
+    K_UP_PROJ: str = "k_up_proj"
+    V_UP_PROJ: str = "v_up_proj"
 
 
 # All attention projections, in q/k/v/o order.
 ATTN_PROJS: tuple[str, str, str, str] = (Attn.Q_PROJ, Attn.K_PROJ, Attn.V_PROJ, Attn.O_PROJ)
+
+# MLA projection set (replaces k_proj/v_proj in the registry when active).
+ATTN_MLA_PROJS: tuple[str, str, str] = (Attn.KV_DOWN_PROJ, Attn.K_UP_PROJ, Attn.V_UP_PROJ)
 
 
 class Mlp:

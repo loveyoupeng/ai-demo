@@ -13,7 +13,7 @@ Key constants:
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -118,8 +118,17 @@ def _attn_record(
     dev_out = ln1_out
     ln1_out = ln1_out.detach().cpu().to(torch.float64)  # CPU f64 display path
     q_pre = ln1_out @ W(attn.q_proj)  # (B, S, H·hd)
-    k_pre = ln1_out @ W(attn.k_proj)  # (B, S, G·hd)
-    v_pre = ln1_out @ W(attn.v_proj)  # (B, S, G·hd)
+    if attn.mla_latent_dim > 0:
+        # MLA (ADR 0009/0011): latent c = x @ W_kv_down; K/V rebuilt from it.
+        assert attn.kv_down_proj is not None and attn.k_up_proj is not None and attn.v_up_proj is not None
+        c_pre = ln1_out @ W(attn.kv_down_proj)  # (B, S, L)
+        k_pre = c_pre @ W(attn.k_up_proj)  # (B, S, G·hd)
+        v_pre = c_pre @ W(attn.v_up_proj)  # (B, S, G·hd)
+    else:
+        assert attn.k_proj is not None and attn.v_proj is not None
+        c_pre = None
+        k_pre = ln1_out @ W(attn.k_proj)  # (B, S, G·hd)
+        v_pre = ln1_out @ W(attn.v_proj)  # (B, S, G·hd)
     q_rope_in = q_pre.view(B, S, H, hd).permute(0, 2, 1, 3)  # (B, H, S, hd) pre-RoPE
     k_rope_in = k_pre.view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd) pre-RoPE
     v = v_pre.view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd)
@@ -138,14 +147,18 @@ def _attn_record(
     scale = math.sqrt(hd)  # the scores DIVISOR
     scores = (q @ k.transpose(-1, -2)) / scale  # (B, H, S, S)
     mask = torch.triu(torch.ones(S, S, dtype=torch.bool), diagonal=1)  # True where j > i (CPU f64 display)
+    if attn.swa_window > 0:
+        # SWA (ADR 0008): also mask (i - j) > window.
+        rows = torch.arange(S)[:, None]
+        cols = torch.arange(S)[None, :]
+        mask = mask | ((rows - cols) > attn.swa_window)
     neg = torch.tensor(-1e4, dtype=torch.float64)
     scores_masked = torch.where(mask, neg, scores)  # (B, H, S, S)
-
     attn_w = stable_softmax_t(scores_masked, dim=-1)  # (B, H, S, S)
     ctx = (attn_w @ v).permute(0, 2, 1, 3).reshape(B, S, H * hd)  # (B, S, H·hd)
     attn_out = (ctx @ W(attn.o_proj)).to(dev_out.device, dev_out.dtype)  # (B, S, D)
 
-    return attn_out, {
+    rec = {  # type: ignore[assignment]
         "q_pre": arr(q_pre),  # (B, S, H·hd) — ln1_out @ Wq
         "k_pre": arr(k_pre),  # (B, S, G·hd)
         "v_pre": arr(v_pre),  # (B, S, G·hd)
@@ -166,7 +179,11 @@ def _attn_record(
         # K/V are stored (GQA-expanded to H heads so the page can browse heads).
         "k_cache": arr(k),  # (B, H, S, hd)
         "v_cache": arr(v),  # (B, H, S, hd)
+        "c_cache": arr(c_pre.unsqueeze(1)) if c_pre is not None else None,  # (B, 1, S, L) — matches the NumPy record
+        "c_pre": arr(c_pre) if c_pre is not None else None,
+        "swa_window": attn.swa_window,
     }
+    return attn_out, cast("AttnRecord", rec)
 
 
 def _init_kv_cache(attn: TritonMultiHeadAttention, k_pre: torch.Tensor, v_pre: torch.Tensor, position: int) -> dict:
@@ -211,11 +228,19 @@ def _attn_step_record(
 
         return lin.weight.detach().cpu().to(torch.float64).T
 
-    dev_out = x
     x = x.detach().cpu().to(torch.float64)  # CPU f64 display path
+    dev_out = x
     q_pre = x @ W(attn.q_proj)  # (B, 1, H·hd)
-    k_pre = x @ W(attn.k_proj)  # (B, 1, G·hd)
-    v_pre = x @ W(attn.v_proj)  # (B, 1, G·hd)
+    if attn.mla_latent_dim > 0:
+        assert attn.kv_down_proj is not None and attn.k_up_proj is not None and attn.v_up_proj is not None
+        c_pre = x @ W(attn.kv_down_proj)  # (B, 1, L) — MLA latent write
+        k_pre = c_pre @ W(attn.k_up_proj)
+        v_pre = c_pre @ W(attn.v_up_proj)
+    else:
+        assert attn.k_proj is not None and attn.v_proj is not None
+        c_pre = None
+        k_pre = x @ W(attn.k_proj)  # (B, 1, G·hd)
+        v_pre = x @ W(attn.v_proj)  # (B, 1, G·hd)
     q_rope_in = q_pre.view(B, 1, H, hd).permute(0, 2, 1, 3)  # (B, H, 1, hd) pre-RoPE
     k_rope_in = k_pre.view(B, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd) pre-RoPE
     v = v_pre.view(B, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
@@ -224,31 +249,51 @@ def _attn_step_record(
 
     # Append the new row to the block's cache (mutated in place, like the
     # NumPy track's forward_step).
-    cache["k"] = torch.cat([cache["k"], k.to(cache["k"].device, cache["k"].dtype)], dim=2)  # (B, G, t, hd)
-    cache["v"] = torch.cat([cache["v"], v.to(cache["v"].device, cache["v"].dtype)], dim=2)  # (B, G, t, hd)
+    if attn.mla_latent_dim > 0:
+        assert c_pre is not None
+        cache["c"] = torch.cat(
+            [cache["c"], c_pre.transpose(1, 2).to(cache["c"].device, cache["c"].dtype)], dim=2
+        )  # (B, L, t+1)
+    else:
+        cache["k"] = torch.cat([cache["k"], k.to(cache["k"].device, cache["k"].dtype)], dim=2)  # (B, G, t, hd)
+        cache["v"] = torch.cat([cache["v"], v.to(cache["v"].device, cache["v"].dtype)], dim=2)  # (B, G, t, hd)
 
     if G != H:  # GQA: broadcast each group to its query heads (display parity with _attn_record)
         k = k.repeat_interleave(H // G, dim=1)  # (B, H, 1, hd)
         v = v.repeat_interleave(H // G, dim=1)  # (B, H, 1, hd)
-    k_r = (
-        cache["k"].detach().cpu().to(torch.float64).repeat_interleave(H // G, dim=1)
-        if G != H
-        else cache["k"].detach().cpu().to(torch.float64)
-    )  # (B, H, t, hd) — CPU f64 display copy
-    v_r = (
-        cache["v"].detach().cpu().to(torch.float64).repeat_interleave(H // G, dim=1)
-        if G != H
-        else cache["v"].detach().cpu().to(torch.float64)
-    )  # (B, H, t, hd)
+    if attn.mla_latent_dim > 0:
+        # MLA: rebuild K/V from the whole cached latent for the display scores.
+        assert attn.k_up_proj is not None and attn.v_up_proj is not None
+        c_cache = cache["c"].detach().cpu().to(torch.float64).transpose(1, 2)  # (B, t, L)
+        k_g = (c_cache @ W(attn.k_up_proj)).view(B, -1, G, hd).permute(0, 2, 1, 3)  # (B, G, t, hd)
+        v_g = (c_cache @ W(attn.v_up_proj)).view(B, -1, G, hd).permute(0, 2, 1, 3)
+        k_g = attn.rope(k_g.permute(0, 2, 1, 3), 0, rope_dim=attn.rope_dim).permute(0, 2, 1, 3)
+        k_r = k_g.repeat_interleave(H // G, dim=1) if G != H else k_g  # (B, H, t, hd)
+        v_r = v_g.repeat_interleave(H // G, dim=1) if G != H else v_g
+    else:
+        k_r = (
+            cache["k"].detach().cpu().to(torch.float64).repeat_interleave(H // G, dim=1)
+            if G != H
+            else cache["k"].detach().cpu().to(torch.float64)
+        )  # (B, H, t, hd) — CPU f64 display copy
+        v_r = (
+            cache["v"].detach().cpu().to(torch.float64).repeat_interleave(H // G, dim=1)
+            if G != H
+            else cache["v"].detach().cpu().to(torch.float64)
+        )  # (B, H, t, hd)
 
     scale = math.sqrt(hd)
-    scores = (q @ k_r.transpose(-1, -2)) / scale  # (B, H, 1, t) over the WHOLE cache
+    # SWA (ADR 0008) decode: slice the last w+1 cache rows — O(w) work.
+    if attn.swa_window > 0:
+        start = max(0, k_r.shape[2] - (attn.swa_window + 1))
+        k_r, v_r = k_r[:, :, start:], v_r[:, :, start:]
+    scores = (q @ k_r.transpose(-1, -2)) / scale  # (B, H, 1, t_vis) over the VISIBLE cache
     mask = torch.zeros(1, scores.shape[-1], dtype=torch.bool, device=x.device)  # nothing masked in decode
-    attn_w = stable_softmax_t(scores, dim=-1)  # (B, H, 1, t) — nothing masked in decode
+    attn_w = stable_softmax_t(scores, dim=-1)  # (B, H, 1, t_vis)
     ctx = (attn_w @ v_r).permute(0, 2, 1, 3).reshape(B, 1, H * hd)  # (B, 1, H·hd)
     out = (ctx @ W(attn.o_proj)).to(dev_out.device, dev_out.dtype)  # (B, 1, D)
 
-    return out, {
+    rec2 = {  # type: ignore[assignment]
         "q_pre": arr(q_pre),  # (B, 1, H·hd)
         "k_pre": arr(k_pre),  # (B, 1, G·hd)
         "v_pre": arr(v_pre),  # (B, 1, G·hd)
@@ -267,7 +312,13 @@ def _attn_step_record(
         "attn_out": arr(out),  # (B, 1, D)
         "k_cache": arr(k_r),  # (B, H, t, hd) — the full cache after this append
         "v_cache": arr(v_r),  # (B, H, t, hd)
+        "c_cache": arr(cache["c"].detach().cpu().to(torch.float64).transpose(1, 2).unsqueeze(1))
+        if "c" in cache
+        else None,  # (B, 1, t, L)
+        "c_pre": arr(c_pre) if c_pre is not None else None,
+        "swa_window": attn.swa_window,
     }
+    return out, cast("AttnRecord", rec2)
 
 
 def _ffn_record(mlp: TritonSwiGLUFFN, x: torch.Tensor, out: torch.Tensor) -> FFNRecord:
@@ -567,16 +618,21 @@ def generate_with_records(
                 layer_caches.append({"s": s0, "s_hist": hist})
             else:
                 r = rec["blocks"][i]["mixers"][m]["attn"]
-                # (as in the NumPy track) the cache is initialized from the recorded
-                # pre-RoPE projections, so the display and the state agree exactly.
-                layer_caches.append(
-                    _init_kv_cache(
-                        mixer,  # type: ignore[arg-type]
-                        torch.tensor(r["k_pre"], device=device),
-                        torch.tensor(r["v_pre"], device=device),
-                        pos0,
+                if mixer.mla_latent_dim > 0:
+                    # MLA (ADR 0009/0011): the step cache is the latent c (B, L, S).
+                    c0 = torch.tensor(r["c_pre"], dtype=torch.float64, device=device)  # (B, S, L)
+                    layer_caches.append({"c": c0.transpose(1, 2).contiguous()})  # (B, L, S)
+                else:
+                    # (as in the NumPy track) the cache is initialized from the recorded
+                    # pre-RoPE projections, so the display and the state agree exactly.
+                    layer_caches.append(
+                        _init_kv_cache(
+                            mixer,  # type: ignore[arg-type]
+                            torch.tensor(r["k_pre"], device=device),
+                            torch.tensor(r["v_pre"], device=device),
+                            pos0,
+                        )
                     )
-                )
         caches.append(layer_caches)
 
     # ---- Steps 1..n: autoregressive decode, one new token per step

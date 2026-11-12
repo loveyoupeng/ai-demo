@@ -43,6 +43,22 @@ class TransformerConfig:
     # blocks (the classic single-mixer model).
     n_deltanet_sublayers: int = 3
 
+    # Sliding-window attention (ADR 0008) on the full-attention mixer:
+    # 0 = full causal attention (default, unchanged); w > 0 = a query at
+    # absolute position p may attend only to keys in [p - w, p]. Decode
+    # then slices the last w+1 cache rows instead of scoring the whole
+    # cache (O(w) instead of O(t) per token).
+    swa_window: int = 0
+
+    # Multi-head Latent Attention (ADR 0009/0011) on the full-attention mixer:
+    # 0 = classic k/v_proj (D, G*hd) each, cache {"k","v"} per group;
+    # L > 0 = MLA: the cache stores ONE latent c (B, L, t) per token and
+    # K/V are reconstructed via kv_down (D,L), k_up (L,G*hd), v_up (L,G*hd).
+    # ADR 0011: with mla_group_size > 1, blocks alternate — even blocks in
+    # each group of mla_group_size use MLA, odd blocks use classic MHA.
+    mla_latent_dim: int = 0
+    mla_group_size: int = 1
+
     # Positional encoding
     # 0 → rotate all head dimensions (standard RoPE).
     # 0 < rope_dim < head_dim → rotate the first rope_dim dimensions only.
@@ -105,6 +121,15 @@ class TransformerConfig:
         # Hybrid sublayer count (ADR 0007): 0 → classic all-attention block;
         # n → n Gated DeltaNet mixers + 1 full-attention mixer per block.
         assert self.n_deltanet_sublayers >= 0, "n_deltanet_sublayers must be >= 0"
+        assert self.swa_window >= 0, "swa_window must be >= 0 (0 = full causal attention)"
+        assert self.mla_latent_dim >= 0, "mla_latent_dim must be >= 0 (0 = classic k/v_proj)"
+        assert self.mla_group_size >= 1, "mla_group_size must be >= 1"
+        if self.mla_group_size > 1:
+            assert self.mla_latent_dim > 0, "mla_group_size > 1 requires mla_latent_dim > 0 (ADR 0011 alternation)"
+        if self.swa_window > 0:
+            assert self.swa_window < self.context_length or self.swa_window == 0, (
+                f"swa_window ({self.swa_window}) should be < context_length ({self.context_length}) to be a real window"
+            )
 
     def is_gqa(self) -> bool:
         """GQA active when n_groups < n_heads (multiple query heads share one K/V head)."""
@@ -119,6 +144,22 @@ class TransformerConfig:
     def has_moe(self) -> bool:
         """MoE active when n_experts > 1."""
         return self.n_experts > 1
+
+    def has_swa(self) -> bool:
+        """Sliding-window attention active when swa_window > 0 (ADR 0008)."""
+        return self.swa_window > 0
+
+    def has_mla(self) -> bool:
+        """MLA active on at least one block (mla_latent_dim > 0)."""
+        return self.mla_latent_dim > 0
+
+    def has_mla_at(self, layer_idx: int) -> bool:
+        """Whether block ``layer_idx``'s global mixer is MLA (ADR 0011).
+
+        Group-of-``mla_group_size`` blocks alternate: even block index in
+        each group → MLA; odd → classic MHA. ``mla_group_size == 1`` →
+        every block MLA (the ADR 0009 behavior)."""
+        return self.mla_latent_dim > 0 and layer_idx % self.mla_group_size == 0
 
     def n_mixers(self) -> int:
         """Mixing sublayers per block: ``n_deltanet_sublayers`` DeltaNet + 1 full attention."""

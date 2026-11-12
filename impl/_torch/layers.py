@@ -241,17 +241,27 @@ class MultiHeadAttention(nn.Module):
         n_heads: int,
         n_groups: int,
         rope_dim: int,
+        swa_window: int = 0,
+        mla_latent_dim: int = 0,
         q_proj: np.ndarray | None = None,
         k_proj: np.ndarray | None = None,
         v_proj: np.ndarray | None = None,
         o_proj: np.ndarray | None = None,
+        kv_down_proj: np.ndarray | None = None,
+        k_up_proj: np.ndarray | None = None,
+        v_up_proj: np.ndarray | None = None,
     ) -> None:
-        """Create the four projections.
+        """Create the projections.
 
-        q_proj/k_proj/v_proj/o_proj: optional trained ``(in, out)`` arrays
-        injected **at construction** (transposed to the ``nn.Linear``
-        ``(out, in)`` layout and copied in place over the seed-initialized
-        storage). None (default) keeps the seeded weights (the training path).
+        Classic mode (mla_latent_dim=0): q/k/v/o Linear layers. MLA mode
+        (mla_latent_dim=L>0, ADR 0009): k/v_proj are replaced by the
+        low-rank latent factorization kv_down (D→L), k_up (L→G·hd),
+        v_up (L→G·hd); the KV cache then stores only the latent c.
+
+        All optional arrays are trained ``(in, out)`` arrays injected **at
+        construction** (transposed to the ``nn.Linear`` ``(out, in)`` layout
+        and copied in place over the seed-initialized storage). None
+        (default) keeps the seeded weights (the training path).
         """
         super().__init__()
         self.embed_dim = embed_dim
@@ -259,13 +269,30 @@ class MultiHeadAttention(nn.Module):
         self.n_groups = n_groups
         self.head_dim = embed_dim // n_heads
         self.rope_dim = rope_dim
+        self.swa_window = swa_window
+        self.mla_latent_dim = mla_latent_dim
 
         hd = self.head_dim
         # (out, in) per nn.Linear convention: q: D → H*hd
         self.q_proj = nn.Linear(embed_dim, n_heads * hd, bias=False)
-        # k/v: D → G*hd (smaller than q when G < H — the whole point of GQA)
-        self.k_proj = nn.Linear(embed_dim, n_groups * hd, bias=False)
-        self.v_proj = nn.Linear(embed_dim, n_groups * hd, bias=False)
+        if mla_latent_dim > 0:
+            # MLA (ADR 0009): cache one latent c = x @ W_kv_down per token;
+            # K/V are reconstructed as c @ W_k_up / c @ W_v_up. The classic
+            # k/v_proj are NOT created (None) so they never enter
+            # named_parameters.
+            L = mla_latent_dim
+            self.kv_down_proj: nn.Linear | None = nn.Linear(embed_dim, L, bias=False)
+            self.k_up_proj: nn.Linear | None = nn.Linear(L, n_groups * hd, bias=False)
+            self.v_up_proj: nn.Linear | None = nn.Linear(L, n_groups * hd, bias=False)
+            self.k_proj: nn.Linear | None = None
+            self.v_proj: nn.Linear | None = None
+        else:
+            # k/v: D → G*hd (smaller than q when G < H — the whole point of GQA)
+            self.k_proj = nn.Linear(embed_dim, n_groups * hd, bias=False)
+            self.v_proj = nn.Linear(embed_dim, n_groups * hd, bias=False)
+            self.kv_down_proj = None
+            self.k_up_proj = None
+            self.v_up_proj = None
         # o: H*hd → D (mixes the heads back into one vector)
         self.o_proj = nn.Linear(n_heads * hd, embed_dim, bias=False)
 
@@ -274,8 +301,11 @@ class MultiHeadAttention(nn.Module):
             (self.k_proj, k_proj),
             (self.v_proj, v_proj),
             (self.o_proj, o_proj),
+            (self.kv_down_proj, kv_down_proj),
+            (self.k_up_proj, k_up_proj),
+            (self.v_up_proj, v_up_proj),
         ):
-            if injected is not None:
+            if module is not None and injected is not None:
                 _copy_checkpoint(module.weight, injected, transpose=True)
 
         self.rope = RoPE()
@@ -302,8 +332,20 @@ class MultiHeadAttention(nn.Module):
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
 
         q = self.q_proj(x)  # (B, S, H*hd)
-        k = self.k_proj(x)  # (B, S, G*hd)
-        v = self.v_proj(x)  # (B, S, G*hd)
+        if self.mla_latent_dim > 0:
+            # MLA (ADR 0009): latent c = x @ W_kv_down (B, S, L); K/V are
+            # reconstructed from it: k = c @ W_k_up, v = c @ W_v_up.
+            assert self.kv_down_proj is not None and self.k_up_proj is not None and self.v_up_proj is not None
+            c = self.kv_down_proj(x)  # (B, S, L)
+            k = self.k_up_proj(c)  # (B, S, G*hd)
+            v = self.v_up_proj(c)  # (B, S, G*hd)
+            c_group = c  # (B, S, L) — the cacheable latent
+        else:
+            assert self.k_proj is not None and self.v_proj is not None
+            k = self.k_proj(x)  # (B, S, G*hd)
+            v = self.v_proj(x)  # (B, S, G*hd)
+            c = None
+            c_group = None
 
         q = q.view(batch_size, seq_len, H, hd).permute(0, 2, 1, 3)  # (B, H, S, hd)
         k = k.view(batch_size, seq_len, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd)
@@ -320,20 +362,32 @@ class MultiHeadAttention(nn.Module):
         else:
             k_full, v_full = k_group, v_group
 
-        ctx = F.scaled_dot_product_attention(q, k_full, v_full, is_causal=True)  # (B, H, S, hd)
+        # SWA (ADR 0008): with a window, pass an explicit banded-causal bool
+        # mask (True = attend). is_causal=True alone is the w=∞ case.
+        if self.swa_window > 0:
+            rows = torch.arange(seq_len, device=x.device)[:, None]
+            cols = torch.arange(seq_len, device=x.device)[None, :]
+            allow = (cols <= rows) & ((rows - cols) <= self.swa_window)  # (S, S)
+            ctx = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=allow)  # (B, H, S, hd)
+        else:
+            ctx = F.scaled_dot_product_attention(q, k_full, v_full, is_causal=True)  # (B, H, S, hd)
         ctx = ctx.permute(0, 2, 1, 3).reshape(batch_size, seq_len, H * hd)
         out = self.o_proj(ctx)  # (B, S, D)
         return Result.capture(
             out,
             backward={},
-            display={"k_group": k_group, "v_group": v_group},
+            display={"k_group": k_group, "v_group": v_group, "c_group": c_group},
         )
 
     def forward_step(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
-        # Fail fast on a schema mismatch: these tracks build only the naive
-        # {'k','v'} cache (make_cache has no quantize mode).
-        missing = [k for k in ("k", "v") if k not in cache]
-        assert not missing, f"forward_step needs a naive {{'k','v'}} cache (missing keys: {missing})"
+        # Fail fast on a cache/schema mismatch (MLA uses {'c'}, classic
+        # uses {'k','v'}).
+        if self.mla_latent_dim > 0:
+            missing = [k for k in ("c",) if k not in cache]
+            assert not missing, f"MLA forward_step needs a latent {{'c'}} cache (missing: {missing})"
+        else:
+            missing = [k for k in ("k", "v") if k not in cache]
+            assert not missing, f"forward_step needs a naive {{'k','v'}} cache (missing keys: {missing})"
         """Process ONE new token against the cached K/V (per-token inference path).
 
         Mirrors ``impl._np.attention.MultiHeadAttention.forward_step``: the
@@ -354,30 +408,54 @@ class MultiHeadAttention(nn.Module):
 
         # One token's Q/K/V: (B, 1, D) @ (D, ·) → (B, 1, ·)
         q = self.q_proj(x)  # (B, 1, H*hd)
-        k = self.k_proj(x)  # (B, 1, G*hd)
-        v = self.v_proj(x)  # (B, 1, G*hd)
+        if self.mla_latent_dim > 0:
+            assert self.kv_down_proj is not None and self.k_up_proj is not None and self.v_up_proj is not None
+            c = self.kv_down_proj(x)  # (B, 1, L) — the latent write
+            k_pre = self.k_up_proj(c)  # (B, 1, G*hd)
+            v_pre = self.v_up_proj(c)  # (B, 1, G*hd)
+        else:
+            assert self.k_proj is not None and self.v_proj is not None
+            c = None
+            k_pre = self.k_proj(x)  # (B, 1, G*hd)
+            v_pre = self.v_proj(x)  # (B, 1, G*hd)
 
         # Split into heads: (B, 1, ·) → (B, ·, 1, hd)
         q = q.view(batch_size, 1, H, hd).permute(0, 2, 1, 3)  # (B, H, 1, hd)
-        k = k.view(batch_size, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
-        v = v.view(batch_size, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
+        k = k_pre.view(batch_size, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
+        v = v_pre.view(batch_size, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
 
         # RoPE with the token's absolute position (contract: (B, S, H, D))
         q = self.rope(q.permute(0, 2, 1, 3), position, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
         k = self.rope(k.permute(0, 2, 1, 3), position, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
 
-        # Append the new K/V to the cache (per-group; K already RoPE'd).
-        cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+1, hd)
-        cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+1, hd)
+        # Append the new K/V to the cache — or, in MLA mode, the latent c
+        # (B, L, t+1); K/V are reconstructed from the whole cached latent.
+        if self.mla_latent_dim > 0:
+            assert c is not None
+            cache["c"] = torch.cat([cache["c"], c.transpose(1, 2)], dim=2)  # (B, L, t+1)
+            c_cache = cache["c"].transpose(1, 2)  # (B, t+1, L)
+            assert self.k_up_proj is not None and self.v_up_proj is not None
+            k = self.k_up_proj(c_cache).view(batch_size, -1, G, hd).permute(0, 2, 1, 3)  # (B, G, t+1, hd)
+            v = self.v_up_proj(c_cache).view(batch_size, -1, G, hd).permute(0, 2, 1, 3)
+            k = self.rope(k.permute(0, 2, 1, 3), 0, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
+        else:
+            cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+1, hd)
+            cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+1, hd)
+            k, v = cache["k"], cache["v"]
 
         # GQA: broadcast each cached K/V group to its H // G query heads.
-        k_full, v_full = cache["k"], cache["v"]
+        k_full, v_full = k, v
         if G != H:
             k_full = k_full.repeat_interleave(H // G, dim=1)  # (B, H, t+1, hd)
             v_full = v_full.repeat_interleave(H // G, dim=1)  # (B, H, t+1, hd)
 
+        # SWA (ADR 0008) decode: slice the last w+1 cache rows — O(w) work.
+        if self.swa_window > 0:
+            start = max(0, k_full.shape[2] - (self.swa_window + 1))
+            k_full, v_full = k_full[:, :, start:], v_full[:, :, start:]
+
         # Single query row: causal masking is implicit (the query attends to
-        # every cached position, all of which precede it).
+        # every visible cached position, all of which precede it).
         ctx = F.scaled_dot_product_attention(q, k_full, v_full)  # (B, H, 1, hd)
 
         # Merge heads: (B, H, 1, hd) → (B, 1, H*hd) → project to (B, 1, D)
@@ -407,8 +485,16 @@ class MultiHeadAttention(nn.Module):
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
 
         q = self.q_proj(x)  # (B, c, H*hd)
-        k = self.k_proj(x)  # (B, c, G*hd)
-        v = self.v_proj(x)  # (B, c, G*hd)
+        if self.mla_latent_dim > 0:
+            assert self.kv_down_proj is not None and self.k_up_proj is not None and self.v_up_proj is not None
+            c_lat = self.kv_down_proj(x)  # (B, c, L) — the latent write
+            k = self.k_up_proj(c_lat)  # (B, c, G*hd)
+            v = self.v_up_proj(c_lat)  # (B, c, G*hd)
+        else:
+            assert self.k_proj is not None and self.v_proj is not None
+            c_lat = None
+            k = self.k_proj(x)  # (B, c, G*hd)
+            v = self.v_proj(x)  # (B, c, G*hd)
 
         q = q.view(B, c, H, hd).permute(0, 2, 1, 3)  # (B, H, c, hd)
         k = k.view(B, c, G, hd).permute(0, 2, 1, 3)  # (B, G, c, hd)
@@ -418,12 +504,23 @@ class MultiHeadAttention(nn.Module):
         q = self.rope(q.permute(0, 2, 1, 3), position, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
         k = self.rope(k.permute(0, 2, 1, 3), position, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
 
-        # Append the chunk's per-group K/V to the cache.
-        cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+c, hd)
-        cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+c, hd)
+        # Append the chunk's K/V — or, in MLA mode, the latent c (B, L, t+c);
+        # K/V are reconstructed from the whole cached latent.
+        if self.mla_latent_dim > 0:
+            assert c_lat is not None and self.k_up_proj is not None and self.v_up_proj is not None
+            cache["c"] = torch.cat([cache["c"], c_lat.transpose(1, 2)], dim=2)  # (B, L, t+c)
+            c_cache = cache["c"].transpose(1, 2)  # (B, t+c, L)
+            assert self.k_up_proj is not None and self.v_up_proj is not None
+            k = self.k_up_proj(c_cache).view(B, -1, G, hd).permute(0, 2, 1, 3)  # (B, G, t+c, hd)
+            v = self.v_up_proj(c_cache).view(B, -1, G, hd).permute(0, 2, 1, 3)
+            k = self.rope(k.permute(0, 2, 1, 3), 0, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
+        else:
+            cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+c, hd)
+            cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+c, hd)
+            k, v = cache["k"], cache["v"]
 
         # GQA: broadcast each cached K/V group to its H // G query heads.
-        k_full, v_full = cache["k"], cache["v"]
+        k_full, v_full = k, v
         if G != H:
             k_full = k_full.repeat_interleave(H // G, dim=1)  # (B, H, t+c, hd)
             v_full = v_full.repeat_interleave(H // G, dim=1)  # (B, H, t+c, hd)
@@ -434,6 +531,12 @@ class MultiHeadAttention(nn.Module):
         # bool attn_mask convention.)
         allow = torch.ones((c, t + c), dtype=torch.bool, device=x.device)
         allow[:, t:] = torch.tril(torch.ones((c, c), dtype=torch.bool, device=x.device))
+        if self.swa_window > 0:
+            # SWA (ADR 0008): also mask columns whose absolute position is
+            # more than w behind the row's absolute position.
+            row_abs = position + torch.arange(c, device=x.device)[:, None]  # (c, 1)
+            col_abs = torch.arange(t + c, device=x.device)[None, :]  # (1, t+c)
+            allow = allow & ((row_abs - col_abs) <= self.swa_window)
 
         # One masked batched SDPA call over the whole chunk.
         ctx = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=allow)  # (B, H, c, hd)
@@ -812,10 +915,15 @@ class TransformerBlock(nn.Module):
                         n_heads=H,
                         n_groups=G,
                         rope_dim=config.rope_dim,
+                        swa_window=config.swa_window,
+                        mla_latent_dim=config.mla_latent_dim if config.has_mla_at(i) else 0,
                         q_proj=None if p is None else p[Keys.attn(i, m, Attn.Q_PROJ)],
-                        k_proj=None if p is None else p[Keys.attn(i, m, Attn.K_PROJ)],
-                        v_proj=None if p is None else p[Keys.attn(i, m, Attn.V_PROJ)],
+                        k_proj=None if p is None else p.get(Keys.attn(i, m, Attn.K_PROJ)),
+                        v_proj=None if p is None else p.get(Keys.attn(i, m, Attn.V_PROJ)),
                         o_proj=None if p is None else p[Keys.attn(i, m, Attn.O_PROJ)],
+                        kv_down_proj=None if p is None else p.get(Keys.attn(i, m, Attn.KV_DOWN_PROJ)),
+                        k_up_proj=None if p is None else p.get(Keys.attn(i, m, Attn.K_UP_PROJ)),
+                        v_up_proj=None if p is None else p.get(Keys.attn(i, m, Attn.V_UP_PROJ)),
                     )
                 )
         self.mixers: list[MultiHeadAttention | GatedDeltaNet] = mixers
@@ -1100,6 +1208,11 @@ class TorchModel(nn.Module):
                 if self.config.mixer_kind(m) == "d":
                     # DeltaNet mixer (ADR 0007): recurrent state + rollback snapshots.
                     layer_caches.append({"s": torch.zeros(B, H, hd, hd, device=device, dtype=dtype), "s_hist": []})
+                elif self.config.has_mla_at(_i):
+                    # MLA (ADR 0009): the cache stores ONE latent c per token
+                    # — (B, L, 0) — instead of per-group K/V.
+                    L = self.config.mla_latent_dim
+                    layer_caches.append({"c": torch.zeros(B, L, 0, device=device, dtype=dtype)})
                 else:
                     layer_caches.append(
                         {
@@ -1148,6 +1261,9 @@ class TorchModel(nn.Module):
                     mixer_cache["s_hist"] = [
                         mixer_state["s_hist"][:, :, j] for j in range(mixer_state["s_hist"].shape[2])
                     ]  # type: ignore[assignment]
+                elif self.config.has_mla_at(i):
+                    # MLA (ADR 0009): backfill the latent cache (B, L, S).
+                    mixer_cache["c"] = mixer_state["c_group"].transpose(1, 2)  # (B, L, S)
                 else:
                     mixer_cache["k"] = mixer_state["k_group"]  # (B, G, S, hd)
                     mixer_cache["v"] = mixer_state["v_group"]  # (B, G, S, hd)
@@ -1231,13 +1347,29 @@ class TorchModel(nn.Module):
                     t[Keys.deltanet(layer_idx, m, DeltaNet.DT_BIAS)] = mixer.dt_bias
                     t[Keys.deltanet(layer_idx, m, DeltaNet.NORM)] = mixer.norm.weight
                 else:
-                    for proj, module in (
-                        (Attn.Q_PROJ, mixer.q_proj),
-                        (Attn.K_PROJ, mixer.k_proj),
-                        (Attn.V_PROJ, mixer.v_proj),
-                        (Attn.O_PROJ, mixer.o_proj),
-                    ):
-                        t[Keys.attn(layer_idx, m, proj)] = module.weight
+                    if self.config.has_mla_at(layer_idx):
+                        assert (
+                            mixer.kv_down_proj is not None
+                            and mixer.k_up_proj is not None
+                            and mixer.v_up_proj is not None
+                        )
+                        for attr, module in (
+                            (Attn.Q_PROJ, mixer.q_proj),
+                            (Attn.O_PROJ, mixer.o_proj),
+                            (Attn.KV_DOWN_PROJ, mixer.kv_down_proj),
+                            (Attn.K_UP_PROJ, mixer.k_up_proj),
+                            (Attn.V_UP_PROJ, mixer.v_up_proj),
+                        ):
+                            t[Keys.attn(layer_idx, m, attr)] = module.weight
+                    else:
+                        assert mixer.k_proj is not None and mixer.v_proj is not None
+                        for proj, module in (
+                            (Attn.Q_PROJ, mixer.q_proj),
+                            (Attn.K_PROJ, mixer.k_proj),
+                            (Attn.V_PROJ, mixer.v_proj),
+                            (Attn.O_PROJ, mixer.o_proj),
+                        ):
+                            t[Keys.attn(layer_idx, m, proj)] = module.weight
             mlp = block.mlp
             if isinstance(mlp, MixtureOfExperts):
                 t[Keys.moe_gate(layer_idx)] = mlp.gate.weight

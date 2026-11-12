@@ -27,18 +27,19 @@ documented pipeline order (docs/math/training-pipeline.md):
 7. Drafter sidecars: re-distilled from the RL targets
    (``scripts/train_drafters`` — ADR 0003's per-target contract).
 
-The two families are TOTAL-PARAM-MATCHED but spend the budget
-differently (ADR 0005; the production pairing — Qwen3-32B dense is
-DEEPER than the 30B-A3B MoE): the dense model runs **6 layers** with a
-thin FFN (`expert_dim=96` = 1.5·D — 275,264 params, all active); the
-MoE twin (`--variant moe`) runs **3 layers** with the wide expert bank
-(E=8 routed + 1 always-on shared expert at dim 32, top-k=1 — 282,560
-total ≈ 1.03× dense, but only 153,536 ACTIVE per token, ~54%) — the
-total-vs-active trade the page renders.
+The two families spend their budget differently (ADR 0005; the
+production pairing — Qwen3-32B dense is DEEPER than the 30B-A3B MoE):
+the dense model runs **8 layers** with a thin FFN (`expert_dim=48` =
+0.75·D — 751,776 params, all active); the MoE twin (`--variant moe`)
+runs **4 layers** with the wide expert bank (E=10 routed + 1 always-on
+shared expert at dim 20, top-k=1 — 543,344 total, 405,360 ACTIVE per
+token, ~75%) — the total-vs-active trade the page renders. Both use
+the v7 group-of-2 MLA/MHA interleave (ADR 0011), so the two families
+carry the identical global-mixer pattern.
 
-Every checkpoint config.json carries ``"pipeline": 4`` — the staleness
+Every checkpoint config.json carries ``"pipeline": 7`` — the staleness
 marker ``scripts/learning.py`` checks (a missing/older marker retrains;
-the bump 3→4 marks the depth parity change).
+the bump 6→7 marks the ADR 0011 geometry change: MoE 4L / dense 8L).
 
 Everything stays tiny: 512-token vocab, a few thousand
 sequences — minutes per stage on the Jetson. Outputs under
@@ -75,20 +76,26 @@ RESOURCE = _project_root / "resource"
 N_STORIES = 4000
 BATCH = 32
 VOCAB = 512
-PIPELINE_MARKER = 4  # the config.json staleness marker (ADRs 0004/0005; 4 = depth parity)
+PIPELINE_MARKER = 7  # v7: ADR 0011 geometry — MoE 4L / dense 8L, same MLA/MHA interleave
 CTX = 128
 
 # Stage order; ``--stage`` resumes AT a named stage (all later stages run).
 STAGES = ["base", "sft", "tool", "think", "rl", "drafters"]
 
 
-def _corpus_texts() -> list[str]:
+def _corpus_texts() -> list[str]:  # noqa: C901 — mixed-corpus fan-out
     """The mixed corpus the BPE trainer sees (stories, code, tool, GSM8K)."""
     texts: list[str] = []
     for story in json.loads((RESOURCE / "tinystories_train.json").read_text())[:N_STORIES]:
         texts.append(story)
     for row in json.loads((RESOURCE / "code_instructions.json").read_text()):
         texts.append(f"{row['instruction']}\n{row['output']}")
+    # Python corpus (was unused on disk): ~5.2K rows of real Python code —
+    # the coding-question coverage the Java-heavy code_instructions lacks.
+    py = RESOURCE / "corpus_python.json"
+    if py.is_file():
+        for snippet in json.loads(py.read_text()):
+            texts.append(str(snippet)[:2000])
     for row in json.loads((RESOURCE / "tool_calls.json").read_text()):
         for msg in row["messages"]:
             texts.append(msg.get("content") or "")
@@ -150,6 +157,17 @@ def load_corpus(tok: Tokenizer) -> tuple[list[list[int]], list[list[int]], list[
 
     code_rows = json.loads((RESOURCE / "code_instructions.json").read_text())
     code = [enc(f"```output{r['instruction']}```input{r['output']}") for r in code_rows]
+    # Python corpus: instruction-wrapped so the model learns the same
+    # ```output → ```input shape on real Python (coding-question coverage).
+    py = RESOURCE / "corpus_python.json"
+    n_py = 0
+    if py.is_file():
+        for snippet in json.loads(py.read_text())[:3000]:
+            s = str(snippet)
+            if len(s) < 40:
+                continue
+            code.append(enc(f"```outputWrite a Python function or snippet for: {s[:80].splitlines()[0]}```input{s}"))
+            n_py += 1
     code = [s for s in code if len(s) > 8]
 
     tool_rows = json.loads((RESOURCE / "tool_calls.json").read_text())
@@ -173,7 +191,7 @@ def load_corpus(tok: Tokenizer) -> tuple[list[list[int]], list[list[int]], list[
                 body = "<|tool_response|>" + (msg.get("content") or "")
                 tool.append(enc(body))
     tool = [s for s in tool if len(s) > 8]
-    print(f"corpus: {len(stories)} stories, {len(code)} code rows, {len(tool)} tool rows")
+    print(f"corpus: {len(stories)} stories, {len(code)} code rows ({n_py} python), {len(tool)} tool rows")
     return stories, code, tool
 
 
@@ -234,7 +252,7 @@ def train(model: torch.nn.Module, seqs: list[list[int]], epochs: int, lr: float,
             opt.zero_grad()
             ls.append(float(loss.detach()))
         losses_all.append(float(np.mean(ls)))
-        print(f"  {tag} epoch {ep}: loss={losses_all[-1]:.4f}")
+        print(f"  {tag} epoch {ep}: loss={losses_all[-1]:.4f}", flush=True)
     return losses_all
 
 
@@ -313,6 +331,11 @@ def run_rl_stage(think_dir: Path, out_dir: Path, tok: Tokenizer, args: argparse.
         "0.8",
         "--top-k",
         "20",
+        # ADR 0010: multi-turn tool-use RL (calculator env, turn-level
+        # advantage) — the v5 pipeline's default RL stage.
+        "--multi-turn",
+        "--max-turns",
+        "2",
         "--kl-beta",
         "0.04",
         "--lr",
@@ -328,8 +351,13 @@ def run_rl_stage(think_dir: Path, out_dir: Path, tok: Tokenizer, args: argparse.
 
 def run_drafter_stage(target_dir: Path) -> None:
     """Re-distill the drafter sidecars from the RL target (ADR 0003: every
-    served checkpoint needs its OWN sidecars, distilled from it)."""
-    subprocess.run([sys.executable, "-m", "scripts.train_drafters", "--model", str(target_dir)], check=True)
+    served checkpoint needs its OWN sidecars, distilled from it).
+
+    ``--force`` because the sidecar format is pipeline-version-agnostic:
+    a v4 sidecar would be silently reused for a v5 target (the drafter keys
+    on the target's config dims, which changed with MLA) — always retrain
+    when the pipeline marker moved."""
+    subprocess.run([sys.executable, "-m", "scripts.train_drafters", "--model", str(target_dir), "--force"], check=True)
 
 
 def main() -> int:
@@ -338,7 +366,7 @@ def main() -> int:
         "--variant",
         choices=["dense", "moe"],
         default="dense",
-        help="dense: plain SwiGLU FFN; moe: E=8 routed + 1 shared expert, expert_dim=32 (ADR 0005)",
+        help="dense: plain SwiGLU FFN; moe: E=10 routed + 1 shared expert, expert_dim=20 (ADR 0005, v7 geometry)",
     )
     parser.add_argument("--stage", choices=STAGES, default="base", help="Resume AT this stage (later stages run too)")
     parser.add_argument("--epochs", type=int, default=0, help="Override the per-SFT-stage epoch counts (quick smoke)")
@@ -361,26 +389,41 @@ def main() -> int:
     tok = train_tokenizer()
     stories, code, tool = load_corpus(tok)
 
-    # The param-matched pair of ADR 0005 — same total budget (~275-283k),
-    # SPENT differently: dense = DEPTH (6 layers, thin FFN 96 = 1.5·D —
-    # the Qwen3-32B shape), MoE = the wide expert bank (3 layers, E=8
-    # routed + 1 always-on shared at dim 32, top-1 — the 30B-A3B shape).
+    # The param-matched pair of ADR 0005 (v7 geometry, ADR 0011 — same
+    # MLA/MHA interleave on both): dense = DEPTH (8 layers, thin FFN 48
+    # = 0.75·D — the Qwen3-32B shape), MoE = the wide expert bank
+    # (4 layers, E=10 routed + 1 always-on shared at dim 20, top-1 —
+    # the 30B-A3B shape).
     cfg = TransformerConfig.from_dict(
         {
             "vocab_size": VOCAB,
             "embed_dim": 64,
             # ADR 0007 hybrid: every block runs 3 Gated DeltaNet mixers + 1
-            # full-attention mixer (the Qwen3-Next 3:1 shape). Geometry stays
-            # param-matched at ~279K total: dense = 6L thin FFN(80), MoE = 3L
-            # with E=10+1 shared at expert_dim=24 (~56% active/token).
-            "n_layers": 3 if moe else 6,
+            # full-attention mixer (the Qwen3-Next 3:1 shape). ADR 0011:
+            # group-of-2 blocks alternate the global mixer (MLA on even
+            # blocks, MHA on odd). Depth is matched so both families carry
+            # the same MLA/MHA interleave: MoE = 4L, dense = 8L.
+            "n_layers": 4 if moe else 8,
             "n_deltanet_sublayers": 3,
             "n_heads": 4,
             "context_length": CTX,
             "seed": 42,
+            # ADR 0008: sliding-window attention on the full-attention mixer
+            # (window 32 of ctx 128 — decode cost O(32) per token).
+            "swa_window": 32,
+            # ADR 0009: MLA latent KV cache (L=16 vs 2·G·hd=128 floats/token
+            # at G=4, hd=16 — an 8× cache cut).
+            "mla_latent_dim": 16,
+            # ADR 0011: group of 2 blocks — even blocks MLA, odd blocks MHA.
+            "mla_group_size": 2,
             "n_experts": 10 if moe else 1,
             "n_shared_experts": 1 if moe else 0,
-            "expert_dim": 24 if moe else 80,
+            # Param-matched at the new 4L/8L depth (ADR 0011 geometry):
+            # MoE E=10+1 shared at expert_dim=20 (~543K — the 30B-A3B
+            # shape); dense 8L thin FFN expert_dim=48 (~752K — deeper stack
+            # carries more total params; the *active-per-token* trade is
+            # what ADR 0005 compares).
+            "expert_dim": 20 if moe else 48,
             "top_k": 1,
             # BF16 AMP: GPU matmuls hit the tensor cores (~2x FP32 on Ampere+);
             # the checkpoint stores FP32 either way (npz has no bf16).
@@ -393,7 +436,7 @@ def main() -> int:
     # ── stage 1: base (English fluency) ─────────────────────────────────
     if start <= 0:
         base = TorchModel(cfg).to(device).train()
-        print(f"stage 1 ({args.variant}): pre-train on stories")
+        print(f"stage 1 ({args.variant}): pre-train on stories", flush=True)
         train(base, stories, epochs=ep, lr=1e-3, tag="base", device=device)
         base.eval()
         save_checkpoint(base, names["base"], tok, cfg)

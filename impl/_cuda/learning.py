@@ -30,7 +30,7 @@ autoregressive decode steps that embed ONLY the new token.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import torch
@@ -191,12 +191,28 @@ def _attention_forward(
     """
     B, S, _ = ln1_out.shape
     H, G, hd = block.n_heads, block.n_groups, block.head_dim
-    Wq, Wk, Wv, Wo = (_w(t) for t in block.attn_projs[mixer_idx])  # float64 display path
+    # MLA (ADR 0009/0011): the attention mixer's projs tuple is
+    # (q, kv_down, k_up, v_up, o) on MLA blocks, (q, k, v, o) on MHA blocks.
+    projs = block.attn_projs[mixer_idx]
+    mla = block.config.has_mla_at(block.layer_index)
+    Wk = Wv = Wkvd = Wku = Wvu = None
+    if mla:
+        Wq, Wkvd, Wku, Wvu, Wo = (_w(t) for t in projs)
+    else:
+        Wq, Wk, Wv, Wo = (_w(t) for t in projs)
 
     # Projections: (B, S, D) → (B, S, ·)
     q_pre = ln1_out @ Wq  # (B, S, H·hd)
-    k_pre = ln1_out @ Wk  # (B, S, G·hd)
-    v_pre = ln1_out @ Wv  # (B, S, G·hd)
+    if mla:
+        assert Wkvd is not None and Wku is not None and Wvu is not None
+        c_pre = ln1_out @ Wkvd  # (B, S, L) — the latent
+        k_pre = c_pre @ Wku  # (B, S, G·hd) — rebuilt K
+        v_pre = c_pre @ Wvu  # (B, S, G·hd) — rebuilt V
+    else:
+        assert Wk is not None and Wv is not None
+        c_pre = None
+        k_pre = ln1_out @ Wk  # (B, S, G·hd)
+        v_pre = ln1_out @ Wv  # (B, S, G·hd)
     q_rope_in = q_pre.view(B, S, H, hd).permute(0, 2, 1, 3)  # (B, H, S, hd) pre-RoPE
     k_rope_in = k_pre.view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd) pre-RoPE
     v = v_pre.view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd)
@@ -206,12 +222,21 @@ def _attention_forward(
     k = _rope(k_rope_in.permute(0, 2, 1, 3), position, block.rope_dim).permute(0, 2, 1, 3)  # (B, G, S, hd)
 
     if cache is not None:
-        # Decode: append this token's K/V to the block's cache, then attend
-        # over the WHOLE cache (no mask — all cached rows are in the past).
-        cache["k"] = torch.cat([cache["k"], k.to(cache["k"].device, cache["k"].dtype)], dim=2)  # (B, G, t, hd)
-        cache["v"] = torch.cat([cache["v"], v.to(cache["v"].device, cache["v"].dtype)], dim=2)  # (B, G, t, hd)
-        k_all = cache["k"].detach().cpu().to(torch.float64)
-        v_all = cache["v"].detach().cpu().to(torch.float64)  # display path reads CPU f64 copies
+        # Decode: append this token's K/V — or, in MLA mode, the latent c —
+        # then attend over the whole cache (no mask — all cached rows precede).
+        if mla:
+            assert c_pre is not None
+            cache["c"] = torch.cat([cache["c"], c_pre.transpose(1, 2)], dim=2)  # (B, L, t+1)
+            c_cache = cache["c"].detach().cpu().to(torch.float64).transpose(1, 2)  # (B, t+1, L)
+            assert Wku is not None and Wvu is not None
+            k_all = (c_cache @ Wku).view(B, -1, G, hd).permute(0, 2, 1, 3)  # (B, G, t+1, hd) pre-RoPE
+            v_all = (c_cache @ Wvu).view(B, -1, G, hd).permute(0, 2, 1, 3)
+            k_all = _rope(k_all.permute(0, 2, 1, 3), 0, block.rope_dim).permute(0, 2, 1, 3)
+        else:
+            cache["k"] = torch.cat([cache["k"], k.to(cache["k"].device, cache["k"].dtype)], dim=2)  # (B, G, t, hd)
+            cache["v"] = torch.cat([cache["v"], v.to(cache["v"].device, cache["v"].dtype)], dim=2)  # (B, G, t, hd)
+            k_all = cache["k"].detach().cpu().to(torch.float64)
+            v_all = cache["v"].detach().cpu().to(torch.float64)  # display path reads CPU f64 copies
     else:
         k_all, v_all = k, v
 
@@ -219,18 +244,28 @@ def _attention_forward(
     # with the NumPy record, which stores the GQA-expanded heads).
     k_r = k_all.repeat_interleave(H // G, dim=1) if G != H else k_all  # (B, H, t, hd)
     v_r = v_all.repeat_interleave(H // G, dim=1) if G != H else v_all  # (B, H, t, hd)
+    # SWA (ADR 0008) decode: slice the last w+1 cache rows — O(w) work.
+    w = block.config.swa_window
+    if cache is not None and w > 0:
+        start = max(0, k_r.shape[2] - (w + 1))
+        k_r, v_r = k_r[:, :, start:], v_r[:, :, start:]
     k_x = k.repeat_interleave(H // G, dim=1) if G != H else k  # (B, H, S, hd) this step's K
     v_x = v.repeat_interleave(H // G, dim=1) if G != H else v  # (B, H, S, hd)
-    t = k_r.shape[2]
 
     # Raw scores + mask (recomputed; the record shows pre/post mask)
     scale = math.sqrt(hd)  # the scores DIVISOR
     scores = (q @ k_r.transpose(-1, -2)) / scale  # (B, H, S, t)
     if cache is None:
         mask = torch.triu(torch.ones(S, S, dtype=torch.bool), diagonal=1)  # True where j > i
+        if block.config.swa_window > 0:
+            # SWA (ADR 0008): also mask (i - j) > window.
+            rows = torch.arange(S)[:, None]
+            cols = torch.arange(S)[None, :]
+            mask = mask | ((rows - cols) > block.config.swa_window)
         neg = torch.tensor(-1e4, dtype=ln1_out.dtype)
         scores_masked = torch.where(mask, neg, scores)  # (B, H, S, S)
     else:
+        t = k_r.shape[2]
         mask = torch.zeros(S, t, dtype=torch.bool)  # nothing masked in decode
         scores_masked = scores  # (B, H, S, t)
 
@@ -238,7 +273,7 @@ def _attention_forward(
     ctx = (attn_w @ v_r).permute(0, 2, 1, 3).reshape(B, S, H * hd)  # (B, S, H·hd)
     attn_out = ctx @ Wo  # (B, S, D)
 
-    return attn_out, {
+    rec = {  # type: ignore[assignment]
         "q_pre": arr(q_pre),  # (B, S, H·hd) — ln1_out @ Wq
         "k_pre": arr(k_pre),  # (B, S, G·hd)
         "v_pre": arr(v_pre),  # (B, S, G·hd)
@@ -259,7 +294,13 @@ def _attention_forward(
         # K/V are stored (GQA-expanded to H heads so the page can browse heads).
         "k_cache": arr(k_r),  # (B, H, t, hd)
         "v_cache": arr(v_r),  # (B, H, t, hd)
+        "c_cache": arr(cache["c"].detach().cpu().to(torch.float64).transpose(1, 2).unsqueeze(1))
+        if cache is not None and "c" in cache
+        else (arr(c_pre.unsqueeze(1)) if c_pre is not None else None),  # type: ignore[union-attr]
+        "c_pre": arr(c_pre) if c_pre is not None else None,
+        "swa_window": block.config.swa_window,
     }
+    return attn_out, cast("AttnRecord", rec)
 
 
 def _init_kv_cache(
@@ -619,9 +660,16 @@ def generate_with_records(
                 layer_caches.append({"s": s0, "s_hist": hist})
             else:
                 r = rec["blocks"][i]["mixers"][m]["attn"]
-                # (as in the NumPy track) the cache is initialized from the recorded
-                # pre-RoPE projections, so the display and the state agree exactly.
-                layer_caches.append(_init_kv_cache(block, torch.tensor(r["k_pre"]), torch.tensor(r["v_pre"]), pos0, m))
+                if block.config.has_mla_at(i):
+                    # MLA (ADR 0009/0011): the step cache is the latent c (B, L, S).
+                    c0 = torch.tensor(r["c_pre"], dtype=torch.float64)  # (B, S, L)
+                    layer_caches.append({"c": c0.transpose(1, 2).contiguous()})  # (B, L, S)
+                else:
+                    # (as in the NumPy track) the cache is initialized from the recorded
+                    # pre-RoPE projections, so the display and the state agree exactly.
+                    layer_caches.append(
+                        _init_kv_cache(block, torch.tensor(r["k_pre"]), torch.tensor(r["v_pre"]), pos0, m)
+                    )
         caches.append(layer_caches)
 
     # ---- Steps 1..n: autoregressive decode, one new token per step

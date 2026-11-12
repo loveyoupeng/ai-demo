@@ -204,6 +204,9 @@ class SpeculativeGenerator:
                     # 0..n-1 (like the K/V slice :n) → restore s_hist[n-1].
                     mixer["s"] = mixer["s_hist"][n - 1].clone()
                     del mixer["s_hist"][n:]
+                elif "c" in mixer:
+                    # MLA (ADR 0009): trim the latent cache rows.
+                    mixer["c"] = mixer["c"][:, :, :n]
                 else:
                     mixer["k"] = mixer["k"][:, :, :n]
                     mixer["v"] = mixer["v"][:, :, :n]

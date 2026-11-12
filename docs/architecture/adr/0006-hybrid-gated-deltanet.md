@@ -64,7 +64,7 @@ through DeltaNet layers and snapshots S per position so spec rollback
   "S state"; records carry a `deltanet` block key beside `attn`.
 - BF16 is the running serving dtype on the GPU tracks (torch/triton/cuda);
   NumPy stays float64/float32; checkpoints stay FP32 on disk.
-- Demo geometry stays param-matched at ~279K total: dense 6L FFN=80 vs MoE
-  3L E=10+1 shared @ dim 24 (`dddF` on both).
+- Demo geometry (v7, ADR 0011): dense 8L FFN=48 vs MoE 4L E=10+1 shared
+  @ dim 20 (`dddF` on both) — same MLA/MHA interleave on both families.
 - Drafters (ADR 0003) are untouched: they consume `forward_chunk`'s
   `(logits, x_final)`, and the sidecar format is unchanged.

@@ -38,15 +38,18 @@ production pairing's shape (Qwen3-32B dense is DEEPER — 64 layers —
 than the 30B-A3B MoE's 48; the dense model buys depth, the MoE buys the
 expert bank):
 
-1. **Dense: 6 layers, thin FFN** (`expert_dim=96` = 1.5·D):
-   275,264 total = 275,264 active. Depth is the dense model's edge.
-2. **MoE: 3 layers, wide expert bank** (E=8 routed + 1 always-on shared
-   at expert_dim=32, top_k=1): 283K-A154K — 282,560 total (1.03× dense)
-   but only 153,536 ACTIVE per token (~54% of its own parameters) — the
-   routed slice is 1-of-8 experts (32-wide) + the shared expert. The
+1. **Dense: 8 layers, thin FFN** (`expert_dim=48` = 0.75·D):
+   751,776 total = 751,776 active. Depth is the dense model's edge.
+2. **MoE: 4 layers, wide expert bank** (E=10 routed + 1 always-on shared
+   at expert_dim=20, top_k=1): 543K-A405K — 543,344 total but only
+   405,360 ACTIVE per token (~75% of its own parameters) — the
+   routed slice is 1-of-10 experts (20-wide) + the shared expert. The
    total-vs-active contrast IS the lesson, at a scale the page renders.
+   (v7 revision, ADR 0011: the depth split moved to 8 vs 4 so BOTH
+   families carry the same group-of-2 MLA/MHA interleave; the
+   total-vs-active story is unchanged.)
    - 16-dim experts (a 15-expert alternative) would have been more
-     A3B-like in ratio but too degenerate to learn at D=64; 8×32 is the
+     A3B-like in ratio but too degenerate to learn at D=64; 10×20 is the
      middle that keeps both models trainable.
 3. **The page shows the trade explicitly**: `/api/model` gains
    `n_params_active` next to `n_params`, and the badge line renders
@@ -78,9 +81,11 @@ expert bank):
   checkpoints carry `"pipeline": 3` and go stale; the marker is now 4);
   the registry/schema are untouched (`expert_dim`/`n_layers` are already
   config knobs honored by all four tracks).
-- Router scores stay (S, 8) — small enough to render per cell; the
-  dense diagram now shows 6 blocks vs the MoE's 3, which is itself half
-  the lesson (the same budget, two shapes).
+- Router scores stay (S, 10) — small enough to render per cell; the
+  dense diagram now shows 8 blocks vs the MoE's 4, which is itself half
+  the lesson (the same budget shape, two depths — v7 keeps both at the
+  same MLA/MHA interleave, so the diagram difference is pure FFN
+  geometry).
 - The diagram auto-adjusts (layer and expert counts are read from
   config), and `/api/model`'s `n_params_active` makes the trade visible
   in the badge line.

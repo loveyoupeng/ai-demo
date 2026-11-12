@@ -83,6 +83,13 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--max-len", type=int, default=128)
+    ap.add_argument(
+        "--multi-turn",
+        action="store_true",
+        help="ADR 0010: multi-turn tool-use rollouts (calculator env, turn-level advantage); "
+        "default is the single-turn ADR 0004 loop",
+    )
+    ap.add_argument("--max-turns", type=int, default=2, help="Tool turns per trajectory in --multi-turn mode")
     args = ap.parse_args()
 
     # The checkpoint carries its own config; the tokenizer must match.
@@ -151,7 +158,14 @@ def _run_numpy(args, cfg, items, decode, rng) -> tuple[dict, list[dict[str, floa
     opt = AdamW(lr=args.lr)
     curve: list[dict[str, float]] = []
     for it in range(args.iterations):
-        stats = grpo_iteration_scored(model, reference, items, decode, grpo, opt, rng, log_every=10)
+        if args.multi_turn:
+            from impl._np.rl import agentic_grpo_iteration
+
+            stats = agentic_grpo_iteration(
+                model, reference, items, decode, grpo, opt, rng, max_turns=args.max_turns, log_every=10
+            )
+        else:
+            stats = grpo_iteration_scored(model, reference, items, decode, grpo, opt, rng, log_every=10)
         curve.append(stats)
         _print(it, args.iterations, stats)
     return {k: v for k, v in model.get_all_parameters().items()}, curve

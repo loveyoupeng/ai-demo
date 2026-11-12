@@ -214,6 +214,7 @@ class CuTransformerBlock:
         D, H, G = config.embed_dim, config.n_heads, config.kv_heads
         hd, FF, E = config.head_dim, config.expert_dim, config.n_experts
         i = layer_index
+        self.layer_index = layer_index
         # Short alias; None → the training path. (``p`` is taken by the
         # per-tensor ``requires_grad_`` loops below.)
         ckpt = params
@@ -236,7 +237,9 @@ class CuTransformerBlock:
         # ── Mixing sublayers (ADR 0007): n_deltanet_sublayers Gated DeltaNet
         # mixers + ONE full-attention mixer (plain projections, no bias) ──
         self.mixers: list = []  # CuGatedDeltaNet or None (None = attention mixer)
-        self.attn_projs: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        self.attn_projs: list[
+            tuple[torch.Tensor, ...]
+        ] = []  # 4-tuple classic (q,k,v,o); 5-tuple MLA (q,kv_down,k_up,v_up,o)
         for m in range(config.n_mixers()):
             if config.mixer_kind(m) == "d":
                 # torch nn.Linear init draws from the GLOBAL RNG — reseed it per
@@ -259,12 +262,23 @@ class CuTransformerBlock:
             else:
                 self.mixers.append(None)
                 q = _init_weight(D, H * hd, seed=seed + 2 + 4 * m)
-                k = _init_weight(D, G * hd, seed=seed + 3 + 4 * m)
-                v = _init_weight(D, G * hd, seed=seed + 4 + 4 * m)
                 o = _init_weight(H * hd, D, seed=seed + 5 + 4 * m)
-                for p in (q, k, v, o):
-                    p.requires_grad_(True)
-                self.attn_projs.append((q, k, v, o))
+                if config.has_mla_at(self.layer_index):
+                    # MLA (ADR 0009): latent factorization kv_down/k_up/v_up
+                    # replaces k/v; the cache stores only the latent c.
+                    L = config.mla_latent_dim
+                    kvd = _init_weight(D, L, seed=seed + 3 + 4 * m)
+                    ku = _init_weight(L, G * hd, seed=seed + 4 + 4 * m)
+                    vu = _init_weight(L, G * hd, seed=seed + 6 + 4 * m)
+                    for p in (q, o, kvd, ku, vu):
+                        p.requires_grad_(True)
+                    self.attn_projs.append((q, kvd, ku, vu, o))  # 5-tuple in MLA mode
+                else:
+                    k = _init_weight(D, G * hd, seed=seed + 3 + 4 * m)
+                    v = _init_weight(D, G * hd, seed=seed + 4 + 4 * m)
+                    for p in (q, k, v, o):
+                        p.requires_grad_(True)
+                    self.attn_projs.append((q, k, v, o))
 
         if config.has_moe():
             # ── MoE: router + SwiGLU experts ───────────────────────────
@@ -316,6 +330,14 @@ class CuTransformerBlock:
                     # DeltaNet mixer: the sublayer object already injected its own
                     # slice at construction; the q/k/v/o aliases share that storage.
                     continue
+                if self.config.has_mla_at(self.layer_index):
+                    q, kvd, ku, vu, o = self.attn_projs[m]
+                    _copy_in_place(q, ckpt[Keys.attn(i, m, Attn.Q_PROJ)])
+                    _copy_in_place(o, ckpt[Keys.attn(i, m, Attn.O_PROJ)])
+                    _copy_in_place(kvd, ckpt[Keys.attn(i, m, Attn.KV_DOWN_PROJ)])
+                    _copy_in_place(ku, ckpt[Keys.attn(i, m, Attn.K_UP_PROJ)])
+                    _copy_in_place(vu, ckpt[Keys.attn(i, m, Attn.V_UP_PROJ)])
+                    continue
                 q, k, v, o = self.attn_projs[m]
                 _copy_in_place(q, ckpt[Keys.attn(i, m, Attn.Q_PROJ)])
                 _copy_in_place(k, ckpt[Keys.attn(i, m, Attn.K_PROJ)])
@@ -345,38 +367,56 @@ class CuTransformerBlock:
             return self._moe_forward(h, device)
         return swiglu_ffn(h, self.gate_proj.to(device), self.up_proj.to(device), self.down_proj.to(device))
 
+    def _attn_kv(
+        self, xn: torch.Tensor, device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        """Project xn into (q, k, c, v) head layouts for the attention mixer.
+
+        Classic mode (4-tuple attn_projs): q/k/v from Wq/Wk/Wv.
+        MLA mode (ADR 0009, 5-tuple): c = xn @ W_kv_down is returned for the
+        cache; k = c @ W_k_up, v = c @ W_v_up are reconstructed.
+        Shapes: q (B, S, H, hd), k (B, S, G, hd), v (B, S, G, hd), c (B, S, L).
+        """
+        B, S, _D = xn.shape
+        H, G, hd = self.n_heads, self.n_groups, self.head_dim
+        projs = self.attn_projs[-1]
+        if self.config.has_mla_at(self.layer_index):
+            Wq, Wkvd, Wku, Wvu, _Wo = (t.to(device) for t in projs)
+            q = (xn @ Wq).view(B, S, H, hd)
+            c = xn @ Wkvd  # (B, S, L) — the latent
+            k = (c @ Wku).view(B, S, G, hd)
+            v = (c @ Wvu).view(B, S, G, hd)
+            return q, k, c, v
+        Wq, Wk, Wv, _Wo = (t.to(device) for t in projs)
+        q = (xn @ Wq).view(B, S, H, hd)
+        k = (xn @ Wk).view(B, S, G, hd)
+        v = (xn @ Wv).view(B, S, G, hd)
+        return q, k, None, v
+
     def _attn_forward(self, xn: torch.Tensor, position: int) -> torch.Tensor:
         """Full-attention mixer's full-sequence forward (CUDA SDPA path)."""
         B, S, _D = xn.shape
         device = xn.device
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
-        Wq, Wk, Wv, Wo = (t.to(device) for t in self.attn_projs[-1])
-        q = xn @ Wq  # (B, S, H·hd)
-        k = xn @ Wk  # (B, S, G·hd)
-        v = xn @ Wv  # (B, S, G·hd)
-        q = q.view(B, S, H, hd)
-        k = k.view(B, S, G, hd)
-        v = v.view(B, S, G, hd).transpose(1, 2).contiguous()  # (B, G, S, hd)
+        Wo = self.attn_projs[-1][-1].to(device)
+        q, k, _c, v = self._attn_kv(xn, device)
+        v = v.transpose(1, 2).contiguous()  # (B, G, S, hd)
         q = apply_rope(q, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, S, hd)
         k = apply_rope(k, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, S, hd)
         if G != H:
             k = k.repeat_interleave(H // G, dim=1)
             v = v.repeat_interleave(H // G, dim=1)
-        attn = cuda_sdp_attention(q, k, v, is_causal=True)  # (B, H, S, hd)
+        attn = cuda_sdp_attention(q, k, v, is_causal=True, window=self.config.swa_window)  # (B, H, S, hd)
         return attn.transpose(1, 2).contiguous().view(B, S, H * hd) @ Wo  # (B, S, D)
 
     def _attn_forward_state(self, xn: torch.Tensor, position: int) -> tuple[torch.Tensor, dict]:
-        """Full-attention mixer's forward + the cacheable per-group K/V."""
+        """Full-attention mixer's forward + the cacheable state (K/V or latent c)."""
         B, S, _D = xn.shape
         device = xn.device
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
-        Wq, Wk, Wv, Wo = (t.to(device) for t in self.attn_projs[-1])
-        q = xn @ Wq
-        k = xn @ Wk
-        v = xn @ Wv
-        q = q.view(B, S, H, hd)
-        k = k.view(B, S, G, hd)
-        v = v.view(B, S, G, hd).transpose(1, 2).contiguous()  # (B, G, S, hd)
+        Wo = self.attn_projs[-1][-1].to(device)
+        q, k, c, v = self._attn_kv(xn, device)
+        v = v.transpose(1, 2).contiguous()  # (B, G, S, hd)
         q = apply_rope(q, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, S, hd)
         k = apply_rope(k, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, S, hd)
         k_group, v_group = k, v  # (B, G, S, hd) — the cacheable per-group form
@@ -385,28 +425,48 @@ class CuTransformerBlock:
             v_full = v_group.repeat_interleave(H // G, dim=1)
         else:
             k_full, v_full = k_group, v_group
-        attn = cuda_sdp_attention(q, k_full, v_full, is_causal=True)  # (B, H, S, hd)
+        attn = cuda_sdp_attention(q, k_full, v_full, is_causal=True, window=self.config.swa_window)  # (B, H, S, hd)
         attn_out = attn.transpose(1, 2).contiguous().view(B, S, H * hd) @ Wo  # (B, S, D)
-        return attn_out, {"k_group": k_group, "v_group": v_group}
+        state: dict = {"k_group": k_group, "v_group": v_group}
+        if c is not None:
+            state["c_group"] = c  # (B, S, L) — MLA latent (ADR 0009)
+        return attn_out, state
 
     def _attn_step(self, xn: torch.Tensor, position: int, cache: dict) -> torch.Tensor:
-        """Full-attention mixer's one-token step against the cached K/V."""
+        """Full-attention mixer's one-token step against the cached K/V (or latent c)."""
         B = xn.shape[0]
         device = xn.device
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
-        Wq, Wk, Wv, Wo = (t.to(device) for t in self.attn_projs[-1])
-        q = (xn @ Wq).view(B, 1, H, hd)
-        k = (xn @ Wk).view(B, 1, G, hd)
-        v = (xn @ Wv).view(B, 1, G, hd).transpose(1, 2).contiguous()  # (B, G, 1, hd)
+        Wo = self.attn_projs[-1][-1].to(device)
+        q, k, c, v = self._attn_kv(xn, device)  # (B, 1, ·)
+        v = v.transpose(1, 2).contiguous()  # (B, G, 1, hd)
         q = apply_rope(q, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, 1, hd)
         k = apply_rope(k, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, 1, hd)
-        cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+1, hd)
-        cache["v"] = torch.cat([cache["v"], v], dim=2)
-        k_full, v_full = cache["k"], cache["v"]
+        if self.config.has_mla_at(self.layer_index):
+            # MLA (ADR 0009): append the latent c (B, L, t+1); reconstruct K/V.
+            assert c is not None
+            Wku, Wvu = self.attn_projs[-1][2].to(device), self.attn_projs[-1][3].to(device)
+            cache["c"] = torch.cat([cache["c"], c.transpose(1, 2)], dim=2)  # (B, L, t+1)
+            c_cache = cache["c"].transpose(1, 2)  # (B, t+1, L)
+            k = (c_cache @ Wku).view(B, -1, G, hd).transpose(1, 2).contiguous()  # (B, G, t+1, hd)
+            v = (c_cache @ Wvu).view(B, -1, G, hd).transpose(1, 2).contiguous()
+            k = (
+                apply_rope(k.transpose(1, 2).contiguous(), 0, rope_dim=self.rope_dim).transpose(1, 2).contiguous()
+            )  # (B,S,H,hd) contract; positions 0..t
+        else:
+            cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+1, hd)
+            cache["v"] = torch.cat([cache["v"], v], dim=2)
+            k, v = cache["k"], cache["v"]
+        k_full, v_full = k, v
         if G != H:
             k_full = k_full.repeat_interleave(H // G, dim=1)
             v_full = v_full.repeat_interleave(H // G, dim=1)
-        attn = cuda_sdp_attention(q, k_full, v_full)  # (B, H, 1, hd) — all cached precede the query
+        # SWA (ADR 0008) decode: slice the last w+1 cache rows — O(w) work.
+        w = self.config.swa_window
+        if w > 0:
+            start = max(0, k_full.shape[2] - (w + 1))
+            k_full, v_full = k_full[:, :, start:], v_full[:, :, start:]
+        attn = cuda_sdp_attention(q, k_full, v_full)  # (B, H, 1, hd) — all visible cached precede the query
         return attn.transpose(1, 2).contiguous().view(B, 1, H * hd) @ Wo  # (B, 1, D)
 
     def _attn_chunk(self, xn: torch.Tensor, position: int, cache: dict) -> torch.Tensor:
@@ -414,27 +474,39 @@ class CuTransformerBlock:
         B, c, _D = xn.shape
         device = xn.device
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
-        Wq, Wk, Wv, Wo = (t.to(device) for t in self.attn_projs[-1])
-        q = xn @ Wq
-        k = xn @ Wk
-        v = xn @ Wv
-        q = q.view(B, c, H, hd)
-        k = k.view(B, c, G, hd)
-        v = v.view(B, c, G, hd).transpose(1, 2).contiguous()  # (B, G, c, hd)
+        Wo = self.attn_projs[-1][-1].to(device)
+        q, k, c_lat, v = self._attn_kv(xn, device)  # (B, c, ·)
+        v = v.transpose(1, 2).contiguous()  # (B, G, c, hd)
         q = apply_rope(q, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, H, c, hd)
         k = apply_rope(k, position, rope_dim=self.rope_dim).transpose(1, 2).contiguous()  # (B, G, c, hd)
-        cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+c, hd)
-        cache["v"] = torch.cat([cache["v"], v], dim=2)
-        k_full, v_full = cache["k"], cache["v"]
+        if self.config.has_mla_at(self.layer_index):
+            # MLA (ADR 0009): append the latent c (B, L, t+c); reconstruct K/V.
+            assert c_lat is not None
+            Wku, Wvu = self.attn_projs[-1][2].to(device), self.attn_projs[-1][3].to(device)
+            cache["c"] = torch.cat([cache["c"], c_lat.transpose(1, 2)], dim=2)  # (B, L, t+c)
+            c_cache = cache["c"].transpose(1, 2)  # (B, t+c, L)
+            k = (c_cache @ Wku).view(B, -1, G, hd).transpose(1, 2).contiguous()  # (B, G, t+c, hd)
+            v = (c_cache @ Wvu).view(B, -1, G, hd).transpose(1, 2).contiguous()
+            k = (
+                apply_rope(k.transpose(1, 2).contiguous(), 0, rope_dim=self.rope_dim).transpose(1, 2).contiguous()
+            )  # (B,S,H,hd) contract; positions 0..t+c-1
+        else:
+            cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+c, hd)
+            cache["v"] = torch.cat([cache["v"], v], dim=2)
+            k, v = cache["k"], cache["v"]
+        k_full, v_full = k, v
         if G != H:
             k_full = k_full.repeat_interleave(H // G, dim=1)
             v_full = v_full.repeat_interleave(H // G, dim=1)
         t = k_full.shape[2] - c
         # Left-pad the queries with t dummy rows so the kernel's row-absolute
-        # causal mask (key j <= row i) IS the block-causal (c, t+c) mask.
+        # causal mask (key j <= row i) IS the block-causal (c, t+c) mask; the
+        # SWA window then applies in absolute coords (row = absolute position).
         q_pad = torch.zeros((B, H, t + c, hd), device=device, dtype=q.dtype)
         q_pad[:, :, t:, :] = q
-        attn = cuda_sdp_attention(q_pad, k_full, v_full, is_causal=True)  # (B, H, t+c, hd)
+        attn = cuda_sdp_attention(
+            q_pad, k_full, v_full, is_causal=True, window=self.config.swa_window
+        )  # (B, H, t+c, hd)
         attn = attn[:, :, t:, :]  # (B, H, c, hd) — crop the dummy rows
         return attn.transpose(1, 2).contiguous().view(B, c, H * hd) @ Wo  # (B, c, D)
 
@@ -509,8 +581,12 @@ class CuTransformerBlock:
             if mixer is not None:
                 h = h + mixer.forward_step(xn, position, cache[m]).to(device)
             else:
-                missing = [k for k in ("k", "v") if k not in cache[m]]
-                assert not missing, f"forward_step needs a naive {{'k','v'}} cache (missing keys: {missing})"
+                if self.config.has_mla_at(self.layer_index):
+                    missing = [k for k in ("c",) if k not in cache[m]]
+                    assert not missing, f"MLA forward_step needs a latent {{'c'}} cache (missing: {missing})"
+                else:
+                    missing = [k for k in ("k", "v") if k not in cache[m]]
+                    assert not missing, f"forward_step needs a naive {{'k','v'}} cache (missing keys: {missing})"
                 h = h + self._attn_step(xn, position, cache[m])
         hn = rmsnorm(h, self.post_attention_layernorm_gamma.to(x.device), eps=self.config.norm_eps)
         return h + self._ffn(hn, x.device)

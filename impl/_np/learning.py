@@ -87,6 +87,9 @@ class AttnRecord(TypedDict):
     ctx: list
     k_cache: list
     v_cache: list
+    c_cache: list | None  # MLA (ADR 0009): the latent cache (B, 1, t, L) when active
+    c_pre: list | None  # MLA: this pass's latent projection (B, S, L)
+    swa_window: int  # ADR 0008: 0 = full causal; >0 = banded window
 
 
 class FFNRecord(TypedDict):
@@ -249,6 +252,14 @@ def _attn_record(state: dict, attn_out: np.ndarray) -> AttnRecord:
         "attn_out": arr(attn_out),  # (B, S, D) — ctx @ Wo
         "k_cache": arr(k_cache),
         "v_cache": arr(v_cache),
+        # c_cache is the FULL latent cache: prefill uses c_group (B,1,S,L);
+        # decode steps use the appended cache (B,1,t,L) — matching the torch
+        # record's layout at both steps.
+        "c_cache": (arr(state["c_cache"]) if state.get("c_cache") is not None else arr(state["c_group"]))
+        if (state.get("c_cache") is not None or state.get("c_group") is not None)
+        else None,
+        "c_pre": arr(state["c_pre"]) if state.get("c_pre") is not None else None,
+        "swa_window": int(getattr(state.get("swa_window", 0), "__int__", lambda: 0)() or 0),
     }
 
 

@@ -140,6 +140,11 @@ class TritonModel(nn.Module):
             for m in range(self.config.n_mixers()):
                 if self.config.mixer_kind(m) == "d":
                     layer_caches.append({"s": torch.zeros(B, H, hd, hd, device=device, dtype=dtype), "s_hist": []})
+                elif self.config.has_mla_at(_i):
+                    # MLA (ADR 0009): the cache stores ONE latent c per
+                    # token — (B, L, 0) — instead of per-group K/V.
+                    L = self.config.mla_latent_dim
+                    layer_caches.append({"c": torch.zeros(B, L, 0, device=device, dtype=dtype)})
                 else:
                     layer_caches.append(
                         {
@@ -186,6 +191,9 @@ class TritonModel(nn.Module):
                     mixer_cache["s_hist"] = [
                         mixer_state["s_hist"][:, :, j] for j in range(mixer_state["s_hist"].shape[2])
                     ]  # type: ignore[assignment]
+                elif self.config.has_mla_at(i):
+                    # MLA (ADR 0009): backfill the latent cache (B, L, S).
+                    mixer_cache["c"] = mixer_state["c_group"].transpose(1, 2)  # (B, L, S)
                 else:
                     mixer_cache["k"] = mixer_state["k_group"]  # (B, G, S, hd)
                     mixer_cache["v"] = mixer_state["v_group"]  # (B, G, S, hd)
@@ -296,13 +304,29 @@ class TritonModel(nn.Module):
                     t[Keys.deltanet(layer_idx, m, DeltaNet.DT_BIAS)] = inner.dt_bias
                     t[Keys.deltanet(layer_idx, m, DeltaNet.NORM)] = inner.norm.weight
                 else:
-                    for proj, module in (
-                        (Attn.Q_PROJ, mixer.q_proj),
-                        (Attn.K_PROJ, mixer.k_proj),
-                        (Attn.V_PROJ, mixer.v_proj),
-                        (Attn.O_PROJ, mixer.o_proj),
-                    ):
-                        t[Keys.attn(layer_idx, m, proj)] = module.weight
+                    if self.config.has_mla_at(layer_idx):
+                        assert (
+                            mixer.kv_down_proj is not None
+                            and mixer.k_up_proj is not None
+                            and mixer.v_up_proj is not None
+                        )
+                        for attr, module in (
+                            (Attn.Q_PROJ, mixer.q_proj),
+                            (Attn.O_PROJ, mixer.o_proj),
+                            (Attn.KV_DOWN_PROJ, mixer.kv_down_proj),
+                            (Attn.K_UP_PROJ, mixer.k_up_proj),
+                            (Attn.V_UP_PROJ, mixer.v_up_proj),
+                        ):
+                            t[Keys.attn(layer_idx, m, attr)] = module.weight
+                    else:
+                        assert mixer.k_proj is not None and mixer.v_proj is not None
+                        for proj, module in (
+                            (Attn.Q_PROJ, mixer.q_proj),
+                            (Attn.K_PROJ, mixer.k_proj),
+                            (Attn.V_PROJ, mixer.v_proj),
+                            (Attn.O_PROJ, mixer.o_proj),
+                        ):
+                            t[Keys.attn(layer_idx, m, proj)] = module.weight
             mlp = block.mlp
             if isinstance(mlp, TritonMixtureOfExperts):
                 t[Keys.moe_gate(layer_idx)] = mlp.gate.weight

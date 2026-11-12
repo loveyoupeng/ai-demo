@@ -92,18 +92,26 @@ class TritonMultiHeadAttention(nn.Module):
     def __init__(
         self,
         config: TransformerConfig,
+        layer_index: int = 0,
         q_proj: np.ndarray | None = None,
         k_proj: np.ndarray | None = None,
         v_proj: np.ndarray | None = None,
         o_proj: np.ndarray | None = None,
+        kv_down_proj: np.ndarray | None = None,
+        k_up_proj: np.ndarray | None = None,
+        v_up_proj: np.ndarray | None = None,
     ) -> None:
-        """Build the four no-bias projections, injecting this layer's trained weights.
+        """Build the projections, injecting this layer's trained weights.
 
-        q_proj/k_proj/v_proj/o_proj: optional checkpoint arrays (the
-        ``(in, out)`` layout of ``shared.constants.Keys``), copied IN PLACE
-        over the ``nn.Linear`` storage the constructor creates — the
-        ``(out, in)`` layout, hence the transpose. None (default) keeps the
-        seeded init (the training path).
+        Classic mode: q/k/v/o no-bias Linears. MLA mode (ADR 0009,
+        config.mla_latent_dim > 0): k/v_proj are NOT created; the latent
+        factorization kv_down (D→L), k_up (L→G·hd), v_up (L→G·hd) replaces
+        them and the cache stores only the latent c.
+
+        All optional arrays are checkpoint arrays in the ``(in, out)``
+        layout of ``shared.constants.Keys``, copied IN PLACE over the
+        ``nn.Linear`` storage — the ``(out, in)`` layout, hence the
+        transpose. None (default) keeps the seeded init (the training path).
         """
         super().__init__()
         D, H, G = config.embed_dim, config.n_heads, config.kv_heads
@@ -112,16 +120,34 @@ class TritonMultiHeadAttention(nn.Module):
         self.n_groups = G
         self.head_dim = hd
         self.rope_dim = config.rope_dim
+        self.swa_window = config.swa_window
+        self.mla_latent_dim = config.mla_latent_dim if config.has_mla_at(layer_index) else 0
 
         # No-bias projections (Llama convention); nn.Linear stores (out, in)
         self.q_proj = nn.Linear(D, H * hd, bias=False)
-        self.k_proj = nn.Linear(D, G * hd, bias=False)
-        self.v_proj = nn.Linear(D, G * hd, bias=False)
         self.o_proj = nn.Linear(H * hd, D, bias=False)
+        if self.mla_latent_dim > 0:
+            L = self.mla_latent_dim
+            self.kv_down_proj: nn.Linear | None = nn.Linear(D, L, bias=False)
+            self.k_up_proj: nn.Linear | None = nn.Linear(L, G * hd, bias=False)
+            self.v_up_proj: nn.Linear | None = nn.Linear(L, G * hd, bias=False)
+            self.k_proj: nn.Linear | None = None
+            self.v_proj: nn.Linear | None = None
+        else:
+            self.k_proj = nn.Linear(D, G * hd, bias=False)
+            self.v_proj = nn.Linear(D, G * hd, bias=False)
+            self.kv_down_proj = None
+            self.k_up_proj = None
+            self.v_up_proj = None
         copy_in_place(self.q_proj.weight, q_proj, transpose=True)
-        copy_in_place(self.k_proj.weight, k_proj, transpose=True)
-        copy_in_place(self.v_proj.weight, v_proj, transpose=True)
         copy_in_place(self.o_proj.weight, o_proj, transpose=True)
+        if self.k_proj is not None:
+            copy_in_place(self.k_proj.weight, k_proj, transpose=True)
+            copy_in_place(self.v_proj.weight, v_proj, transpose=True)  # type: ignore[union-attr]
+        if self.kv_down_proj is not None:
+            copy_in_place(self.kv_down_proj.weight, kv_down_proj, transpose=True)
+            copy_in_place(self.k_up_proj.weight, k_up_proj, transpose=True)  # type: ignore[union-attr]
+            copy_in_place(self.v_up_proj.weight, v_up_proj, transpose=True)  # type: ignore[union-attr]
         self.rope = RoPE()
 
     def _move_to_device(self, x: torch.Tensor) -> None:
@@ -130,11 +156,24 @@ class TritonMultiHeadAttention(nn.Module):
             return
         device = x.device
         dtype = x.dtype if x.dtype.is_floating_point or x.dtype.is_complex else None
+        modules = [
+            m
+            for m in (
+                self.q_proj,
+                self.k_proj,
+                self.v_proj,
+                self.o_proj,
+                self.kv_down_proj,
+                self.k_up_proj,
+                self.v_up_proj,
+            )
+            if m is not None
+        ]
         if dtype is None:
-            for module in [self.q_proj, self.k_proj, self.v_proj, self.o_proj]:
+            for module in modules:
                 module.to(device)
         else:
-            for module in [self.q_proj, self.k_proj, self.v_proj, self.o_proj]:
+            for module in modules:
                 module.to(device, dtype)
 
     def forward(self, x: torch.Tensor, position: int = 0) -> torch.Tensor:
@@ -146,8 +185,15 @@ class TritonMultiHeadAttention(nn.Module):
 
         # (B, S, D) → (B, S, {H,G}*hd)
         q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
+        if self.mla_latent_dim > 0:
+            assert self.kv_down_proj is not None and self.k_up_proj is not None and self.v_up_proj is not None
+            c = self.kv_down_proj(x)
+            k = self.k_up_proj(c)
+            v = self.v_up_proj(c)
+        else:
+            assert self.k_proj is not None and self.v_proj is not None
+            k = self.k_proj(x)
+            v = self.v_proj(x)
 
         # Split into heads: (B, S, {H,G}*hd) → (B, {H,G}, S, hd)
         q = q.view(B, S, H, hd).permute(0, 2, 1, 3)  # (B, H, S, hd)
@@ -164,7 +210,7 @@ class TritonMultiHeadAttention(nn.Module):
             v = v.repeat_interleave(H // G, dim=1)  # (B, H, S, hd)
 
         # Triton SDPA kernel: (B, H, S, hd) → (B, H, S, hd)
-        ctx = scaled_dot_product_attention(q, k, v, is_causal=True)
+        ctx = scaled_dot_product_attention(q, k, v, is_causal=True, window=self.swa_window)
 
         # Merge heads: (B, H, S, hd) → (B, S, H*hd) → (B, S, D)
         ctx = ctx.permute(0, 2, 1, 3).reshape(B, S, H * hd)
@@ -187,8 +233,18 @@ class TritonMultiHeadAttention(nn.Module):
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
 
         q = self.q_proj(x)  # (B, S, H*hd)
-        k = self.k_proj(x)  # (B, S, G*hd)
-        v = self.v_proj(x)  # (B, S, G*hd)
+        if self.mla_latent_dim > 0:
+            assert self.kv_down_proj is not None and self.k_up_proj is not None and self.v_up_proj is not None
+            c = self.kv_down_proj(x)  # (B, S, L) — the latent
+            k = self.k_up_proj(c)  # (B, S, G*hd)
+            v = self.v_up_proj(c)  # (B, S, G*hd)
+            c_group = c  # (B, S, L) — the cacheable latent
+        else:
+            assert self.k_proj is not None and self.v_proj is not None
+            k = self.k_proj(x)  # (B, S, G*hd)
+            v = self.v_proj(x)  # (B, S, G*hd)
+            c = None
+            c_group = None
 
         q = q.view(B, S, H, hd).permute(0, 2, 1, 3)  # (B, H, S, hd)
         k = k.view(B, S, G, hd).permute(0, 2, 1, 3)  # (B, G, S, hd)
@@ -205,16 +261,18 @@ class TritonMultiHeadAttention(nn.Module):
         else:
             k_full, v_full = k_group, v_group
 
-        ctx = scaled_dot_product_attention(q, k_full, v_full, is_causal=True)  # (B, H, S, hd)
+        ctx = scaled_dot_product_attention(q, k_full, v_full, is_causal=True, window=self.swa_window)  # (B, H, S, hd)
         ctx = ctx.permute(0, 2, 1, 3).reshape(B, S, H * hd)
         out = self.o_proj(ctx)  # (B, S, D)
-        return Result.capture(out, {}, {"k_group": k_group, "v_group": v_group})
+        return Result.capture(out, {}, {"k_group": k_group, "v_group": v_group, "c_group": c_group})
 
     def forward_step(self, x: torch.Tensor, position: int, cache: dict[str, torch.Tensor]) -> torch.Tensor:
-        # Fail fast on a schema mismatch: these tracks build only the naive
-        # {'k','v'} cache (make_cache has no quantize mode).
-        missing = [k for k in ("k", "v") if k not in cache]
-        assert not missing, f"forward_step needs a naive {{'k','v'}} cache (missing keys: {missing})"
+        if self.mla_latent_dim > 0:
+            missing = [k for k in ("c",) if k not in cache]
+            assert not missing, f"MLA forward_step needs a latent {{'c'}} cache (missing: {missing})"
+        else:
+            missing = [k for k in ("k", "v") if k not in cache]
+            assert not missing, f"forward_step needs a naive {{'k','v'}} cache (missing keys: {missing})"
         """Process ONE new token against the cached K/V (per-token inference path).
 
         Mirrors ``impl._torch.layers.MultiHeadAttention.forward_step``: the
@@ -235,25 +293,51 @@ class TritonMultiHeadAttention(nn.Module):
 
         # One token's Q/K/V: (B, 1, D) → (B, ·, 1, hd)
         q = self.q_proj(x).view(B, 1, H, hd).permute(0, 2, 1, 3)  # (B, H, 1, hd)
-        k = self.k_proj(x).view(B, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
-        v = self.v_proj(x).view(B, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
+        if self.mla_latent_dim > 0:
+            assert self.kv_down_proj is not None and self.k_up_proj is not None and self.v_up_proj is not None
+            c = self.kv_down_proj(x)  # (B, 1, L) — the latent write
+            k_pre = self.k_up_proj(c)
+            v_pre = self.v_up_proj(c)
+        else:
+            assert self.k_proj is not None and self.v_proj is not None
+            c = None
+            k_pre = self.k_proj(x)
+            v_pre = self.v_proj(x)
+        k = k_pre.view(B, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
+        v = v_pre.view(B, 1, G, hd).permute(0, 2, 1, 3)  # (B, G, 1, hd)
 
         # RoPE with the token's absolute position (contract: (B, S, H, D))
         q = self.rope(q.permute(0, 2, 1, 3), position, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
         k = self.rope(k.permute(0, 2, 1, 3), position, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
 
-        # Append the new K/V to the cache (per-group; K already RoPE'd).
-        cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+1, hd)
-        cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+1, hd)
+        # Append the new K/V — or, in MLA mode, the latent c (B, L, t+1);
+        # K/V are reconstructed from the whole cached latent.
+        if self.mla_latent_dim > 0:
+            assert self.k_up_proj is not None and self.v_up_proj is not None
+            assert c is not None
+            cache["c"] = torch.cat([cache["c"], c.transpose(1, 2)], dim=2)  # (B, L, t+1)
+            c_cache = cache["c"].transpose(1, 2)  # (B, t+1, L)
+            k = self.k_up_proj(c_cache).view(B, -1, G, hd).permute(0, 2, 1, 3)  # (B, G, t+1, hd)
+            v = self.v_up_proj(c_cache).view(B, -1, G, hd).permute(0, 2, 1, 3)
+            k = self.rope(k.permute(0, 2, 1, 3), 0, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
+        else:
+            cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+1, hd)
+            cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+1, hd)
+            k, v = cache["k"], cache["v"]
 
         # GQA: broadcast each cached K/V group to its H // G query heads.
-        k_full, v_full = cache["k"], cache["v"]
+        k_full, v_full = k, v
         if G != H:
             k_full = k_full.repeat_interleave(H // G, dim=1)  # (B, H, t+1, hd)
             v_full = v_full.repeat_interleave(H // G, dim=1)  # (B, H, t+1, hd)
 
-        # Single query row: causal masking is implicit (all cached positions
-        # precede the query).
+        # SWA (ADR 0008) decode: slice the last w+1 cache rows — O(w) work.
+        if self.swa_window > 0:
+            start = max(0, k_full.shape[2] - (self.swa_window + 1))
+            k_full, v_full = k_full[:, :, start:], v_full[:, :, start:]
+
+        # Single query row: causal masking is implicit (all visible cached
+        # positions precede the query).
         ctx = scaled_dot_product_attention(q, k_full, v_full)  # (B, H, 1, hd)
 
         # Merge heads: (B, H, 1, hd) → (B, 1, H*hd) → (B, 1, D)
@@ -288,19 +372,40 @@ class TritonMultiHeadAttention(nn.Module):
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
 
         q = self.q_proj(x).view(B, c, H, hd).permute(0, 2, 1, 3)  # (B, H, c, hd)
-        k = self.k_proj(x).view(B, c, G, hd).permute(0, 2, 1, 3)  # (B, G, c, hd)
-        v = self.v_proj(x).view(B, c, G, hd).permute(0, 2, 1, 3)  # (B, G, c, hd)
+        if self.mla_latent_dim > 0:
+            assert self.kv_down_proj is not None and self.k_up_proj is not None and self.v_up_proj is not None
+            c_lat = self.kv_down_proj(x)  # (B, c, L) — the latent write
+            k = self.k_up_proj(c_lat)
+            v = self.v_up_proj(c_lat)
+        else:
+            assert self.k_proj is not None and self.v_proj is not None
+            c_lat = None
+            k = self.k_proj(x)
+            v = self.v_proj(x)
+        k = k.view(B, c, G, hd).permute(0, 2, 1, 3)  # (B, G, c, hd)
+        v = v.view(B, c, G, hd).permute(0, 2, 1, 3)  # (B, G, c, hd)
 
         # RoPE the whole chunk at once (RoPE's contract: (B, S, H, hd)).
         q = self.rope(q.permute(0, 2, 1, 3), position, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
         k = self.rope(k.permute(0, 2, 1, 3), position, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
 
-        # Append the chunk's per-group K/V to the cache.
-        cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+c, hd)
-        cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+c, hd)
+        # Append the chunk's K/V — or, in MLA mode, the latent c (B, L, t+c);
+        # K/V are reconstructed from the whole cached latent.
+        if self.mla_latent_dim > 0:
+            assert self.k_up_proj is not None and self.v_up_proj is not None
+            assert c_lat is not None
+            cache["c"] = torch.cat([cache["c"], c_lat.transpose(1, 2)], dim=2)  # (B, L, t+c)
+            c_cache = cache["c"].transpose(1, 2)  # (B, t+c, L)
+            k = self.k_up_proj(c_cache).view(B, -1, G, hd).permute(0, 2, 1, 3)  # (B, G, t+c, hd)
+            v = self.v_up_proj(c_cache).view(B, -1, G, hd).permute(0, 2, 1, 3)
+            k = self.rope(k.permute(0, 2, 1, 3), 0, rope_dim=self.rope_dim).permute(0, 2, 1, 3)
+        else:
+            cache["k"] = torch.cat([cache["k"], k], dim=2)  # (B, G, t+c, hd)
+            cache["v"] = torch.cat([cache["v"], v], dim=2)  # (B, G, t+c, hd)
+            k, v = cache["k"], cache["v"]
 
         # GQA: broadcast each cached K/V group to its H // G query heads.
-        k_full, v_full = cache["k"], cache["v"]
+        k_full, v_full = k, v
         if G != H:
             k_full = k_full.repeat_interleave(H // G, dim=1)  # (B, H, t+c, hd)
             v_full = v_full.repeat_interleave(H // G, dim=1)  # (B, H, t+c, hd)
@@ -310,7 +415,9 @@ class TritonMultiHeadAttention(nn.Module):
         # the causal mask; softmax rows are uniform garbage but discarded).
         q_pad = torch.zeros((B, H, t + c, hd), device=x.device, dtype=q.dtype)
         q_pad[:, :, t:, :] = q
-        ctx = scaled_dot_product_attention(q_pad, k_full, v_full, is_causal=True)  # (B, H, t+c, hd)
+        ctx = scaled_dot_product_attention(
+            q_pad, k_full, v_full, is_causal=True, window=self.swa_window
+        )  # (B, H, t+c, hd)
         ctx = ctx[:, :, t:, :]  # (B, H, c, hd) — crop the dummy rows
 
         # Merge heads: (B, H, c, hd) → (B, c, H*hd) → project to (B, c, D)
@@ -604,6 +711,7 @@ class TritonTransformerBlock(nn.Module):
         """
         super().__init__()
         self.config = config
+        self.block_layer_index: int = layer_index
         D = config.embed_dim
         i = layer_index
         p = params  # short alias; None → the training path (all keys below unused)
@@ -634,10 +742,14 @@ class TritonTransformerBlock(nn.Module):
                 mixers.append(
                     TritonMultiHeadAttention(
                         config,
+                        layer_index=i,
                         q_proj=None if p is None else p[Keys.attn(i, m, Attn.Q_PROJ)],
-                        k_proj=None if p is None else p[Keys.attn(i, m, Attn.K_PROJ)],
-                        v_proj=None if p is None else p[Keys.attn(i, m, Attn.V_PROJ)],
+                        k_proj=None if p is None else p.get(Keys.attn(i, m, Attn.K_PROJ)),
+                        v_proj=None if p is None else p.get(Keys.attn(i, m, Attn.V_PROJ)),
                         o_proj=None if p is None else p[Keys.attn(i, m, Attn.O_PROJ)],
+                        kv_down_proj=None if p is None else p.get(Keys.attn(i, m, Attn.KV_DOWN_PROJ)),
+                        k_up_proj=None if p is None else p.get(Keys.attn(i, m, Attn.K_UP_PROJ)),
+                        v_up_proj=None if p is None else p.get(Keys.attn(i, m, Attn.V_UP_PROJ)),
                     )
                 )
         self.mixers: list[TritonMultiHeadAttention | TritonGatedDeltaNet] = mixers
@@ -785,7 +897,17 @@ class TritonDecoderStack(nn.Module):
                         mixer._impl.gate_proj,
                     ):
                         lin.reset_parameters()
+                elif self.config.has_mla_at(block.block_layer_index):
+                    assert (
+                        mixer.kv_down_proj is not None and mixer.k_up_proj is not None and mixer.v_up_proj is not None
+                    )
+                    mixer.q_proj.reset_parameters()
+                    mixer.o_proj.reset_parameters()
+                    mixer.kv_down_proj.reset_parameters()
+                    mixer.k_up_proj.reset_parameters()
+                    mixer.v_up_proj.reset_parameters()
                 else:
+                    assert mixer.k_proj is not None and mixer.v_proj is not None
                     mixer.q_proj.reset_parameters()
                     mixer.k_proj.reset_parameters()
                     mixer.v_proj.reset_parameters()

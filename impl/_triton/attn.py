@@ -168,8 +168,37 @@ def scaled_dot_product_attention(
     k: torch.Tensor,
     v: torch.Tensor,
     is_causal: bool = False,
+    window: int = 0,
 ):
     """Compute scaled dot-product attention using Triton GPU kernel.
+
+    Implements: attention(Q, K, V) = softmax(QK^T / sqrt(d)) @ V
+
+    The forward pass is computed on GPU via a custom Triton kernel with
+    tiled matmuls for memory efficiency. The backward pass reuses PyTorch's
+    built-in SDPA.
+
+    Algorithm
+    ---------
+      QK^T → scores (B,H,Sq,Sk)
+      scores / sqrt(d) → scaled scores
+      softmax → attention weights (B,H,Sq,Sk)
+      attn @ V → output (B,H,Sq,D)
+
+    Parameters
+    ----------
+    q : torch.Tensor, shape (B, H, Sq, D)
+        Query tensor. B=batch, H=heads, Sq=source_len, D=dim_per_head.
+    k : torch.Tensor, shape (B, H, Sk, D)
+        Key tensor.  Sk=key_len.
+    v : torch.Tensor, shape (B, H, Sk, D)
+        Value tensor.  Sk must match k.shape[-2]. D must match q.shape[-1].
+    is_causal : bool, default False
+        When True, apply the causal (lower-triangular) mask: query position i
+        attends only to key positions j <= i (decoder-only / autoregressive).
+    window : int, default 0
+        SWA (ADR 0008): when > 0 and is_causal, additionally mask keys with
+        (i - j) > window — sliding-window attention. 0 = full causal.
 
     Implements: attention(Q, K, V) = softmax(QK^T / sqrt(d)) @ V
 
@@ -233,6 +262,8 @@ def scaled_dot_product_attention(
     - Tensor dtype must be float16, bfloat16, or float32
     - All tensors must be on the same CUDA device
     - is_causal=True applies the causal mask (position i → keys j <= i)
+    - window > 0 (with is_causal) adds the SWA band (ADR 0008):
+      keys with (i - j) > window are also masked
 
     """
     assert q.device.type == "cuda"
@@ -242,7 +273,7 @@ def scaled_dot_product_attention(
     _, _, Sk, _ = k.shape
     assert v.shape[-1] == D
 
-    return _ScaledDotProductAttentionTF.apply(q, k, v, is_causal)
+    return _ScaledDotProductAttentionTF.apply(q, k, v, is_causal, window)
 
 
 class _ScaledDotProductAttentionTF(torch.autograd.Function):
@@ -267,7 +298,9 @@ class _ScaledDotProductAttentionTF(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx: Any, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, is_causal: bool = False) -> torch.Tensor:
+    def forward(
+        ctx: Any, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, is_causal: bool = False, window: int = 0
+    ) -> torch.Tensor:
         """Forward pass: compute attention via Triton kernel + PyTorch backward.
 
         Parameters
@@ -346,6 +379,7 @@ class _ScaledDotProductAttentionTF(torch.autograd.Function):
             D,
             Sk,  # Runtime parameters (not constexpr)
             1 if is_causal else 0,  # Causal mask flag (position i → keys j <= i)
+            window,  # SWA window (ADR 0008): mask (i - j) > window when > 0
             D_pad=D_pad,  # pyright: ignore[reportArgumentType]
             Sk_pad=Sk_pad,  # pyright: ignore[reportArgumentType]
             scale=D**-0.5,
@@ -358,13 +392,14 @@ class _ScaledDotProductAttentionTF(torch.autograd.Function):
         # Save the attention inputs for the backward pass (recomputed through
         ctx.save_for_backward(q, k, v)
         ctx.is_causal = is_causal
+        ctx.window = window
         return out
 
     @staticmethod
     def backward(  # pyright: ignore[reportIncompatibleMethodOverride]
         ctx,
         grad_out: torch.Tensor,  # type: ignore[override]
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, None]:
         """Compute gradients w.r.t. (q, k, v) via the framework SDPA.
 
         Attention gradients are linear in the incoming gradient:
@@ -393,9 +428,17 @@ class _ScaledDotProductAttentionTF(torch.autograd.Function):
             q2 = q.detach().requires_grad_(True)
             k2 = k.detach().requires_grad_(True)
             v2 = v.detach().requires_grad_(True)
-            out2 = F.scaled_dot_product_attention(q2, k2, v2, is_causal=ctx.is_causal)
+            if getattr(ctx, "window", 0) > 0:
+                # SWA backward: rebuild the banded mask the forward used.
+                Sq, Sk = q2.shape[2], k2.shape[2]  # (B,H,Sq,D) / (B,H,Sk,D): seq axis is 2
+                q_idx = torch.arange(Sq, device=q2.device)[:, None]  # (Sq, 1)
+                k_idx = torch.arange(Sk, device=k2.device)[None, :]  # (1, Sk)
+                allow = (k_idx <= q_idx) & ((q_idx - k_idx) <= ctx.window)  # (Sq, Sk), True = attend
+                out2 = F.scaled_dot_product_attention(q2, k2, v2, attn_mask=allow)
+            else:
+                out2 = F.scaled_dot_product_attention(q2, k2, v2, is_causal=ctx.is_causal)
         grad_q, grad_k, grad_v = torch.autograd.grad(out2, (q2, k2, v2), grad_outputs=grad_out)
-        return grad_q, grad_k, grad_v, None
+        return grad_q, grad_k, grad_v, None, None
 
 
 @triton.jit
@@ -425,6 +468,7 @@ def _attn_fwd_kernel(
     D,
     Sk,
     IS_CAUSAL,
+    SWA_WINDOW,
     D_pad: tl.constexpr,
     Sk_pad: tl.constexpr,
     scale,
@@ -592,6 +636,9 @@ def _attn_fwd_kernel(
         q_idx = (row_start + tl.arange(0, BLOCK_M))[:, None]  # [BLOCK_M, 1]
         k_idx = tl.arange(0, Sk_pad)[None, :]  # [1, Sk_pad]
         scores = tl.where(k_idx <= q_idx, scores, float("-inf"))  # [BLOCK_M, Sk_pad]
+        if SWA_WINDOW > 0:
+            # SWA (ADR 0008): also mask keys more than SWA_WINDOW behind.
+            scores = tl.where((q_idx - k_idx) <= SWA_WINDOW, scores, float("-inf"))
 
     # ---- Softmax per row ----
     # Stable softmax: softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))

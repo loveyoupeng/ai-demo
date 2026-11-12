@@ -386,3 +386,151 @@ def grpo_iteration_scored(
                 logger.info("  [%d] reward=%.2f adv=%+.2f | %s", g, rewards[g], adv[g], decode(new_tokens[g])[:120])
     n = max(n_groups, 1)
     return {k: v / n for k, v in stats.items()}
+
+
+# ── 5. Multi-turn agentic rollout (ADR 0010) ─────────────────────────────────
+
+
+def agentic_rollout(
+    model: NumPyModel,
+    prompt_ids: np.ndarray,
+    grpo: GRPOConfig,
+    rng: np.random.Generator,
+    decode,
+    max_turns: int = 2,
+    stop_ids: tuple[int, ...] = (),
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Sample ONE multi-turn tool-use trajectory for ONE prompt (ADR 0010).
+
+    Loop per turn: sample up to ``max_new_tokens`` tokens; if the turn's
+    text ends with a ``<|tool_call|>`` JSON (``shared.agentic.parse_tool_call``),
+    execute it in the sandbox (``shared.agentic.format_tool_response``) and
+    continue from the appended response, up to ``max_turns`` tool turns.
+
+    Returns:
+        stream: (1, S_total) int — prompt + all sampled/env tokens.
+        response_mask: (1, S_total) — 1 on tokens the POLICY sampled
+            (env/tool-response tokens are 0: they are not graded).
+        tool_bonus: 1.0 if at least one well-formed tool call was made and
+            consumed, else 0.0 (added to the reward by the caller).
+    """
+    from shared.agentic import format_tool_response, parse_tool_call
+
+    ctx = model.config.context_length
+    seq = prompt_ids[None, :].copy()  # (1, S)
+    mask = np.zeros((1, seq.shape[1]), dtype=np.float64)
+    cache = model.make_cache(1)
+    logits, _ = model.forward_prefill(seq, cache=cache)
+    nxt_logits = logits[:, -1, :]
+    tool_bonus = 0.0
+    for turn in range(max_turns + 1):
+        # sample this turn's completion
+        sampled: list[int] = []
+        for _t in range(grpo.max_new_tokens):
+            if seq.shape[1] >= ctx - 1:
+                break
+            nxt = _sample(nxt_logits, grpo.temperature, grpo.top_k, rng)  # (1,)
+            tok = int(nxt[0])
+            if tok in stop_ids:
+                break
+            sampled.append(tok)
+            seq = np.concatenate([seq, np.array([[tok]], dtype=seq.dtype)], axis=1)
+            mask = np.concatenate([mask, np.ones((1, 1))], axis=1)
+            nxt_logits = model.forward_step(seq[:, -1:], seq.shape[1] - 1, cache)[:, 0, :]
+        text = decode(np.array(sampled, dtype=np.int64)) if sampled else ""
+        calls = parse_tool_call(text) if turn < max_turns else None
+        if calls is None:
+            break
+        # execute the tool and append the response (env tokens are NOT graded)
+        resp = format_tool_response(calls)
+        resp_ids = np.array(_encode_text(resp, model, decode), dtype=seq.dtype)[None, :]
+        if seq.shape[1] + resp_ids.shape[1] >= ctx:
+            break
+        seq = np.concatenate([seq, resp_ids], axis=1)
+        mask = np.concatenate([mask, np.zeros((1, resp_ids.shape[1]))], axis=1)
+        tool_bonus = 1.0
+        # continue from the tool response
+        logits, _ = model.forward_prefill(seq, cache=model.make_cache(1))
+        nxt_logits = logits[:, -1, :]
+    return seq, mask, tool_bonus
+
+
+def _encode_text(text: str, model: NumPyModel, decode) -> list[int]:
+    """Encode a tool-response string back to ids via the inverse of ``decode``.
+
+    The rl loop's ``decode`` is tokenizer.decode; we need the tokenizer's
+    encode — reach it through the model's vocab path: the caller passes a
+    decode that closes over the tokenizer, so we stash an encoder on it.
+    """
+    enc = getattr(decode, "__self__", None)
+    tok = getattr(decode, "_tokenizer", None) or getattr(decode, "__wrapped__", None)
+    # Fallback: the scripts pass decode=tok.decode bound method — its __self__
+    # IS the tokenizer.
+    if tok is None and enc is not None:
+        tok = enc
+    if tok is not None and hasattr(tok, "encode"):
+        return tok.encode(text).ids
+    raise RuntimeError("agentic_rollout needs a decode bound to a Tokenizer (decode=tok.decode)")
+
+
+def agentic_grpo_iteration(
+    model: NumPyModel,
+    reference: NumPyModel,
+    items: list[tuple[np.ndarray, str]],
+    decode,
+    grpo: GRPOConfig,
+    optimizer: AdamW,
+    rng: np.random.Generator,
+    max_turns: int = 2,
+    log_every: int = 1,
+) -> dict[str, float]:
+    """One multi-turn GRPO iteration (ADR 0010): per prompt, sample G
+    trajectories with tool turns, reward = correctness + format + tool bonus,
+    turn-level advantage (the trajectory score is assigned to every turn's
+    policy tokens), one optimizer step per group.
+    """
+    from shared.agentic import REWARD_TOOL_USE
+
+    stats: dict[str, float] = {"reward": 0.0, "format": 0.0, "correct": 0.0, "tool_rate": 0.0, "kl": 0.0}
+    n_groups = 0
+    for idx, (prompt_ids, gold) in enumerate(items):
+        streams = []
+        masks = []
+        rewards = np.zeros(grpo.group_size)
+        tool_flags = np.zeros(grpo.group_size)
+        for g in range(grpo.group_size):
+            seq, mask, tool_bonus = agentic_rollout(model, prompt_ids, grpo, rng, decode, max_turns=max_turns)
+            streams.append(seq[0])
+            masks.append(mask[0])
+            tool_flags[g] = tool_bonus
+            text = decode(seq[0, prompt_ids.shape[0] :])
+            r, details = score_reward(text, gold)
+            rewards[g] = r + REWARD_TOOL_USE * tool_bonus
+        # pad to a rectangular batch
+        width = max(s.shape[0] for s in streams)
+        batch = np.zeros((grpo.group_size, width), dtype=np.int64)
+        rmask = np.zeros((grpo.group_size, width))
+        for g, (s, m) in enumerate(zip(streams, masks, strict=True)):
+            batch[g, : s.shape[0]] = s
+            rmask[g, : m.shape[0]] = m
+        adv = group_advantage(rewards, grpo.adv_eps)
+        step_stats = grpo_step(model, reference, batch, rmask, adv, optimizer, grpo)
+        n_groups += 1
+        stats["reward"] += float(rewards.mean())
+        stats["correct"] += float(np.mean(rewards >= 1.0))
+        stats["tool_rate"] += float(tool_flags.mean())
+        stats["kl"] += step_stats["kl"]
+        if log_every and idx % log_every == 0:
+            logger.info(
+                "agentic grpo item %d/%d: reward=%.3f correct=%.2f tool=%.2f kl=%.4f",
+                idx + 1,
+                len(items),
+                rewards.mean(),
+                float(np.mean(rewards >= 1.0)),
+                tool_flags.mean(),
+                step_stats["kl"],
+            )
+    n = max(n_groups, 1)
+    out = {k: v / n for k, v in stats.items()}
+    out["format"] = 0.0
+    return out

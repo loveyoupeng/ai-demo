@@ -133,6 +133,20 @@ THE checkpoints the learning page serves (its Model dropdown's
 ``*-rl`` entries; ``*`` vs ``*-rl`` isolates RL's delta because the RL
 run started from exactly the shown SFT checkpoint).
 
+### Stage 5b — Multi-turn agentic RL (ADR 0010, the v5 default)
+
+`scripts/rl.py --multi-turn` runs the same GRPO machinery over
+**tool-use trajectories**: the policy may end a turn with
+`<|tool_call|>{"name": "calculator", "arguments": {"expr": …}}`; the
+environment (`shared/agentic.py` — an `ast`-whitelisted arithmetic sandbox,
+no eval of arbitrary code) executes it and appends `<|tool_response|>`;
+the policy continues, up to `--max-turns` (default 2). Reward =
+correctness + format (ADR 0004) **+ 0.1 tool-use bonus** when a well-formed
+tool call was actually consumed; the advantage is assigned to every turn's
+policy tokens (turn-level credit assignment, Turn-PPO style). The NumPy
+teaching path is `agentic_rollout` / `agentic_grpo_iteration` in
+`impl/_np/rl.py`.
+
 
 ## Stage 6 — Drafter Distillation (speculative decoding, ADR 0003)
 
@@ -189,19 +203,20 @@ distillation of ADR 0003 — lives in
   the thinking specials) → pre-train → code SFT → tool SFT → thinking
   SFT → GRPO RL → drafter sidecars, producing `learning_base` /
   `learning_sft` / `learning_tool` / `learning_think` / `learning_rl`.
-  The dense geometry is DEPTH: 6 layers, thin FFN (`expert_dim=96` =
-  1.5·D — 275,264 params, the Qwen3-32B shape).
+  The dense geometry is DEPTH: 8 layers, thin FFN (`expert_dim=48` =
+  0.75·D — 751,776 params, the Qwen3-32B shape).
 - `scripts/train_demo_model_v3.py --variant moe` — the MoE twin: the
-  same tokenizer, corpus, stages, and seed with 3 layers and the FFN
-  swapped for the PARAM-MATCHED MoE of ADR 0005 (E=8 routed + 1
-  always-on shared expert at dim 32, top-1: 282,560 total ≈ 1.03× the
-  dense budget, ~54% active per token — the total-vs-active trade the
-  page renders; the 30B-A3B shape), producing `learning_moe_*` …
-  `learning_moe_rl`.
+  same tokenizer, corpus, stages, and seed with 4 layers and the FFN
+  swapped for the MoE of ADR 0005/0011 (E=10 routed + 1
+  always-on shared expert at dim 20, top-1: 543,344 total, 405,360
+  active per token — the total-vs-active trade the page renders; the
+  30B-A3B shape), producing `learning_moe_*` … `learning_moe_rl`.
+  Both families use `mla_group_size=2` (ADR 0011), so the v7 geometry
+  gives both the same MLA/MHA interleave.
 
-Every checkpoint's `config.json` carries `"pipeline": 4` — the
+Every checkpoint's `config.json` carries `"pipeline": 7` — the
 staleness marker `scripts/learning.py` checks (a missing/older marker
-retrains; the bump 3→4 marks the depth-parity revision of ADR 0005).
+retrains; the bump 6→7 marks the ADR 0011 geometry revision of v7).
 
 ## Common Pitfalls This Repository Avoids
 
