@@ -13,8 +13,8 @@ Architecture
 -------------
 Generation loop (KV-cached, like a real inference engine: one bulk prefill,
 then O(1) attention work per new token):
-    cache = model.make_cache(B, quantize=quantize)
-    prefill_logits = model.forward_prefill(prompt, cache, quantize=quantize)  # (B, S, V)
+    cache = model.make_cache(B, kv_quant=kv_quant)
+    prefill_logits = model.forward_prefill(prompt, cache, kv_quant=kv_quant)  # (B, S, V)
     step_logits = prefill_logits[:, -1, :]                       # last position predicts token S
     for step in range(max_new_tokens):
         if step > 0:  # the first logits come from the prefill pass itself
@@ -80,13 +80,13 @@ class TextGenerator:
         max_new_tokens: int = 50,
         temperature: float = 1.0,
         top_k: int = 0,
-        quantize: bool = False,
+        kv_quant: str = "none",
     ) -> None:
         self.model = model
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.top_k = top_k
-        self.quantize = quantize
+        self.kv_quant = kv_quant
 
     def generate(self, prompt: np.ndarray) -> np.ndarray:
         """Generate tokens autoregressively.
@@ -147,11 +147,11 @@ class TextGenerator:
         # (the causal mask inside that pass lets every position attend only
         # to its past — the last position's logits predict the token AFTER
         # the prompt, so they serve as the first decode step's logits).
-        # quantize=True backfills the cache in 1-bit TurboQuant form (lossy;
-        # int8 storage ≈4x smaller than the float cache);
-        # quantize=False backfills the full-precision cache (exact).
-        cache: list[list[dict]] = self.model.make_cache(batch_size, quantize=self.quantize)
-        prefill_logits, _ = self.model.forward_prefill(sequence, cache, quantize=self.quantize)  # (B, S, V)
+        # kv_quant != "none" backfills the cache in quantized form (lossy,
+        # smaller — impl/_np/kvquant.py); "none" backfills the
+        # full-precision cache (exact).
+        cache: list[list[dict]] = self.model.make_cache(batch_size, kv_quant=self.kv_quant)
+        prefill_logits, _ = self.model.forward_prefill(sequence, cache, kv_quant=self.kv_quant)  # (B, S, V)
 
         # Per-row emitted tokens (repeat guard, cf. shared/generator.py —
         # rows are independent sequences, so the guard must be per row).
@@ -163,7 +163,7 @@ class TextGenerator:
                 step_logits = prefill_logits[:, -1, :].astype(np.float64)  # (B, V)
             else:
                 step_logits = self.model.forward_step(
-                    sequence[:, [-1]], sequence.shape[1] - 1, cache, quantize=self.quantize
+                    sequence[:, [-1]], sequence.shape[1] - 1, cache, kv_quant=self.kv_quant
                 )  # (B, 1, V)
                 step_logits = step_logits[:, 0, :].astype(np.float64)  # (B, V)
 
@@ -246,11 +246,11 @@ class TextGenerator:
         # (the causal mask inside that pass lets every position attend only
         # to its past — the last position's logits predict the token AFTER
         # the prompt, so they serve as the first decode step's logits).
-        # quantize=True backfills the cache in 1-bit TurboQuant form (lossy;
-        # int8 storage ≈4x smaller than the float cache);
-        # quantize=False backfills the full-precision cache (exact).
-        cache: list[list[dict]] = self.model.make_cache(batch_size, quantize=self.quantize)
-        prefill_logits, _ = self.model.forward_prefill(sequence, cache, quantize=self.quantize)  # (B, S, V)
+        # kv_quant != "none" backfills the cache in quantized form (lossy,
+        # smaller — impl/_np/kvquant.py); "none" backfills the
+        # full-precision cache (exact).
+        cache: list[list[dict]] = self.model.make_cache(batch_size, kv_quant=self.kv_quant)
+        prefill_logits, _ = self.model.forward_prefill(sequence, cache, kv_quant=self.kv_quant)  # (B, S, V)
 
         # Per-row emitted tokens (repeat guard; rows are independent).
         emitted = [[] for _ in range(sequence.shape[0])]
@@ -261,7 +261,7 @@ class TextGenerator:
                 step_logits = prefill_logits[:, -1, :].astype(np.float64)  # (B, V)
             else:
                 step_logits = self.model.forward_step(
-                    sequence[:, [-1]], sequence.shape[1] - 1, cache, quantize=self.quantize
+                    sequence[:, [-1]], sequence.shape[1] - 1, cache, kv_quant=self.kv_quant
                 )  # (B, 1, V)
                 step_logits = step_logits[:, 0, :].astype(np.float64)  # (B, V)
 

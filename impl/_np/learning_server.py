@@ -711,6 +711,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
         """
         ids, t, k, seed, skipped, backend = self._decode_params(body)
         spec, spec_k = self._decode_spec_params(body)
+        kv_quant = self._decode_kv_quant(body, spec)
         if t is not None and spec != "plain" and not isinstance(self.model, NumPyModel):
             # Sampled speculation is the NumPy track's theorem path; the
             # torch family runs greedy verification (production at T=0).
