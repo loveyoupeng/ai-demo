@@ -276,7 +276,7 @@ class TransformerBlock:
         return dx, dparams
 
     def forward_step(
-        self, x: np.ndarray, position: int, cache: list[dict], quantize: bool = False, record: dict | None = None
+        self, x: np.ndarray, position: int, cache: list[dict], kv_quant: str = "none", record: dict | None = None
     ) -> np.ndarray:
         """Process ONE new token (per-token inference path, KV-cached mixers).
 
@@ -288,13 +288,13 @@ class TransformerBlock:
         cache: this block's per-MIXER cache LIST (one dict per mixer,
             ``cache[m]``; see MultiHeadAttention.forward_step /
             GatedDeltaNet.forward_step). Mutated in place; shape depends on
-            quantize for the K/V mixer. Contract: the caches must hold
+            kv_quant for the K/V mixer. Contract: the caches must hold
             exactly the positions 0..position-1 before the call.
-        quantize: if True, append the new K/V to the attention mixer's cache
-            in 1-bit TurboQuant form and dequantize the full cached tensor
-            before attention; if False, append the full-precision K/V
-            (default). DeltaNet mixers carry the recurrent S state — no K/V,
-            no TurboQuant.
+        kv_quant: the KV-cache quantization scheme for the K/V mixer. "none"
+            appends the full-precision K/V (default); "fp8"/"int4"/"int2"
+            append the quantized entry and dequantize the full cached tensor
+            before attention (impl/_np/kvquant.py). DeltaNet mixers carry
+            the recurrent S state — no K/V, never quantized.
         record: optional dict filled with the step's intermediates (same keys
             as ``forward``) — see that method.
 
@@ -317,7 +317,7 @@ class TransformerBlock:
             if isinstance(mixer, GatedDeltaNet):
                 mixer_out = mixer.forward_step(ln_out, position, cache[m], record=mixer_state)
             else:
-                mixer_out = mixer.forward_step(ln_out, position, cache[m], quantize=quantize, record=mixer_state)
+                mixer_out = mixer.forward_step(ln_out, position, cache[m], kv_quant=kv_quant, record=mixer_state)
             h = h + mixer_out  # (B, 1, D)
             hs.append(h)
             ln_outs.append(ln_out)

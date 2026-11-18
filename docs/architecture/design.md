@@ -1,7 +1,7 @@
 # Design Document: Decoder-Only Transformer Learning Project
 
 **Date:** 2026-06-26 (last synced: 2026-10-11)
-**Goal:** Build a fully functional decoder-only transformer LLM in 4 equivalent implementations (NumPy, PyTorch, Triton, CUDA) for educational purposes — covering the modern production surface: RoPE, GQA, SwiGLU, opt-in MoE (with shared experts), exact KV cache, TurboQuant, and speculative decoding (MTP + DSpark drafters).
+**Goal:** Build a fully functional decoder-only transformer LLM in 4 equivalent implementations (NumPy, PyTorch, Triton, CUDA) for educational purposes — covering the modern production surface: RoPE, GQA, SwiGLU, opt-in MoE (with shared experts), exact KV cache, KV-cache quantization (fp8/int4/int2), and speculative decoding (MTP + DSpark drafters).
 
 This document owns the **design doctrine and the irreversible decisions**.
 The directory tree lives in [README.md](../../README.md) → "Project
@@ -176,8 +176,9 @@ autocast region.
 - **Weighted sampling**: Sample from softmax(logits / temperature) → stochastic
 - **KV Cache**: Full caching of past key/value tokens; the per-token step
   path (`forward_prefill` + `forward_step`) is exact, one token per
-  iteration. TurboQuant (1-bit quantized cache) is a documented,
-  parity-budgeted alternative behind `forward_step(quantize=True)`.
+  iteration. Lossy cache schemes (fp8-e4m3 / int4+sinks / int2 per-group,
+  `impl/_np/kvquant.py`) are parity-budgeted alternatives behind
+  `forward_step(kv_quant=...)`.
   With MLA (ADR 0009) the cache stores the latent `c` only; with SWA
   (ADR 0008) decode reads just the last w+1 rows.
 - **Speculative decoding** (ADR 0003): a distilled drafter proposes a k-token
@@ -227,9 +228,10 @@ arch flag; the NumPy/Torch tracks are GPU-agnostic.
 5. **Flat checkpoint format** — All backends save/load `model.npz` as a flat dict (keys from the shared `Keys` scheme), enabling cross-backend transfer
 6. **Standard additive residual** — the block uses the plain pre-norm skip `out = x + f(ln(x))`, matching LLaMA and every modern reference (the repo-specific "gated residual" was abandoned — see [ADR-0001](adr/0001-gated-residual-abandonment.md))
 7. **Config-bounded KV cache** — the cache is the model's dict cache
-   (`make_cache` / `forward_prefill` / `forward_step`) with TurboQuant 1-bit
-   quantization as the documented alternative; LRU/LFU multi-level caching
-   was explicitly rejected as out of scope
+   (`make_cache` / `forward_prefill` / `forward_step`) with fp8/int4/int2
+   quantization (`impl/_np/kvquant.py`) as the documented lossy
+   alternative; LRU/LFU multi-level caching was explicitly rejected as out
+   of scope
 8. **PyTorch nn.Module wrapper** — PyTorch/Triton models are `nn.Module` instances (training via `.parameters()`); `CUDAModel` is a plain class whose tensor attributes carry `requires_grad`
 9. **Drafter sidecars, not registry keys** — draft weights live outside the
    target's `model.npz` (ADR 0003): the checkpoint format and every

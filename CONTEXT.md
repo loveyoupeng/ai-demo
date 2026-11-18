@@ -339,17 +339,18 @@ letters. Where each value comes from:
   block is denoised in a fixed number of parallel steps, conditioned on
   the target's context features. A planned plug-in drafter, not yet built.
 
-- **TurboQuant**: the 1-bit quantized KV path. On each token write, the new
-  K/V vector is stored as int8 sign bits plus **one scale scalar per
-  (batch, head)** — `scale = mean(|x|)` over the token vector
-  (`impl/_np/attention.py` → `_quantize_turbo`, mean over `(-2, -1)`); the
-  cache is dequantized (`bits * scale`) before attention. Lossy, but the
-  live path stores int8 signs → ~4x smaller than the float32 cache (plus
-  the per-token scales). Wired behind the same
-  `forward_step(quantize=True)` interface with a parity-budget test. The
-  cache itself is the model's plain dict cache produced by
-  `make_cache`/`forward_prefill`/`forward_step` — not a separate cache
-  class.
+- **KV-cache quantization** (`impl/_np/kvquant.py`): the lossy KV path,
+  selected by `kv_quant` (`"none"` default = exact cache; `"fp8"` |
+  `"int4"` | `"int2"`). On each token write the new K/V vector is stored
+  quantized per head (after GQA repeat): fp8 = e4m3 code + one max-abs
+  scale per token; int4 = asymmetric code/scale/zero per token; int2 =
+  asymmetric per channel-group of 16. The first `SINK_TOKENS`=4 positions
+  are kept full-precision (attention sinks). The cache is dequantized
+  before attention. Wired behind `forward_step(kv_quant=...)` with
+  parity-budget tests (`tests/unit/_np/test_kvquant.py`); the learning page
+  switches schemes via `scripts/learning.py --kv-quant`. The cache itself
+  is the model's plain dict cache produced by `make_cache` /
+  `forward_prefill` / `forward_step` — not a separate cache class.
 
 ## Learning Mode
 

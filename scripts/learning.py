@@ -20,6 +20,7 @@ consumes either backend's records because their JSON shape is identical.
 Usage:
     uv run python -m scripts.learning                          # demo model, port 8080
     uv run python -m scripts.learning --backend torch          # PyTorch track
+    uv run python -m scripts.learning --kv-quant fp8           # quantized KV cache (NumPy track only)
     uv run python -m scripts.learning --model resource/models/torch_real --port 9000
     uv run python -m scripts.learning --host 0.0.0.0           # allow LAN access
 
@@ -155,6 +156,13 @@ def main() -> int:
         choices=["auto", "plain", "mtp", "dspark"],
         help="Decoding mode the page starts in (auto: mtp when drafter sidecars exist, else plain)",
     )
+    parser.add_argument(
+        "--kv-quant",
+        type=str,
+        default="none",
+        choices=["none", "fp8", "int4", "int2"],
+        help="KV-cache quantization scheme the page starts in (default none = exact cache; NumPy track only)",
+    )
     args = parser.parse_args()
 
     variant_dirs = dict(VARIANTS) if args.model == DEFAULT_MODEL else {}
@@ -174,12 +182,13 @@ def main() -> int:
         tokenizer=_tok,
         model_dir=args.model,
         default_spec=spec,
+        default_kv_quant=args.kv_quant,
         variant_dirs=variant_dirs or None,
         default_variant=DEFAULT_VARIANT if variant_dirs else "dense",
     )
     print(
         f"Learning mode: listening on {args.host}:{args.port}  "
-        f"(model: {args.model}, backend: {args.backend}, spec: {spec})"
+        f"(model: {args.model}, backend: {args.backend}, spec: {spec}, kv-quant: {args.kv_quant})"
     )
     try:
         server.serve_forever()

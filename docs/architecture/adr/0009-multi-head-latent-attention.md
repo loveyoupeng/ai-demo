@@ -43,8 +43,9 @@ New config field `TransformerConfig.mla_latent_dim: int = 0`:
   decoupled-rope variant (RoPE is linear in k); the decoupled form saves
   compute and is marked `# PROD:` in the NumPy reference.
 
-- TurboQuant (1-bit cache) in MLA mode quantizes the reconstructed
-  per-head K/V exactly as in non-MLA mode.
+- KV-cache quantization (`kv_quant != "none"`, impl/_np/kvquant.py) in MLA
+  mode quantizes the reconstructed per-head K/V exactly as in non-MLA mode
+  (the latent `c` itself is never quantized).
 
 ## Why not alternatives
 

@@ -46,8 +46,10 @@ lm_head (D→V) → logits (B,S,V)`.
 
 Inference: exact KV-cache step path — `forward_prefill` + `forward_step`
 equals a full re-forward; generators step one token per iteration (O(1)).
-TurboQuant (1-bit quantized K/V cache) is wired behind the same
-`forward_step(quantize=True)` interface with a parity-budget test.
+Lossy KV-cache schemes (fp8-e4m3 / int4+sinks / int2 per-group, the
+production defaults in vLLM/SGLang) live in `impl/_np/kvquant.py` behind
+`forward_step(kv_quant=...)` with parity-budget tests; `scripts/learning.py
+--kv-quant` switches the learning page between them (default `none`).
 Speculative decoding (ADR 0003): all four tracks also expose
 `forward_chunk(ids, position, cache) -> (logits, x_final)` — k tokens'
 K/V appended in ONE pass (the verification path); drafters (MTP k=4

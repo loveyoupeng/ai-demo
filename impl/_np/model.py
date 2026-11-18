@@ -34,6 +34,8 @@ import numpy as np
 from impl._np.cross_entropy import CrossEntropyLoss
 from impl._np.deltanet import GatedDeltaNet
 from impl._np.embedding import Embedding
+from impl._np.kvquant import empty_entry as _kq_empty_entry
+from impl._np.kvquant import quantize_block as _kq_quantize_block
 from impl._np.layernorm import RMSNorm
 from impl._np.moe import MixtureOfExperts
 from impl._np.stack import DecoderStack
@@ -304,28 +306,28 @@ class NumPyModel:
             )
         return logits, {"x_in0": x_in0, "stack_out": stack_out, "position": position}
 
-    def make_cache(self, batch_size: int, quantize: bool = False) -> list[list[dict]]:
+    def make_cache(self, batch_size: int, kv_quant: str = "none") -> list[list[dict]]:
         """Create the per-layer, per-mixer cache for the per-token step path.
 
         batch_size: how many independent sequences the cache serves (one
             row each); the cache's B axis.
-        quantize: False → the naive full-precision cache (exact); True →
-            the TurboQuant 1-bit cache (lossy, documented alternative).
+        kv_quant: "none" → the naive full-precision cache (exact, the
+            default); "fp8"/"int4"/"int2" → the quantized cache from
+            impl/_np/kvquant.py (lossy, smaller).
 
         Cache shape (ADR 0007): one LIST per layer with one dict per mixer
         (M = config.n_mixers() entries). DeltaNet mixers get
             {"s": (B, H, hd, hd), "s_hist": []}
         the full-attention mixer gets
             {"k": (B, G, 0, hd), "v": (B, G, 0, hd)}
-        (TurboQuant, quantize=True: {"bits_k", "scales_k", "bits_v",
-        "scales_v"} for the attention mixer — DeltaNet mixers carry the
-        recurrent S state and are never quantized).
+        (kv_quant != "none": {"q_k": entry, "q_v": entry} for the attention
+        mixer — DeltaNet mixers carry the recurrent S state and are never
+        quantized).
 
         G = the K/V head count (config.kv_heads) and hd = the head dim — the
         naive cache stores K/V *per group*, so GQA caches are H // G times
-        smaller. The TurboQuant cache stores K/V *per head* (H heads) because
-        it quantizes the full (B, H, t, hd) tensor after GQA repeat; a
-        per-group variant is a straightforward extension.
+        smaller. The quantized cache stores K/V *per head* (H heads) because
+        it quantizes the full (B, H, t, hd) tensor after GQA repeat.
         """
         B = batch_size
         D = self.embed_dim
@@ -333,55 +335,43 @@ class NumPyModel:
         G = self.config.kv_heads
         hd = D // H
         dtype = self.embedding.weight.dtype
+        quantized = kv_quant != "none"
         # Per-mixer caches (ADR 0007): 'd' mixers carry the recurrent
         # DeltaNet state {"s": (B,H,hd,hd), "s_hist": []}; the 'F' mixer
         # carries K/V.
-        if not quantize:
-            caches: list[list[dict]] = []
-            for _i in range(self.config.n_layers):
-                layer_caches: list[dict] = []
-                for m in range(self.config.n_mixers()):
-                    if self.config.mixer_kind(m) == "d":
-                        layer_caches.append({"s": np.zeros((B, H, hd, hd), dtype=dtype), "s_hist": []})
-                    elif self.config.has_mla_at(_i):
-                        # MLA (ADR 0009): the cache stores ONE latent c per
-                        # token — (B, 1, 0, L) — instead of per-group K/V.
-                        L = self.config.mla_latent_dim
-                        layer_caches.append({"c": np.zeros((B, 1, 0, L), dtype=dtype)})
-                    else:
-                        layer_caches.append(
-                            {"k": np.zeros((B, G, 0, hd), dtype=dtype), "v": np.zeros((B, G, 0, hd), dtype=dtype)}
-                        )
-                caches.append(layer_caches)
-            return caches
-        empty_bits = np.zeros((B, H, 0, hd), dtype=np.int8)
-        # Scales are stored per (B, H) — a single scalar per head, broadcast
-        # over the sequence and head-dim axes at dequantize time.
-        empty_scales = np.zeros((B, H, 0, 1), dtype=dtype)
-        turbo = {
-            "bits_k": empty_bits.copy(),
-            "scales_k": empty_scales.copy(),
-            "bits_v": empty_bits.copy(),
-            "scales_v": empty_scales.copy(),
-        }
-        return [
-            [
-                (
-                    {"s": np.zeros((B, H, hd, hd), dtype=dtype), "s_hist": []}
-                    if self.config.mixer_kind(m) == "d"
-                    else turbo.copy()
-                )
-                for m in range(self.config.n_mixers())
-            ]
-            for _i in range(self.config.n_layers)
-        ]
+        caches: list[list[dict]] = []
+        for _i in range(self.config.n_layers):
+            layer_caches: list[dict] = []
+            for m in range(self.config.n_mixers()):
+                if self.config.mixer_kind(m) == "d":
+                    layer_caches.append({"s": np.zeros((B, H, hd, hd), dtype=dtype), "s_hist": []})
+                elif self.config.has_mla_at(_i):
+                    # MLA (ADR 0009): the cache stores ONE latent c per
+                    # token — (B, 1, 0, L) — instead of per-group K/V.
+                    # The latent is never quantized (quantized K/V would
+                    # apply to the reconstructed per-head K/V).
+                    L = self.config.mla_latent_dim
+                    layer_caches.append({"c": np.zeros((B, 1, 0, L), dtype=dtype)})
+                elif quantized:
+                    layer_caches.append(
+                        {
+                            "q_k": _kq_empty_entry(kv_quant, B, H, hd, dtype),
+                            "q_v": _kq_empty_entry(kv_quant, B, H, hd, dtype),
+                        }
+                    )
+                else:
+                    layer_caches.append(
+                        {"k": np.zeros((B, G, 0, hd), dtype=dtype), "v": np.zeros((B, G, 0, hd), dtype=dtype)}
+                    )
+            caches.append(layer_caches)
+        return caches
 
     def forward_prefill(
         self,
         input_ids: np.ndarray,
         cache: list[list[dict]] | None = None,
         position: int = 0,
-        quantize: bool = False,
+        kv_quant: str = "none",
         record: dict | None = None,
     ) -> tuple[np.ndarray, list[list[dict]]]:
         """Run a full-sequence forward and fill the per-layer KV cache.
@@ -397,11 +387,11 @@ class NumPyModel:
             — the windowed-prefill offset, so a prompt longer than the
             context prefills at its absolute positions while the decode
             steps keep using absolute ones.
-        quantize: if True, backfill the cache in 1-bit TurboQuant form
-            (bits + one scalar scale per (batch, head) per token — the same
-            write rule ``forward_step(quantize=True)`` applies, vectorized
-            over the prompt length) so the prompt and every decode step share
-            one lossy cache. If False, backfill full-precision K/V (exact).
+        kv_quant: "none" backfills full-precision K/V (exact); "fp8"/"int4"/
+            "int2" backfill the quantized cache (impl/_np/kvquant.py) — the
+            same write rule ``forward_step(kv_quant=...)`` applies,
+            vectorized over the prompt length — so the prompt and every
+            decode step share one lossy cache.
         record: optional dict filled with the raw intermediates of this pass
             (same keys as ``forward_with_trace``'s record) — the
             learning-mode prefill step.
@@ -418,7 +408,7 @@ class NumPyModel:
         """
         B, S = input_ids.shape
         if cache is None:
-            cache = self.make_cache(B, quantize=quantize)
+            cache = self.make_cache(B, kv_quant=kv_quant)
         blocks_rec = [{} for _ in self.stack.layers]
         x = self.embedding.forward(input_ids)  # (B, S, D)
         stack_out = self.stack.forward(x, position, record=blocks_rec)  # (B, S, D)
@@ -426,9 +416,9 @@ class NumPyModel:
         logits = x_final @ self.lm_head_weight  # (B, S, V)
         # Backfill each layer's per-mixer caches from this pass's mixer states:
         # K/V per group (GQA keeps it small), K already RoPE'd, V un-rotated.
-        # Naive path stores per group; TurboQuant quantizes per head after
-        # GQA repeat (one (bits, scale) pair per token-write) — the same
-        # storage form make_cache(quantize=True) allocates.
+        # Naive path stores per group; a quantized scheme quantizes per head
+        # after GQA repeat — the same storage form make_cache(kv_quant=...)
+        # allocates.
         H = self.config.n_heads
         G = self.config.kv_heads
         for i, block_state in enumerate(blocks_rec):
@@ -450,12 +440,11 @@ class NumPyModel:
                     # captured c_pre — the only thing the step path stores.
                     mixer_cache["c"] = mixer_state["c_group"]  # (B, 1, S, L)
                     continue
-                if quantize:
-                    mixer_layer = self.stack.layers[i].mixers[m]
+                if kv_quant != "none":
                     k_r = np.repeat(k_group, H // G, axis=1) if G != H else k_group  # (B, H, S, hd)
                     v_r = np.repeat(v_group, H // G, axis=1) if G != H else v_group
-                    mixer_cache["bits_k"], mixer_cache["scales_k"] = mixer_layer._quantize_turbo_full(k_r)  # type: ignore[union-attr]
-                    mixer_cache["bits_v"], mixer_cache["scales_v"] = mixer_layer._quantize_turbo_full(v_r)  # type: ignore[union-attr]
+                    mixer_cache["q_k"] = _kq_quantize_block(kv_quant, k_r, sink_from=position)
+                    mixer_cache["q_v"] = _kq_quantize_block(kv_quant, v_r, sink_from=position)
                 else:
                     mixer_cache["k"] = k_group
                     mixer_cache["v"] = v_group
@@ -477,7 +466,7 @@ class NumPyModel:
         input_ids: np.ndarray,
         position: int,
         cache: list[list[dict]],
-        quantize: bool = False,
+        kv_quant: str = "none",
         record: dict | None = None,
     ) -> np.ndarray:
         """Process ONE token per batch row against the cached K/V.
@@ -501,12 +490,11 @@ class NumPyModel:
         position: the absolute token index of the token (0-based).
         cache: the per-layer cache; the token's K/V are *appended* to each
             layer's cache before attention runs.
-        quantize: if True, append the new K/V to the cache in 1-bit
-            TurboQuant form (bits + one scalar scale per (batch, head) per
-            token-write) and dequantize the full cached tensor before
+        kv_quant: "none" appends the full-precision K/V (the default naive
+            path); "fp8"/"int4"/"int2" append the new K/V to the cache in
+            quantized form and dequantize the full cached tensor before
             attention, so the step attends against the (lossy) quantized
-            cache. If False, append the full-precision K/V (the default
-            naive path).
+            cache (impl/_np/kvquant.py).
 
         record: optional dict filled with the step's intermediates (same
             keys as the chunk/trace records — the learning-mode path).
@@ -524,7 +512,7 @@ class NumPyModel:
         """
         x = self.embedding.forward(input_ids)  # (B, 1, D)
         blocks_rec = [{} for _ in self.stack.layers] if record is not None else None
-        stack_out = self.stack.forward_step(x, position, cache, quantize=quantize, record=blocks_rec)  # (B, 1, D)
+        stack_out = self.stack.forward_step(x, position, cache, kv_quant=kv_quant, record=blocks_rec)  # (B, 1, D)
         x_final = self.final_norm.forward(stack_out)  # (B, 1, D)
         logits = x_final @ self.lm_head_weight  # (B, 1, V)
         if record is not None:
@@ -552,9 +540,8 @@ class NumPyModel:
         The target side of speculative decoding (ADR 0003): one call runs a
         draft block of c tokens through the whole stack, appending every
         token's K/V in a single pass, and scores all c positions in
-        parallel — verification. Naive cache only (TurboQuant is a
-        single-token write path; the lossless contract needs full
-        precision).
+        parallel — verification. Naive cache only (the lossless contract
+        needs full precision).
 
         input_ids: (B, c) int token IDs, c >= 1.
         position: the absolute token index of the chunk's FIRST token (0-based).

@@ -410,6 +410,7 @@ def generate_with_records(
     spec: str | None = None,
     k: int | None = None,
     drafter: MTPDrafter | DSparkDrafter | None = None,
+    kv_quant: str = "none",
 ) -> GenerationRecord:
     """Generate ``n_tokens`` with a real KV cache, recording every step.
 
@@ -500,7 +501,9 @@ def generate_with_records(
     window = list(seq[-P0:])
     x = np.array([window], dtype=np.int32)  # (1, P0)
     raw: dict = {}
-    _logits, cache = model.forward_prefill(x, None, position=P - P0, record=raw)
+    _logits, cache = model.forward_prefill(
+        x, model.make_cache(1, kv_quant=kv_quant), position=P - P0, kv_quant=kv_quant, record=raw
+    )
     rec = _forward_record(model, raw, x)
     tok = _pick(np.asarray(rec["logits"], dtype=np.float64)[0][-1])
     emitted.append(tok)
@@ -523,7 +526,7 @@ def generate_with_records(
         t = len(seq) - 1  # absolute position of the new token
         x1 = np.array([seq[-1:]], dtype=np.int32)  # (1, 1)
         raw = {}
-        model.forward_step(x1, t, cache, record=raw)
+        model.forward_step(x1, t, cache, kv_quant=kv_quant, record=raw)
         rec = _forward_record(model, raw, x1)
         tok = _pick(np.asarray(rec["logits"], dtype=np.float64)[0][0])
         emitted.append(tok)

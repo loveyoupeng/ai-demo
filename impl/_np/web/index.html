@@ -238,6 +238,19 @@
       </div>
       <div class="note" id="spec-mode-note">plain: the target model runs one forward pass per token. Switch to MTP or DSpark to draft-then-verify several tokens per pass.</div>
     </div>
+    <div class="ctl-group">
+      <h3>KV cache — how past K/V are stored (NumPy backend)</h3>
+      <div id="kvq-ctl">
+        <label for="kvq">Scheme</label>
+        <select id="kvq">
+          <option value="none" selected>none — exact full-precision cache</option>
+          <option value="fp8">fp8 e4m3 — 2× smaller, ~no loss (the serving default in vLLM/SGLang)</option>
+          <option value="int4">int4 asymmetric + sink tokens — ~4× smaller</option>
+          <option value="int2">int2 per channel-group + sinks — ~8× smaller, lossy</option>
+        </select>
+      </div>
+      <div class="note" id="kvq-note">none: the cache stores full-precision K/V — the exact path. fp8/int4/int2 quantize each token's K/V on write (impl/_np/kvquant.py) and dequantize before attention; the output degrades slightly. Plain decoding only — speculative verification needs the exact cache.</div>
+    </div>
     <div id="status"></div>
     <section style="background:var(--panel2); margin-top:12px; border-color:var(--line)">
       <h2>Generated</h2>
@@ -318,7 +331,7 @@ async function api(path, body) {
 function promptParams() {
   const t = $("temp").value;
   const spec = $("spec").value;
-  const backend = $("backend").value;
+  const kvq = $("kvq") ? $("kvq").value : "none";
   // Sampled speculation (the rejection-sampling theorem) is the NumPy
   // track's teaching path; the torch family runs greedy verification —
   // what production runs at temperature 0. Force greedy there instead of
@@ -333,6 +346,7 @@ function promptParams() {
     variant: $("variant") ? $("variant").value : undefined,
     backend: $("backend").value,
     spec,
+    kv_quant: kvq,
     ...(spec === "plain" ? {} : { k: parseInt($("spec-k").value || "1", 10) }),
   };
 }
@@ -701,6 +715,7 @@ async function init(prefetched) {
     vSel.parentElement.style.display = "none"; // single variant: hide the dropdown
   }
   specCtlInit();
+  kvqCtlInit();
   $("prompt").addEventListener("input", () => tokenizePreview($("prompt").value));
   tokenizePreview($("prompt").value);
 }
@@ -837,6 +852,38 @@ function specCtlInit() {
   sync();
 }
 
+// ---------------------------------------------------------------------------
+// KV-cache quantization UI — scheme selector (default: the CLI --kv-quant)
+// ---------------------------------------------------------------------------
+function kvqCtlInit() {
+  const sel = $("kvq");
+  if (!sel) return;
+  const schemes = MODEL.kv_quant_schemes || ["none", "fp8", "int4", "int2"];
+  if (schemes.length > 0 && sel.options.length <= 1) {
+    sel.innerHTML = schemes
+      .map((s) => {
+        const labels = {
+          none: "none — exact full-precision cache",
+          fp8: "fp8 e4m3 — 2× smaller, ~no loss (the serving default in vLLM/SGLang)",
+          int4: "int4 asymmetric + sink tokens — ~4× smaller",
+          int2: "int2 per channel-group + sinks — ~8× smaller, lossy",
+        };
+        return `<option value="${s}">${labels[s] || s}</option>`;
+      })
+      .join("");
+  }
+  const def = MODEL.default_kv_quant || "none";
+  sel.value = [...sel.options].some((o) => o.value === def) ? def : "none";
+  sel.onchange = () => {
+    if (specMode() !== "plain") {
+      setStatus("kv_quant applies to plain decoding only — switch Mode back to plain first");
+      sel.value = "none";
+      return;
+    }
+    if (!RECORD && $("gen-text").textContent) doGenerate();
+  };
+}
+function specMode() { return $("spec") ? $("spec").value : "plain"; }
 // display form of token t: the vocab string with the ByteLevel space marker
 // (Ġ = the leading space the tokenizer folded into the token) rendered as a
 // visible space, so "Ġthe" shows as " the" — what the text actually contains.

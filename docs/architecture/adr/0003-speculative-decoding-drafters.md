@@ -5,9 +5,10 @@
 
 ## Context
 
-The repo teaches production inference idioms (KV-step path, TurboQuant,
-sampling) with one real algorithm per feature. Speculative decoding is absent:
-generation is strictly one token per target forward in all four tracks.
+The repo teaches production inference idioms (KV-step path, KV-cache
+quantization, sampling) with one real algorithm per feature. Speculative
+decoding is absent: generation is strictly one token per target forward in
+all four tracks.
 
 Two 2026 methods define the design space:
 

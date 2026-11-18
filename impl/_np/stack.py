@@ -77,7 +77,7 @@ class DecoderStack:
         x: np.ndarray,
         position: int,
         cache: list[list[dict]],
-        quantize: bool = False,
+        kv_quant: str = "none",
         record: list[dict] | None = None,
     ) -> np.ndarray:
         """Process ONE new token through all blocks (KV-cached path).
@@ -87,8 +87,9 @@ class DecoderStack:
             caches' current depth).
         cache: the per-layer cache LISTS (one list of per-mixer dicts per
             block, in block order; ``cache[i][m]`` mutated in place).
-        quantize: TurboQuant switch (threaded to the attention mixer of
-            every block).
+        kv_quant: the KV-cache quantization scheme (threaded to the attention
+            mixer of every block; "none" = exact full-precision cache).
+
         record: optional per-block record list.
 
         Returns: (B, 1, D) the stack output for the new token. Contract:
@@ -99,7 +100,7 @@ class DecoderStack:
         out = x
         for i, block in enumerate(self.layers):
             out = block.forward_step(
-                out, position, cache[i], quantize=quantize, record=record[i] if record is not None else None
+                out, position, cache[i], kv_quant=kv_quant, record=record[i] if record is not None else None
             )
         return out
 

@@ -265,9 +265,9 @@ each step recomputes only the new token's K/V (one row appended per block):
   whole cache. No causal mask is needed: every cached row is in the past.
 
 - Code: the cache is the model's plain dict cache — `impl/_np/model.py` →
-  `NumPyModel.make_cache` / `forward_prefill` / `forward_step`; the 1-bit
-  TurboQuant quantization is inline in `impl/_np/attention.py` →
-  `_quantize_turbo`; sampling in `impl/_np/inference.py` → `TextGenerator`.
+  `NumPyModel.make_cache` / `forward_prefill` / `forward_step`; the lossy
+  KV-cache schemes (fp8/int4/int2) live in `impl/_np/kvquant.py`; sampling
+  in `impl/_np/inference.py` → `TextGenerator`.
 - Note: with a finite context window, the reference keeps the *full history* in the
   cache and only the last `context_length` tokens in the softmax window at prefill;
   the learning page documents this window → full-history semantics explicitly.

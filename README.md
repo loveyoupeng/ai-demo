@@ -185,8 +185,10 @@ the equation, the *why*, and the code anchor) lives in one place:
   biases.
 - **KV cache**: the per-token step path is exact (`forward_prefill` +
   `forward_step` == full re-forward). The generators step one token per
-  iteration (O(1) per step). TurboQuant (1-bit quantized cache) is wired as
-  an alternative with a parity-budget test.
+  iteration (O(1) per step). Lossy cache schemes (`fp8`/`int4`/`int2`,
+  `impl/_np/kvquant.py`) are wired behind `kv_quant=` with parity-budget
+  tests; `scripts/learning.py --kv-quant` switches the demo (default
+  `none` = exact).
 - **Speculative decoding** (ADR 0003): all four tracks expose
   `forward_chunk` — k tokens of K/V appended in one pass (the target's
   verification step). The drafter protocol (`shared/draft.py`) has two

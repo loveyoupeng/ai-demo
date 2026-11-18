@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from impl._np import kvquant
 from impl._np.init import xavier_uniform
 from impl._np.rope import RoPE
 from impl._np.softmax import stable_softmax
@@ -371,7 +372,7 @@ class MultiHeadAttention:
         return self.forward_state(x, position, causal=causal).unwrap()
 
     def forward_step(
-        self, x: np.ndarray, position: int, cache: dict, quantize: bool = False, record: dict | None = None
+        self, x: np.ndarray, position: int, cache: dict, kv_quant: str = "none", record: dict | None = None
     ) -> np.ndarray:
         """Process ONE new token against the cached K/V (per-token inference path).
 
@@ -385,24 +386,22 @@ class MultiHeadAttention:
             equal the cache's current depth (the cache holds positions
             0..position-1; the new token becomes position `position`).
         cache: per-layer dict. Two forms:
-            Naive (quantize=False): {"k": (B, G, t, hd), "v": (B, G, t, hd)}
+            Naive (kv_quant="none"): {"k": (B, G, t, hd), "v": (B, G, t, hd)}
                 K/V *per group* (GQA keeps the cache small: G heads, not H).
-            TurboQuant (quantize=True):
-                {"bits_k": (B, H, t, hd) int8, "scales_k": (B, H, t, 1) float,
-                 "bits_v": (B, H, t, hd) int8, "scales_v": (B, H, t, 1) float}
-                1-bit compressed K/V *per head* (H heads, after GQA repeat);
-                each scale is one scalar per (batch, head) per token-write.
+            Quantized (kv_quant="fp8"|"int4"|"int2"):
+                {"q_k": entry, "q_v": entry} — quantized K/V *per head* (H
+                heads, after GQA repeat); see impl/_np/kvquant.py for the
+                entry layout (codes + scales + raw sink pool).
             The dict is mutated in place: the new token's K/V are appended
             at the correct position before attention runs.
 
-        quantize: if False (default), append the full-precision K/V (naive
-            path, exact). If True, 1-bit quantize the new K/V (sign bits plus
-            one scalar scale per (batch, head) per token-write), append the (bits, scale) pair, then dequantize
-            the full cached tensor before attention — so the step attends
-            against the lossy cache. This is the documented TurboQuant
-            compression experiment; it degrades outputs (see the parity-
-            budget test) while shrinking the KV memory by ≈4x (int8 bits
-            plus one float scale per (batch, head) per token-write).
+        kv_quant: "none" (default) appends the full-precision K/V (naive
+            path, exact). "fp8"/"int4"/"int2" quantize the new K/V per head
+            (after GQA repeat), append the quantized entry, then dequantize
+            the full cached tensor before attention — the step attends
+            against the lossy cache (impl/_np/kvquant.py). Lossy schemes
+            degrade outputs (see the kv-quant parity-budget test) while
+            shrinking KV memory ≈2x (fp8) / ≈4x (int4) / ≈8x (int2).
         record: optional dict; when given it is filled with the same
             intermediate keys as ``forward_state``'s state (the
             learning-mode record) — the math is bit-identical either way.
@@ -411,8 +410,8 @@ class MultiHeadAttention:
         -------
         out : np.ndarray, shape (B, 1, D)
             The attention output for the new token (the residual-stream
-            delta for this position, pre-add). Contract: with quantize=
-            False, equal to the matching slice of ``forward`` over the
+            delta for this position, pre-add). Contract: with kv_quant=
+            "none", equal to the matching slice of ``forward`` over the
             same sequence (the exact KV-step guarantee, pinned by tests);
             the cache is left holding positions 0..position (mutated in
             place).
@@ -423,8 +422,8 @@ class MultiHeadAttention:
             k = (x @ Wk) → (B, G, 1, hd), RoPE at ``position``
             v = (x @ Wv) → (B, G, 1, hd)
             [naive]    append k, v to cache → (B, G, t+1, hd)
-            [turbo]    quantize k, v → bits/scale; append → (B, H, t+1, hd);
-                       dequantize full cache → k_r, v_r (B, H, t+1, hd)
+            [quant]    quantize k, v → entry; append; dequantize full cache
+                       → k_r, v_r (B, H, t+1, hd)
             [naive]    GQA repeat: k_r, v_r = repeat(cache, H // G, axis=1)
             scores = q @ k_r^T / sqrt(hd)             (B, H, 1, t+1)
             attn   = stable softmax(scores, axis=-1)
@@ -434,18 +433,20 @@ class MultiHeadAttention:
         batch_size, seq_len, _ = x.shape  # seq_len == 1 for a single step
         assert seq_len == 1, "forward_step expects exactly one token"
         # Fail fast on a cache/schema mismatch (the schema is the caller's
-        # quantize flag, carried out-of-band): a naive cache handed to a
-        # quantize=True step (or vice versa) would KeyError deep inside
+        # kv_quant flag, carried out-of-band): a naive cache handed to a
+        # quantized step (or vice versa) would KeyError deep inside
         # attention — here it gets a named error instead.
-        if quantize:
-            missing = [k for k in ("bits_k", "scales_k", "bits_v", "scales_v") if k not in cache]
-            assert not missing, f"quantize=True step needs a TurboQuant cache (missing keys: {missing})"
-        elif self.mla_latent_dim > 0:
+        if self.mla_latent_dim > 0:
+            # MLA mixers carry the latent c — never quantized, so the same
+            # {"c"} cache serves every kv_quant.
             missing = [k for k in ("c",) if k not in cache]
             assert not missing, f"MLA step needs a latent {{'c'}} cache (missing keys: {missing})"
+        elif kv_quant != "none":
+            missing = [k for k in ("q_k", "q_v") if k not in cache]
+            assert not missing, f"kv_quant={kv_quant!r} step needs a quantized cache (missing keys: {missing})"
         else:
             missing = [k for k in ("k", "v") if k not in cache]
-            assert not missing, f"quantize=False step needs a naive {{'k','v'}} cache (missing keys: {missing})"
+            assert not missing, f"kv_quant='none' step needs a naive {{'k','v'}} cache (missing keys: {missing})"
         H, G, hd = self.n_heads, self.n_groups, self.head_dim
         q_pre = x @ self.q_proj  # (B, 1, H*hd)
         if self.mla_latent_dim > 0:
@@ -469,24 +470,25 @@ class MultiHeadAttention:
         k = RoPE().forward_state(k_heads.transpose(0, 2, 1, 3), position, rope_dim=self.rope_dim).unwrap()
         k = k.transpose(0, 2, 1, 3)  # (B, G, 1, hd)
 
-        if quantize:
-            # TurboQuant: 1-bit quantize the new K/V (per head, after GQA
-            # repeat) and append the (bits, scale) pair to the cache.
+        if kv_quant != "none" and self.mla_latent_dim == 0:
+            # Capture the new token's raw per-group K/V BEFORE the
+            # dequantized full cache overwrites k_r/v_r — the record's
+            # k_group/v_group must stay the raw new-token K/V (what a
+            # prefill backfill would store).
+            k_grp_new, v_grp_new = k, v
+            # Quantize the new K/V per head (after GQA repeat), append to the
+            # entry, then dequantize the FULL cache for attention
+            # (impl/_np/kvquant.py).
             k_r = np.repeat(k, H // G, axis=1) if G != H else k  # (B, H, 1, hd)
             v_r = np.repeat(v, H // G, axis=1) if G != H else v  # (B, H, 1, hd)
-            k_bits, k_scale = self._quantize_turbo(k_r)
-            v_bits, v_scale = self._quantize_turbo(v_r)
-            cache["bits_k"] = np.concatenate([cache["bits_k"], k_bits], axis=2)  # (B, H, t+1, hd)
-            cache["scales_k"] = np.concatenate([cache["scales_k"], k_scale], axis=2)  # (B, H, t+1, 1)
-            cache["bits_v"] = np.concatenate([cache["bits_v"], v_bits], axis=2)  # (B, H, t+1, hd)
-            cache["scales_v"] = np.concatenate([cache["scales_v"], v_scale], axis=2)  # (B, H, t+1, 1)
-            # Dequantize the full cached tensor for attention (broadcast the
-            # per-head scale over the head-dim axis).
-            k_r = self._dequantize_turbo(cache["bits_k"], cache["scales_k"])  # (B, H, t+1, hd)
-            v_r = self._dequantize_turbo(cache["bits_v"], cache["scales_v"])  # (B, H, t+1, hd)
+            kvquant.append_token(kv_quant, cache["q_k"], k_r, position)
+            kvquant.append_token(kv_quant, cache["q_v"], v_r, position)
+            k_r = kvquant.dequantize_block(kv_quant, cache["q_k"])  # (B, H, t+1, hd)
+            v_r = kvquant.dequantize_block(kv_quant, cache["q_v"])  # (B, H, t+1, hd)
         else:
             # Naive: append the new K/V (per group) — or, in MLA mode, the
             # latent c only; K/V are reconstructed from the whole cache.
+            k_grp_new, v_grp_new = (None, None) if self.mla_latent_dim > 0 else (k, v)
             if self.mla_latent_dim > 0:
                 assert c_pre is not None
                 L = self.mla_latent_dim
@@ -556,8 +558,8 @@ class MultiHeadAttention:
                     "q": q,
                     "k": k_exp,
                     "v": v_exp,
-                    "k_group": k,
-                    "v_group": v,
+                    "k_group": k_grp_new,
+                    "v_group": v_grp_new,
                     "c_group": c_pre.reshape(batch_size, 1, 1, self.mla_latent_dim).transpose(0, 2, 1, 3)
                     if c_pre is not None
                     else None,
@@ -588,8 +590,7 @@ class MultiHeadAttention:
         The speculative-decoding workhorse: one call appends all c tokens'
         K/V and scores every chunk position in parallel — the target's
         verification pass over a draft block (see ADR 0003). Naive cache
-        only (TurboQuant is a single-token write path; verification demands
-        full precision so the lossless contract holds).
+        only (the lossless contract demands full precision).
 
         x: (B, c, D) the chunk's embeddings — c = the draft block's
             length (k candidate tokens proposed in one speculative round;
@@ -733,53 +734,6 @@ class MultiHeadAttention:
                 }
             )
         return out
-
-    @staticmethod
-    def _quantize_turbo(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """1-bit quantize a K or V tensor (per head, per token).
-
-        x: (B, H, 1, hd) — one token's K or V (after GQA repeat).
-        Returns:
-            bits: (B, H, 1, hd) int8 — 1 for positive, 0 for non-positive.
-            scale: (B, H, 1, 1) float — one scalar per (batch, head) per
-                token-write: mean(|x|) over the (1, hd) token vector.
-        Dequantize: bits.astype(float) * scale.
-        """
-        absolute_values = np.abs(x)  # (B, H, 1, hd)
-        scale = np.mean(absolute_values, axis=(-2, -1), keepdims=True)  # (B, H, 1, 1)
-        bits = (x > 0).astype(np.int8)  # (B, H, 1, hd)
-        return bits, scale
-
-    @staticmethod
-    def _quantize_turbo_full(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """1-bit quantize a K or V tensor over a WHOLE cached block (prefill).
-
-        The batched form of ``_quantize_turbo``: the same per-token write
-        rule — sign bits plus one scalar scale per (batch, head) per token,
-        mean(|x|) over that token's head-dim vector — applied to every
-        cached position at once instead of one append at a time.
-
-        x: (B, H, S, hd) — S tokens' K or V (after GQA repeat).
-        Returns:
-            bits: (B, H, S, hd) int8 — 1 for positive, 0 for non-positive.
-            scale: (B, H, S, 1) float.
-        Dequantize: bits.astype(float) * scale (broadcast over hd) —
-        identical to what per-token appends would have stored.
-        """
-        absolute_values = np.abs(x)  # (B, H, S, hd)
-        scale = np.mean(absolute_values, axis=-1, keepdims=True)  # (B, H, S, 1)
-        bits = (x > 0).astype(np.int8)  # (B, H, S, hd)
-        return bits, scale
-
-    @staticmethod
-    def _dequantize_turbo(bits: np.ndarray, scale: np.ndarray) -> np.ndarray:
-        """Dequantize 1-bit storage back to float.
-
-        bits: (B, H, t, hd) int8 (0 or 1). scale: (B, H, t, 1) float (one
-        scalar per head, broadcast over the head-dim axis).
-        Returns: bits.astype(float) * scale → (B, H, t, hd) float.
-        """
-        return bits.astype(scale.dtype) * scale
 
     def backward(self, dout: np.ndarray, x: np.ndarray, position: int = 0) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """Analytic backward (derivation in the class docstring).

@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 from tokenizers import Tokenizer
 
+from impl._np.kvquant import KV_QUANT_SCHEMES
 from impl._np.learning import generate_with_records
 from impl._np.model import NumPyModel
 from impl._np.softmax import stable_softmax
@@ -284,6 +285,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
     backend_models: dict[str, Any]  # backend → model of the default checkpoint
     model_dir: str  # the target checkpoint dir (sidecar drafters live under it)
     default_spec: str  # page default: plain | mtp | dspark (CLI decides; requests override)
+    default_kv_quant: str  # page default: none | fp8 | int4 | int2 (CLI decides; requests override)
     _drafter_cache: dict[str, Any]  # backend|family → drafter, lazily loaded
     variant_models: dict[str, Any]  # variant label ("dense"/"moe") → loaded model
     variant_dirs: dict[str, str]  # variant label → checkpoint dir (lazily loaded)
@@ -500,6 +502,8 @@ class _LearningHandler(BaseHTTPRequestHandler):
             "spec_available": self._spec_available(),
             "default_spec": self.default_spec if self.default_spec in self._spec_available() else "plain",
             "spec_block_size": self._spec_block_sizes(),
+            "kv_quant_schemes": list(KV_QUANT_SCHEMES),
+            "default_kv_quant": self.default_kv_quant if self.default_kv_quant in KV_QUANT_SCHEMES else "none",
             # model-variant registry: which checkpoints this page can serve,
             # and which of them are still training in a background bootstrap
             # (the page shows "training…" instead of failing the switch)
@@ -652,6 +656,27 @@ class _LearningHandler(BaseHTTPRequestHandler):
                 raise ValueError(f"k must be in [1, {cap}] for spec={spec!r}, got {k}")
         return spec, k
 
+    def _decode_kv_quant(self, body: dict, spec: str = "plain") -> str:
+        """Validate the KV-cache quantization request field (NumPy track only).
+
+        Returns the scheme ("none" | "fp8" | "int4" | "int2"); defaults to
+        the CLI/page default. Speculative modes stay exact (the lossless
+        contract needs a full-precision cache), so a non-"none" scheme
+        with spec != plain is rejected. GPU backends don't implement the
+        quantized cache in this repo — rejected with a clear message.
+        """
+        q = str(body.get("kv_quant") or self.default_kv_quant)
+        if q not in KV_QUANT_SCHEMES:
+            raise ValueError(f"kv_quant must be one of {KV_QUANT_SCHEMES}, got {q!r}")
+        if q != "none":
+            if spec != "plain":
+                raise ValueError(
+                    "kv_quant applies to plain decoding only — speculative verification needs the exact cache"
+                )
+            if not isinstance(self.model, NumPyModel):
+                raise ValueError("kv_quant schemes are implemented on the NumPy track only")
+        return q
+
     def _api_inference(self, body: dict) -> dict:
         # _per_variant FIRST: the Model dropdown must switch the checkpoint for
         # BOTH buttons (record already had it; without it "Generate" silently
@@ -711,15 +736,18 @@ class _LearningHandler(BaseHTTPRequestHandler):
         seq = list(ids)
         if isinstance(model, NumPyModel):
             logits, cache = model.forward_prefill(
-                np.array([seq[-ctx:]], dtype=np.int32), position=max(0, len(seq) - ctx)
+                np.array([seq[-ctx:]], dtype=np.int32),
+                model.make_cache(1, kv_quant=kv_quant),
+                position=max(0, len(seq) - ctx),
+                kv_quant=kv_quant,
             )
             logits = logits[0, -1].astype(np.float64)
             for _ in range(n):
                 tok = _sample(logits, t, k, rng, recent=seq[len(ids) :])
                 seq.append(tok)
-                logits = model.forward_step(np.array([[tok]], dtype=np.int32), len(seq) - 1, cache)
+                logits = model.forward_step(np.array([[tok]], dtype=np.int32), len(seq) - 1, cache, kv_quant=kv_quant)
                 logits = logits[0, 0].astype(np.float64)
-            last = model.forward_step(np.array([seq[-1:]], dtype=np.int32), len(seq) - 1, cache)
+            last = model.forward_step(np.array([seq[-1:]], dtype=np.int32), len(seq) - 1, cache, kv_quant=kv_quant)
             last = last[0, 0].astype(np.float64)
         else:
             # Non-Numpy backends: use the track's OWN generate_with_records
@@ -932,6 +960,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
         """
         ids, t, k, seed, skipped, backend = self._decode_params(body)
         spec, spec_k = self._decode_spec_params(body)
+        kv_quant = self._decode_kv_quant(body, spec)
         drafter = None
         if spec in ("mtp", "dspark"):
             if t is not None and not isinstance(self.model, NumPyModel):
@@ -951,6 +980,7 @@ class _LearningHandler(BaseHTTPRequestHandler):
                 spec=spec,
                 k=spec_k,
                 drafter=drafter,
+                kv_quant=kv_quant,
             )
         else:
             # Class name shown only for diagnostics; all four records share one schema.
@@ -1036,6 +1066,7 @@ def make_handler(
     tokenizer: Tokenizer | None = None,
     model_dir: str = "",
     default_spec: str = "plain",
+    default_kv_quant: str = "none",
     variant_dirs: dict[str, str] | None = None,
     default_variant: str = "dense",
 ) -> type[BaseHTTPRequestHandler]:
@@ -1054,6 +1085,7 @@ def make_handler(
             "backend_models": {},  # lazy per-(variant, backend) caches, populated on first request
             "model_dir": model_dir,
             "default_spec": default_spec,
+            "default_kv_quant": default_kv_quant,
             "_drafter_cache": {},
             "variant_models": {},  # lazy: variant label → loaded model (default backend)
             "_active_variant": None,  # set by _per_variant; None = the startup model
@@ -1073,6 +1105,7 @@ def start_server(
     tokenizer: Tokenizer | None = None,
     model_dir: str = "",
     default_spec: str = "plain",
+    default_kv_quant: str = "none",
     variant_dirs: dict[str, str] | None = None,
     default_variant: str = "dense",
 ) -> ThreadingHTTPServer:
@@ -1086,6 +1119,8 @@ def start_server(
     are loaded from when a request picks ``spec: mtp|dspark`` (ADR 0003).
     ``default_spec`` is the mode the page starts in (the CLI default is
     ``mtp`` when drafters exist; requests override per call).
+    ``default_kv_quant`` is the KV-cache quantization scheme the page starts
+    in ("none" = exact full-precision cache, the default; NumPy track only).
     """
     handler = make_handler(
         model,
@@ -1094,6 +1129,7 @@ def start_server(
         tokenizer=tokenizer,
         model_dir=model_dir,
         default_spec=default_spec,
+        default_kv_quant=default_kv_quant,
         variant_dirs=variant_dirs,
         default_variant=default_variant,
     )
